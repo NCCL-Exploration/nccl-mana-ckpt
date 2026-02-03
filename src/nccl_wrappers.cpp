@@ -45,7 +45,8 @@ ncclResult_t ncclSend(
     if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), g_world_rank, peer);
-        JASSERT(dmtcp::kvdb::request64(KVDBRequest::SET, NCCL_DB, key, 1)
+        // Mark pending: increment by 1
+        JASSERT(dmtcp::kvdb::request64(KVDBRequest::INCRBY, NCCL_DB, key, 1)
                 == KVDBResponse::SUCCESS);
     }
 
@@ -61,15 +62,14 @@ ncclResult_t ncclRecv(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_real_ncclRecv();
-    ncclResult_t result = real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
-
-    if (ckpt_pending && result == ncclSuccess) {
+    if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), peer, g_world_rank);
-        JASSERT(dmtcp::kvdb::request64(KVDBRequest::SET, NCCL_DB, key, 0)
+        // Clear pending: decrement by 1
+        JASSERT(dmtcp::kvdb::request64(KVDBRequest::INCRBY, NCCL_DB, key, -1)
                 == KVDBResponse::SUCCESS);
     }
 
-    return result;
+    init_real_ncclRecv();
+    return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
 }
