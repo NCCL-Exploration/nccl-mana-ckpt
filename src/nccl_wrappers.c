@@ -1,21 +1,17 @@
 #define _GNU_SOURCE
-#include "nccl_wrappers.h"
 #include <stdio.h>
 #include <dlfcn.h>
+#include <stdlib.h>
+#include "nccl_wrappers.h"
+#include "dmtcp_kvdb_c.h"
 
-#include "jassert.h"
-#include "kvdb.h"
-
-using dmtcp::kvdb::KVDBRequest;
-using dmtcp::kvdb::KVDBResponse;
+extern volatile int ckpt_pending; 
+#include <stdbool.h>
 
 extern int g_world_rank;
-extern volatile bool ckpt_pending;
 
-static const char *NCCL_DB = "/plugin/MANA/nccl-pending";
-
-ncclSend_t real_ncclSend = NULL;
-ncclRecv_t real_ncclRecv = NULL;
+static ncclSend_t real_ncclSend = NULL;
+static ncclRecv_t real_ncclRecv = NULL;
 
 void init_real_ncclSend() {
     if (real_ncclSend == NULL) {
@@ -45,9 +41,11 @@ ncclResult_t ncclSend(
     if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), g_world_rank, peer);
-        // Mark pending: increment by 1
-        JASSERT(dmtcp::kvdb::request64(KVDBRequest::INCRBY, NCCL_DB, key, 1)
-                == KVDBResponse::SUCCESS);
+        
+        if (!dmtcp_kvdb_incr(key, 1)) {
+             fprintf(stderr, "[NCCL-MANA] Failed to increment pending message count for %s\n", key);
+             abort();
+        }
     }
 
     init_real_ncclSend();
@@ -65,9 +63,10 @@ ncclResult_t ncclRecv(
     if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), peer, g_world_rank);
-        // Clear pending: decrement by 1
-        JASSERT(dmtcp::kvdb::request64(KVDBRequest::INCRBY, NCCL_DB, key, -1)
-                == KVDBResponse::SUCCESS);
+        if (!dmtcp_kvdb_incr(key, -1)) {
+             fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message count for %s\n", key);
+             abort();
+        }
     }
 
     init_real_ncclRecv();
