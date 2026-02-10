@@ -1,22 +1,24 @@
 #include <stdio.h>
 #include <nccl.h>
 #include "dmtcp.h"
+#include "dmtcp_kvdb_c.h"
+#include "nccl_wrappers.h"
+#include <stdlib.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <unistd.h>
 
 #define MAX_STREAMS 64
 
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 
-static ncclComm_t g_comm = NULL;
-static int g_nranks = 0;
-static int g_my_rank = -1;
+ncclComm_t g_comm = NULL;
+int g_nranks = 0;
+int g_my_rank = -1;
+volatile int ckpt_pending = 0;
 
-static ncclResult_t (*real_ncclSend)(const void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
-static ncclResult_t (*real_ncclRecv)(void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
-
-#define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
-
-static void add_stream(cudaStream_t stream) {
+void add_stream(cudaStream_t stream) {
     for (int i = 0; i < g_num_streams; i++) {
         if (g_active_streams[i] == stream) return;
     }
@@ -25,7 +27,7 @@ static void add_stream(cudaStream_t stream) {
     }
 }
 
-static void init_rank_info(ncclComm_t comm) {
+void init_rank_info(ncclComm_t comm) {
     if (g_my_rank == -1) {
         g_comm = comm;
         ncclCommUserRank(comm, &g_my_rank);
@@ -40,15 +42,20 @@ static void drain_streams() {
     }
 }
 
+// Key format: "src|dest"
+static void build_msg_key(char *buf, size_t len, int src, int dest) {
+    snprintf(buf, len, "%d|%d", src, dest);
+}
+
 static int all_drained() {
     for (int source = 0; source < g_nranks; source++) {
         if (source == g_my_rank) continue;
         
         char key[64];
-        snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
-        const char* valueStr = dmtcp_kv_get(key);
+        build_msg_key(key, sizeof(key), source, g_my_rank);
         
-        if (valueStr != NULL && strtoul(valueStr, NULL, 10) > 0) {
+        int64_t val = dmtcp_kvdb_get(key);
+        if (val > 0) {
             return 0;
         }
     }
@@ -58,36 +65,21 @@ static int all_drained() {
 static void drain_nccl() {
     printf("[NCCL Drain] Starting drain on rank %d\n", g_my_rank);
     
+    // Set pending flag to capture any late messages if threads are still running
+    ckpt_pending = 1;
+    __sync_synchronize();
+
     drain_streams();
     
     while (!all_drained()) {
-        // TODO: Handle pending messages
+        // TODO: Backoff?
+         usleep(1000);
     }
     
     printf("[NCCL Drain] Drain complete on rank %d\n", g_my_rank);
 }
 
-ncclResult_t ncclSend(const void* buff, size_t count, ncclDataType_t datatype,
-                      int peer, ncclComm_t comm, cudaStream_t stream) {
-    LOAD_SYM(ncclSend);
-    init_rank_info(comm);
-    add_stream(stream);
-    
-    // TODO: Increment kvdb count for "g_my_rank|peer"
-    
-    return real_ncclSend(buff, count, datatype, peer, comm, stream);
-}
-
-ncclResult_t ncclRecv(void* buff, size_t count, ncclDataType_t datatype,
-                      int peer, ncclComm_t comm, cudaStream_t stream) {
-    LOAD_SYM(ncclRecv);
-    init_rank_info(comm);
-    add_stream(stream);
-    
-    // TODO: Decrement kvdb count for "peer|g_my_rank"
-    
-    return real_ncclRecv(buff, count, datatype, peer, comm, stream);
-}
+// ncclSend and ncclRecv are now in nccl_wrappers.c
 
 static void
 checkpoint()
@@ -100,6 +92,7 @@ static void
 resume()
 {
   printf("*** The application has now been checkpointed. ***\n");
+  ckpt_pending = 0;
   g_num_streams = 0;
 }
 
@@ -107,6 +100,7 @@ static void
 restart()
 {
   printf("The application is now restarting from a checkpoint.\n");
+  ckpt_pending = 0;
   g_num_streams = 0;
   g_my_rank = -1;
   g_nranks = 0;

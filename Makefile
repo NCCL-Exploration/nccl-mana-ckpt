@@ -1,5 +1,7 @@
 CC = gcc
+CXX = g++
 CFLAGS = -O0 -ggdb -fPIC
+CXXFLAGS = -O0 -ggdb -fPIC
 
 # Modify if your DMTCP_ROOT is located elsewhere.
 ifndef DMTCP_ROOT
@@ -25,11 +27,20 @@ check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 	cd ${DMTCP_ROOT}/test; make dmtcp1
 
-${LIBNAME}.so: ${LIBNAME}.o
-	${LINK} -shared -o $@ $<
+${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o nccl_iprobe.o
+	${CXX} -shared -o $@ $^
 
 ${LIBNAME}.o: ${LIBNAME}.c
 	${CC} ${CFLAGS} -c -o $@ $<
+
+nccl_wrappers.o: src/nccl_wrappers.c
+	${CC} ${CFLAGS} -c -o $@ $<
+
+nccl_iprobe.o: src/nccl_iprobe.c
+	${CC} ${CFLAGS} -c -o $@ $<
+
+dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
+	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -c -o $@ $<
 
 clean:
 	rm -rf ${LIBNAME}.o ${LIBNAME}.so

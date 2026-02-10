@@ -21,7 +21,7 @@ ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* count) {
   if (msgCount > 0) {
       *flag = 1;
       *count = (size_t)msgCount;
-      printf("[NCCL-MANA] Probe: Found %ld messages from %d to %d\n", msgCount, source, myRank);
+      // printf("[NCCL-MANA] Probe: Found %ld messages from %d to %d\n", msgCount, source, myRank);
   } else {
       *flag = 0;
       *count = 0;
