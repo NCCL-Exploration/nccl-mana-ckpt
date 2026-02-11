@@ -1,67 +1,83 @@
-#include <stdio.h>
-#include <unistd.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <stdio.h>
 
-#define CUDACHECK(cmd) do {                         \
-  cudaError_t e = cmd;                              \
-  if( e != cudaSuccess ) {                          \
-    printf("Failed: Cuda error %s:%d '%s'\n",       \
-        __FILE__,__LINE__,cudaGetErrorString(e));   \
-    exit(EXIT_FAILURE);                             \
-  }                                                 \
-} while(0)
+#define CUDA_CHECK(cmd)                                                        \
+    do {                                                                       \
+        cudaError_t e = cmd;                                                   \
+        if (e != cudaSuccess) {                                                \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   cudaGetErrorString(e));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
 
-#define NCCLCHECK(cmd) do {                         \
-  ncclResult_t r = cmd;                             \
-  if (r!= ncclSuccess) {                            \
-    printf("Failed, NCCL error %s:%d '%s'\n",       \
-        __FILE__,__LINE__,ncclGetErrorString(r));   \
-    exit(EXIT_FAILURE);                             \
-  }                                                 \
-} while(0)
+#define NCCL_CHECK(cmd)                                                        \
+    do {                                                                       \
+        ncclResult_t r = cmd;                                                  \
+        if (r != ncclSuccess) {                                                \
+            printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   ncclGetErrorString(r));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
 
-int main(int argc, char* argv[]) {
-  int nRanks = 1;
-  int myRank = 0;
+int main()
+{
+    int size = 32;
+    int devId = 0;
 
-  ncclUniqueId id;
-  ncclComm_t comm;
-  cudaStream_t stream;
+    // Set device
+    CUDA_CHECK(cudaSetDevice(devId));
 
-  printf("Initializing NCCL...\n");
-  NCCLCHECK(ncclGetUniqueId(&id));
-  NCCLCHECK(ncclCommInitRank(&comm, nRanks, id, myRank));
-  CUDACHECK(cudaStreamCreate(&stream));
+    // Allocate device buffers
+    float *sendbuf, *recvbuf;
+    CUDA_CHECK(cudaMalloc(&sendbuf, size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&recvbuf, size * sizeof(float)));
 
-  size_t count = 1024 * 1024;
-  float *sendbuff, *recvbuff;
-  CUDACHECK(cudaMalloc(&sendbuff, count * sizeof(float)));
-  CUDACHECK(cudaMalloc(&recvbuff, count * sizeof(float)));
+    // Initialize send buffer with some data
+    float hostbuf[32];
+    for (int i = 0; i < size; i++) hostbuf[i] = i + 1.0f;
+    CUDA_CHECK(cudaMemcpy(sendbuf, hostbuf, size * sizeof(float),
+                          cudaMemcpyHostToDevice));
 
-  // Initialize data
-  CUDACHECK(cudaMemset(sendbuff, 1, count * sizeof(float)));
-  CUDACHECK(cudaMemset(recvbuff, 0, count * sizeof(float)));
+    // Create NCCL communicator for single device
+    ncclComm_t comm;
+    NCCL_CHECK(ncclCommInitAll(&comm, 1, &devId));
+    // sleep(60);
 
-  printf("Starting loop...\n");
-  for (int i = 0; i < 1000; i++) {
-    if (i % 5 == 0) {
-      printf("Iteration %d\n", i);
-      fflush(stdout); // flush for log visibility
-    }
-    
-    NCCLCHECK(ncclAllReduce((const void*)sendbuff, (void*)recvbuff, count, ncclFloat, ncclSum, comm, stream));
-    CUDACHECK(cudaStreamSynchronize(stream));
-    
-    sleep(1);
-  }
+    // Create CUDA stream
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
 
-  CUDACHECK(cudaFree(sendbuff));
-  CUDACHECK(cudaFree(recvbuff));
-  NCCLCHECK(ncclCommDestroy(comm));
-  CUDACHECK(cudaStreamDestroy(stream));
+    // Perform AllReduce (sum) - with single device, output equals input
+    NCCL_CHECK(ncclAllReduce(sendbuf, recvbuf, size, ncclFloat, ncclSum, comm,
+                             stream));
 
-  printf("Test Finished\n");
-  return 0;
+    // Wait for operation to complete
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Verify result
+    float result[32];
+    CUDA_CHECK(cudaMemcpy(result, recvbuf, size * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    printf("NCCL Hello World!\n");
+    sleep(40);
+    printf("Input:  [%.1f, %.1f, %.1f, ...]\n", hostbuf[0], hostbuf[1],
+           hostbuf[2]);
+    printf("Output: [%.1f, %.1f, %.1f, ...]\n", result[0], result[1],
+           result[2]);
+
+    // Cleanup
+    CUDA_CHECK(cudaFree(sendbuf));
+    CUDA_CHECK(cudaFree(recvbuf));
+    NCCL_CHECK(ncclCommDestroy(comm));
+    CUDA_CHECK(cudaStreamDestroy(stream));
+
+    printf("Success!\n");
+    return 0;
 }
+
