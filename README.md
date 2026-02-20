@@ -39,5 +39,5 @@ make restart
 Kill coordinator and running process.
 
 ```sh
-make restart
+make quit
 ```
