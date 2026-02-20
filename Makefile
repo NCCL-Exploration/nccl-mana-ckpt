@@ -1,7 +1,7 @@
-CC = gcc
-CXX = g++
-CFLAGS = -O0 -ggdb -fPIC
-CXXFLAGS = -O0 -ggdb -fPIC
+CC = nvcc
+CXX = nvcc
+CFLAGS = -O0 -g -Xcompiler -fPIC
+CXXFLAGS = -O0 -g -Xcompiler -fPIC
 
 # Modify if your DMTCP_ROOT is located elsewhere.
 ifndef DMTCP_ROOT
@@ -9,16 +9,17 @@ ifndef DMTCP_ROOT
 endif
 
 LIBNAME = src/libncclplugin
+NCCL_INCLUDE = ./include
 DMTCP_INCLUDE = ${DMTCP_ROOT}/include
 LINK = ${CC}
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE}
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
 
 check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	# Kill an old coordinator on this port if present, just in case.
-	@ ${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	# Note that full path of plugin (using $$PWD in this case) is required.
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
@@ -43,4 +44,4 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -c -o $@ $<
 
 clean:
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so
+	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_restart_script*.sh *.o
