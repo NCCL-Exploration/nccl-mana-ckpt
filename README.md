@@ -6,6 +6,13 @@
 echo "cd dmtcp && ./configure && make" | bash
 ```
 
+If the DMTCP submodule is not installed:
+
+```sh
+git submodule update --init --recursive
+```
+
+
 ## Test Plugin
 
 ```sh
