@@ -1,6 +1,5 @@
 #include "dmtcp_kvdb_c.h"
 #include "kvdb.h"
-#include "jassert.h"
 #include <string>
 
 using dmtcp::kvdb::KVDBRequest;
