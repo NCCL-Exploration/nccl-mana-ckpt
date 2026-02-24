@@ -8,13 +8,11 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+// Minimal local definition of DMTCP's Area/ProcMapsArea to avoid dependency on config.h
 #define FILENAMESIZE 1024
 typedef struct {
-  char padding1[88]; // skip addr, endAddr, size, offset, prot, flags, dev, inode, etc.
-  off_t mmapFileSize;
-  uint64_t properties;
+  char padding[88]; // Offset to name is exactly 88 bytes in DMTCP ProcMapsArea
   char name[FILENAMESIZE];
-  char padding2[4096 - 88 - 16 - FILENAMESIZE];
 } LocalArea;
 
 #define MAX_STREAMS 64
