@@ -8,6 +8,15 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#define FILENAMESIZE 1024
+typedef struct {
+  char padding1[88]; // skip addr, endAddr, size, offset, prot, flags, dev, inode, etc.
+  off_t mmapFileSize;
+  uint64_t properties;
+  char name[FILENAMESIZE];
+  char padding2[4096 - 88 - 16 - FILENAMESIZE];
+} LocalArea;
+
 #define MAX_STREAMS 64
 
 static cudaStream_t g_active_streams[MAX_STREAMS];
@@ -17,6 +26,22 @@ ncclComm_t g_comm = NULL;
 int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
+
+// skip problematic memory region?
+int dmtcp_skip_memory_region_ckpting(LocalArea *area) {
+    if (area->name[0] == '\0') return 0;
+
+    // Skip NVIDIA device files and related mappings that cause restore failures
+    if (strstr(area->name, "/dev/nvidia") ||
+        strstr(area->name, "nvidia_") ||
+        strstr(area->name, "/dev/uverbs") ||
+        strstr(area->name, "/dev/zero (deleted)")) {
+        printf("[NCCL-MANA] Skipping checkpoint of memory region: %s\n", area->name);
+        return 1;
+    }
+    
+    return 0;
+}
 
 void add_stream(cudaStream_t stream) {
     for (int i = 0; i < g_num_streams; i++) {
