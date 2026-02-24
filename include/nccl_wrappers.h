@@ -19,7 +19,7 @@ void init_rank_info(ncclComm_t comm);
 
 // New wrapper functions
 ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
-ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, int* devList);
+ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, const int* devList);
 ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* count);
 
 #ifdef __cplusplus
