@@ -11,6 +11,8 @@ DRIVER = nccl_test_driver
 PORT = 7781
 INTERVAL = 0 # Manual checkpointing for precise control
 
+export NCCL_DEBUG=WARN
+
 # Default parameters for tests
 MSGS ?= 5
 SIZE ?= 1024 # in KB
