@@ -8,6 +8,13 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+// Minimal local definition of DMTCP's Area/ProcMapsArea to avoid dependency on config.h
+#define FILENAMESIZE 1024
+typedef struct {
+  char padding[88]; // Offset to name is exactly 88 bytes in DMTCP ProcMapsArea
+  char name[FILENAMESIZE];
+} LocalArea;
+
 #define MAX_STREAMS 64
 
 static cudaStream_t g_active_streams[MAX_STREAMS];
@@ -17,6 +24,22 @@ ncclComm_t g_comm = NULL;
 int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
+
+// skip problematic memory region?
+int dmtcp_skip_memory_region_ckpting(LocalArea *area) {
+    if (area->name[0] == '\0') return 0;
+
+    // Skip NVIDIA device files and related mappings that cause restore failures
+    if (strstr(area->name, "/dev/nvidia") ||
+        strstr(area->name, "nvidia_") ||
+        strstr(area->name, "/dev/uverbs") ||
+        strstr(area->name, "/dev/zero (deleted)")) {
+        printf("[NCCL-MANA] Skipping checkpoint of memory region: %s\n", area->name);
+        return 1;
+    }
+    
+    return 0;
+}
 
 void add_stream(cudaStream_t stream) {
     for (int i = 0; i < g_num_streams; i++) {

@@ -11,12 +11,32 @@ extern volatile int ckpt_pending;
 static ncclResult_t (*real_ncclSend)(const void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclRecv)(void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclAllReduce)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t) = NULL;
+static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int) = NULL;
+static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
 // Key format: "src|dest"
 static void build_msg_key(char *buf, size_t len, int src, int dest) {
     snprintf(buf, len, "%d|%d", src, dest);
+}
+
+ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) {
+    LOAD_SYM(ncclCommInitRank);
+    ncclResult_t res = real_ncclCommInitRank(comm, nranks, commId, rank);
+    if (res == ncclSuccess) {
+        init_rank_info(*comm);
+    }
+    return res;
+}
+
+ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, const int* devList) {
+    LOAD_SYM(ncclCommInitAll);
+    ncclResult_t res = real_ncclCommInitAll(comm, nGpus, devList);
+    if (res == ncclSuccess) {
+        init_rank_info(*comm);
+    }
+    return res;
 }
 
 ncclResult_t ncclSend(

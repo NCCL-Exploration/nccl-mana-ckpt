@@ -25,6 +25,17 @@ check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
 	  --with-plugin $$PWD/${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 
+nccl_check: ${LIBNAME}.so tests/single_gpu_test
+	# Kill old coordinator
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	# Run the actual NCCL test
+	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
+	  --with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
+
+tests/single_gpu_test: tests/single_gpu_test.cpp
+	nvcc ${CFLAGS} -o $@ $<
+
 ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 	cd ${DMTCP_ROOT}/test; make dmtcp1
 
