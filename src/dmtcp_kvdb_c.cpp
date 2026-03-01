@@ -1,25 +1,23 @@
 #include "dmtcp_kvdb_c.h"
-#include "kvdb.h"
+#include <map>
 #include <string>
 
-using dmtcp::kvdb::KVDBRequest;
-using dmtcp::kvdb::KVDBResponse;
-
-static const char *NCCL_DB = "/plugin/MANA/nccl-pending";
+// Local in-process key-value store.
+// Replaces DMTCP's coordinator-based KVDB, which is not available in CRAC.
+// This is functionally equivalent for single-node / single-process tests.
+static std::map<std::string, int64_t> g_kvdb;
 
 extern "C" int dmtcp_kvdb_incr(const char *key, int64_t val) {
     if (!key) return 0;
-    // NCCL_DB path must match what was used in original nccl_wrappers.cpp
-    // Original used "/plugin/MANA/nccl-pending"
-    return (dmtcp::kvdb::request64(KVDBRequest::INCRBY, NCCL_DB, key, val) == KVDBResponse::SUCCESS) ? 1 : 0;
+    g_kvdb[key] += val;
+    return 1;
 }
 
 extern "C" int64_t dmtcp_kvdb_get(const char *key) {
     if (!key) return 0;
-    int64_t val = 0;
-    
-    if (dmtcp::kvdb::get64(NCCL_DB, key, &val) == KVDBResponse::SUCCESS) {
-        return val;
+    auto it = g_kvdb.find(key);
+    if (it != g_kvdb.end()) {
+        return it->second;
     }
     return 0;
 }
