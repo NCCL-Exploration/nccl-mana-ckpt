@@ -1,11 +1,13 @@
 CC = nvcc
 CFLAGS = -O3 -g -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib -I../include
 
-DMTCP_ROOT = ../dmtcp
+DMTCP_ROOT ?= $(HOME)/crac
 DMTCP_LAUNCH = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
-PLUGIN = ../src/libncclplugin.so
+NCCL_PLUGIN = ../src/libncclplugin.so
+CRAC_PLUGIN = $(DMTCP_ROOT)/lib/dmtcp/libdmtcp_crac.so
+PLUGIN = $(NCCL_PLUGIN):$(CRAC_PLUGIN)
 
 DRIVER = nccl_test_driver
 PORT = 7781
