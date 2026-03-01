@@ -3,10 +3,12 @@ CXX = nvcc
 CFLAGS = -O0 -g -Xcompiler -fPIC
 CXXFLAGS = -O0 -g -Xcompiler -fPIC
 
-# Modify if your DMTCP_ROOT is located elsewhere.
+# Set DMTCP_ROOT to your CRAC installation.
 ifndef DMTCP_ROOT
-  DMTCP_ROOT=./dmtcp
+  DMTCP_ROOT=$(HOME)/crac
 endif
+
+CRAC_PLUGIN = ${DMTCP_ROOT}/lib/dmtcp/libdmtcp_crac.so
 
 LIBNAME = src/libncclplugin
 NCCL_INCLUDE = ./include
@@ -23,15 +25,15 @@ check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	# Note that full path of plugin (using $$PWD in this case) is required.
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
-	  --with-plugin $$PWD/${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
+	  --with-plugin $$PWD/${LIBNAME}.so:${CRAC_PLUGIN} ${DMTCP_ROOT}/test/dmtcp1
 
 nccl_check: ${LIBNAME}.so tests/single_gpu_test
 	# Kill old coordinator
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	# Run the actual NCCL test
-	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
-	  --with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
+	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
+	  --with-plugin $$PWD/${LIBNAME}.so:${CRAC_PLUGIN} ./tests/single_gpu_test
 
 tests/single_gpu_test: tests/single_gpu_test.cpp
 	nvcc ${CFLAGS} -o $@ $<
