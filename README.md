@@ -1,7 +1,7 @@
 # nccl-mana-ckpt
 
-An NCCL checkpointing plugin for
-[DMTCP-CRAC](https://github.com/DMTCP-CRAC/CRAC-early-development).
+An NCCL checkpointing plugin for [DMTCP](https://github.com/dmtcp/dmtcp) +
+[CRAC](https://github.com/xuyao0127/crac).
 Intercepts NCCL collective and point-to-point calls, tracks CUDA streams and
 in-flight messages, and drains outstanding operations before a DMTCP checkpoint
 is taken.
@@ -13,7 +13,8 @@ is taken.
 | **NVIDIA GPU + drivers** | Required for CUDA / NCCL |
 | **CUDA Toolkit** (`nvcc`) | Used as the compiler (`CC` / `CXX` in the Makefiles) |
 | **NCCL** | Link path is hardcoded — see [NCCL Path](#nccl-library-path) below |
-| **DMTCP-CRAC** | Must be built separately — see [Building CRAC](#1-build-dmtcp-crac) |
+| **DMTCP** | Official repo: [dmtcp/dmtcp](https://github.com/dmtcp/dmtcp) |
+| **CRAC** | Plugin for CUDA support: [xuyao0127/crac](https://github.com/xuyao0127/crac) |
 | **MPI** | Only needed for `tests/multiproc.c` |
 | Standard build tools | `make`, `gcc` / `g++`, `git` |
 
@@ -33,53 +34,40 @@ building.
 
 ## Quick Start
 
-### 1. Build DMTCP-CRAC
+### 1. Build DMTCP
 
-Clone and build CRAC separately (outside this repo):
+Clone and build DMTCP (official repository):
 
 ```bash
 cd ~
-git clone https://github.com/DMTCP-CRAC/CRAC-early-development.git crac
-cd crac
+git clone https://github.com/dmtcp/dmtcp.git
+cd dmtcp
 ./configure
 make -j$(nproc)
 ```
 
-This produces:
-- `~/crac/bin/dmtcp_launch`, `dmtcp_command`, `dmtcp_restart` — the DMTCP
-  binaries
-- `~/crac/lib/dmtcp/libdmtcp_crac.so` — the **CRAC split-CUDA plugin**
-  (required for GPU checkpointing)
+### 2. Build CRAC Plugin
 
-> **Note:** If the CRAC build fails with `_STAT_VER` errors on newer glibc
-> (2.33+), add the following before the `#undef` block in
-> `plugin/pathvirt/pathvirt.cpp`:
-> ```c
-> #ifndef _STAT_VER
-> # if defined(__x86_64__) || defined(__aarch64__)
-> #  define _STAT_VER 1
-> # elif defined(__i386__)
-> #  define _STAT_VER 3
-> # else
-> #  define _STAT_VER 0
-> # endif
-> #endif
-> ```
+Clone and build the CRAC CUDA plugin:
 
-### 2. Clone This Repository
+```bash
+cd ~
+git clone https://github.com/xuyao0127/crac.git
+cd crac
+make DMTCP_ROOT=~/dmtcp
+```
+
+This produces `~/crac/libdmtcp_crac.so`.
+
+### 3. Build the NCCL Plugin (This Repository)
 
 ```bash
 git clone git@github.com:NCCL-Exploration/nccl-mana-ckpt.git
 cd nccl-mana-ckpt
-```
 
-### 3. Build the NCCL Plugin
-
-Set `DMTCP_ROOT` to your CRAC installation (for the include headers):
-
-```bash
+# Set DMTCP_ROOT to your DMTCP installation
 make clean
-make DMTCP_ROOT=~/crac
+make DMTCP_ROOT=~/dmtcp
 ```
 
 This produces `src/libncclplugin.so`.
@@ -90,7 +78,7 @@ This produces `src/libncclplugin.so`.
 
 ### Important: Loading Both Plugins
 
-When running under DMTCP-CRAC with CUDA/NCCL, you must load **two** plugins:
+When running under DMTCP with CUDA/NCCL, you must load **two** plugins:
 
 1. **`libncclplugin.so`** — this project's NCCL checkpoint plugin
 2. **`libdmtcp_crac.so`** — CRAC's split-CUDA plugin (handles GPU memory
@@ -106,9 +94,9 @@ cd tests
 # Build the test
 nvcc -O3 -g -lnccl -L/path/to/nccl/lib -o single_gpu_test single_gpu_test.cpp
 
-# Launch under DMTCP-CRAC with both plugins
-~/crac/bin/dmtcp_launch --interval 10 \
-  --with-plugin $PWD/../src/libncclplugin.so:~/crac/lib/dmtcp/libdmtcp_crac.so \
+# Launch under DMTCP with both plugins
+~/dmtcp/bin/dmtcp_launch --interval 10 \
+  --with-plugin $PWD/../src/libncclplugin.so:~/crac/libdmtcp_crac.so \
   ./single_gpu_test
 ```
 
@@ -123,7 +111,7 @@ execution.
 CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
 
 # Restart
-~/crac/bin/dmtcp_restart --coord-port 7781 $CKPT
+~/dmtcp/bin/dmtcp_restart --coord-port 7781 $CKPT
 ```
 
 ### Run the Automated Test Suite
@@ -132,17 +120,17 @@ CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
 cd tests
 
 # Build the test driver
-make DMTCP_ROOT=~/crac
+make DMTCP_ROOT=~/dmtcp
 
 # Run all 5 test criteria:
-make test_all DMTCP_ROOT=~/crac
+make test_all DMTCP_ROOT=~/dmtcp
 
 # Or individual tests:
-make test1 DMTCP_ROOT=~/crac   # Basic P2P — no checkpoint
-make test2 DMTCP_ROOT=~/crac   # Checkpoint after messages complete
-make test3 DMTCP_ROOT=~/crac   # Checkpoint before NCCL init
-make test4 DMTCP_ROOT=~/crac   # Checkpoint with 1 message in-transit
-make test5 DMTCP_ROOT=~/crac   # Checkpoint with N messages in-transit
+make test1 DMTCP_ROOT=~/dmtcp   # Basic P2P — no checkpoint
+make test2 DMTCP_ROOT=~/dmtcp   # Checkpoint after messages complete
+make test3 DMTCP_ROOT=~/dmtcp   # Checkpoint before NCCL init
+make test4 DMTCP_ROOT=~/dmtcp   # Checkpoint with 1 message in-transit
+make test5 DMTCP_ROOT=~/dmtcp   # Checkpoint with N messages in-transit
 ```
 
 > **Note:** The tests Makefile currently does not load `libdmtcp_crac.so`
@@ -214,12 +202,12 @@ memory and fail.
 
 ```bash
 # Correct — two plugins, colon-separated:
-~/crac/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:~/crac/lib/dmtcp/libdmtcp_crac.so \
+~/dmtcp/bin/dmtcp_launch \
+  --with-plugin $PWD/src/libncclplugin.so:~/crac/libdmtcp_crac.so \
   ./your_test
 
 # Wrong — only the NCCL plugin:
-~/crac/bin/dmtcp_launch \
+~/dmtcp/bin/dmtcp_launch \
   --with-plugin $PWD/src/libncclplugin.so \
   ./your_test
 ```
@@ -233,16 +221,11 @@ find / -name "libnccl.so*" 2>/dev/null
 # Update -L path in Makefile (line 18) and tests/Makefile (line 2).
 ```
 
-### CRAC Build Fails (`_STAT_VER` or `JASSERT` errors)
-
-These are known compatibility issues with CRAC on newer Linux distributions
-(glibc 2.33+). See the build note in [Step 1](#1-build-dmtcp-crac) above.
-
 ### Coordinator Connection Failures
 
 ```bash
 # Kill stale coordinators:
-~/crac/bin/dmtcp_command --quit --coord-port 7781 2>/dev/null
+~/dmtcp/bin/dmtcp_command --quit --coord-port 7781 2>/dev/null
 
 # Check if port 7781 is already in use:
 ss -tlnp | grep 7781
