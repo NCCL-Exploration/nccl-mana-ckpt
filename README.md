@@ -13,8 +13,8 @@ is taken.
 | **NVIDIA GPU + drivers** | Required for CUDA / NCCL |
 | **CUDA Toolkit** (`nvcc`) | Used as the compiler (`CC` / `CXX` in the Makefiles) |
 | **NCCL** | Link path is hardcoded — see [NCCL Path](#nccl-library-path) below |
-| **DMTCP** | Official repo: [dmtcp/dmtcp](https://github.com/dmtcp/dmtcp) |
-| **CRAC** | Plugin for CUDA support: [xuyao0127/crac](https://github.com/xuyao0127/crac) |
+| **DMTCP** (submodule) | Official repo: [dmtcp/dmtcp](https://github.com/dmtcp/dmtcp) |
+| **CRAC** (submodule) | Plugin for CUDA support: [xuyao0127/crac](https://github.com/xuyao0127/crac) |
 | **MPI** | Only needed for `tests/multiproc.c` |
 | Standard build tools | `make`, `gcc` / `g++`, `git` |
 
@@ -34,43 +34,39 @@ building.
 
 ## Quick Start
 
-### 1. Build DMTCP
-
-Clone and build DMTCP (official repository):
-
-```bash
-cd ~
-git clone https://github.com/dmtcp/dmtcp.git
-cd dmtcp
-./configure
-make -j$(nproc)
-```
-
-### 2. Build CRAC Plugin
-
-Clone and build the CRAC CUDA plugin:
-
-```bash
-cd ~
-git clone https://github.com/xuyao0127/crac.git
-cd crac
-make DMTCP_ROOT=~/dmtcp
-```
-
-This produces `~/crac/libdmtcp_crac.so`.
-
-### 3. Build the NCCL Plugin (This Repository)
+### 1. Clone the repository
 
 ```bash
 git clone git@github.com:NCCL-Exploration/nccl-mana-ckpt.git
 cd nccl-mana-ckpt
+```
 
-# Set DMTCP_ROOT to your DMTCP installation
-make clean
-make DMTCP_ROOT=~/dmtcp
+### 2. Update submodules
+
+```bash
+git submodule update --init --recursive --remote
+```
+
+### 3. Optionally, Build the Plugin
+```bash
+make
+```
+
+OR
+
+```bash
+make plugin
 ```
 
 This produces `src/libncclplugin.so`.
+
+### 3. Run Single GPU Test
+
+```bash
+make nccl_check
+```
+
+This should make any dependencies (`dmtcp`, `crac`, and/or `libncclplugin.so`) before running the test.
 
 ---
 
@@ -141,7 +137,7 @@ make test5 DMTCP_ROOT=~/dmtcp   # Checkpoint with N messages in-transit
 
 ```bash
 # Kill the DMTCP coordinator and stale processes:
-make quit
+make kill
 
 # Remove build artifacts and checkpoint files:
 make clean
@@ -164,8 +160,7 @@ nccl-mana-ckpt/
 ├── tests/
 │   ├── Makefile              # Test orchestration (test1–5, checkpoint, restart)
 │   ├── nccl_test_driver.cpp  # Main test driver with 5 checkpoint modes
-│   ├── single_gpu_test.cpp   # Simple single-GPU AllReduce test
-│   ├── hello_world.c         # Minimal NCCL example
+│   ├── single_gpu_test.cpp   # Simple single-GPU example
 │   ├── multiproc.c           # Multi-rank MPI+NCCL test
 │   └── test_drain.cpp        # In-flight drain sketch (not runnable)
 ├── Makefile                  # Root build: plugin .so + sanity checks

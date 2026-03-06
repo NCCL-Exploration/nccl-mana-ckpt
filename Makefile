@@ -22,6 +22,8 @@ DEMO_PORT=7781
 
 override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl
 
+plugin: src/libncclplugin.so
+
 check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
@@ -66,4 +68,6 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -c -o $@ $<
 
 clean:
+	cd ${CRAC_ROOT} && make clean
+	cd tests && make clean
 	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_restart_script*.sh *.o
