@@ -65,7 +65,7 @@ int main()
                           cudaMemcpyDeviceToHost));
 
     printf("NCCL Hello World!\n");
-    sleep(40);
+    sleep(10);
     printf("Input:  [%.1f, %.1f, %.1f, ...]\n", hostbuf[0], hostbuf[1],
            hostbuf[2]);
     printf("Output: [%.1f, %.1f, %.1f, ...]\n", result[0], result[1],

@@ -1,3 +1,7 @@
 [submodule "dmtcp"]
 	path = dmtcp
-	url = https://github.com/DMTCP-CRAC/CRAC-early-development.git
+	url = https://github.com/dmtcp/dmtcp
+
+[submodule "crac"]
+	path = crac
+	url = https://github.com/xuyao0127/crac

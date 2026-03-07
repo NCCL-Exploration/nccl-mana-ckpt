@@ -1,12 +1,15 @@
 CC = nvcc
 CFLAGS = -O3 -g -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib -I../include
 
-DMTCP_ROOT ?= $(HOME)/crac
+DMTCP_ROOT ?= ../dmtcp
+CRAC_ROOT ?= ../crac
+
 DMTCP_LAUNCH = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
+
 NCCL_PLUGIN = ../src/libncclplugin.so
-CRAC_PLUGIN = $(DMTCP_ROOT)/lib/dmtcp/libdmtcp_crac.so
+CRAC_PLUGIN = $(CRAC_ROOT)/libdmtcp_crac.so
 PLUGIN = $(NCCL_PLUGIN):$(CRAC_PLUGIN)
 
 DRIVER = nccl_test_driver
@@ -87,12 +90,12 @@ endef
 $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
-quit:
+kill:
 	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
 	-killall -9 $(DRIVER) 2>/dev/null || true
 
 clean:
-	rm -f $(DRIVER) single_gpu_test hello_world tests_drain multiproc
+	rm -f $(DRIVER) single_gpu_test tests_drain multiproc
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 test5 quit clean
+.PHONY: all test_all test1 test2 test3 test4 test5 kill clean
