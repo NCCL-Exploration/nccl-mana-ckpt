@@ -47,7 +47,7 @@ ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 	cd ${DMTCP_ROOT}/test && make dmtcp1
 
 ${DMTCP_ROOT}/bin:
-	cd ${DMTCP_ROOT} && ./configure && make -j
+	cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
 
 ${CRAC_ROOT}/libdmtcp_crac.so:
 	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}

@@ -65,7 +65,9 @@ int main()
                           cudaMemcpyDeviceToHost));
 
     printf("NCCL Hello World!\n");
+    printf("Sleeping...\n");
     sleep(10);
+    printf("Woke up!\n");
     printf("Input:  [%.1f, %.1f, %.1f, ...]\n", hostbuf[0], hostbuf[1],
            hostbuf[2]);
     printf("Output: [%.1f, %.1f, %.1f, ...]\n", result[0], result[1],
@@ -76,6 +78,12 @@ int main()
     CUDA_CHECK(cudaFree(recvbuf));
     NCCL_CHECK(ncclCommDestroy(comm));
     CUDA_CHECK(cudaStreamDestroy(stream));
+
+    // float result2[32];
+    // CUDA_CHECK(cudaMemcpy(result2, recvbuf, size * sizeof(float),
+    //                       cudaMemcpyDeviceToHost));
+    // printf("Output Result 2: [%.1f, %.1f, %.1f, ...]\n", result2[0], result2[1],
+    //        result2[2]);
 
     printf("Success!\n");
     return 0;
