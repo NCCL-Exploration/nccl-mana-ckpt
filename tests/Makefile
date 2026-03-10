@@ -52,13 +52,13 @@ test4: $(DRIVER)
 
 # Criteria 5: Multi Msg In-Transit
 test5: $(DRIVER)
-	@$(call run_test,5,"Criteria 5: Multi Msg In-Transit",10,$(MSGS),$(SIZE))
+	@$(call run_test,4,"Criteria 5: Multi Msg In-Transit",10,$(MSGS),$(SIZE))
 
 # --- Helper Macros ---
 
 define run_test
 	echo -e "${GREEN}==> Running $(2) (Mode $(1)) <==${NC}"; \
-	$(MAKE) quit; \
+	$(MAKE) kill; \
 	rm -f ckpt_*.dmtcp; \
 	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(3) --with-plugin $(PLUGIN) ./$(DRIVER) $(1) $(4) $(5) & \
 	PID=$$!; \
