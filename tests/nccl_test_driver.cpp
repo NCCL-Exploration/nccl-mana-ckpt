@@ -2,15 +2,12 @@
  * nccl_test.c — NCCL P2P checkpoint/restart test harness.
  *
  * Tests NCCL send/recv under various checkpoint scenarios using a
- * single-node, single-GPU communicator. Each mode exercises a different
- * checkpoint timing: post-completion, pre-init, or mid-transit.
+ * Usage: ./nccl_test <test_id> [msg_count] [size_kb]
  *
- * Usage: ./nccl_test <mode> [msg_count] [size_kb]
- *
- *   Mode 1: Basic P2P — complete send/recv, verify data.
- *   Mode 2: Post-checkpoint — complete send/recv, sleep for checkpoint.
- *   Mode 3: Pre-init checkpoint — sleep before NCCL init, then send/recv.
- *   Mode 4: In-transit — send all, sleep for checkpoint, then recv all.
+ *   Test 1: Basic P2P — complete send/recv, verify data.
+ *   Test 2: Post-checkpoint — complete send/recv, sleep for checkpoint.
+ *   Test 3: Pre-init checkpoint — sleep before NCCL init, then send/recv.
+ *   Test 4: In-transit — send all, sleep for checkpoint, then recv all.
  *           Use msg_count=1 for single message, msg_count>1 for multi.
  */
 
@@ -37,7 +34,7 @@
     } \
 } while(0)
 
-int mode, num_msgs;
+int test_id, num_msgs;
 size_t count;
 ncclComm_t comm;
 cudaStream_t stream;
@@ -60,11 +57,11 @@ void setup(void)
 
     h_send = (float *)malloc(count * sizeof(float));
     for (size_t i = 0; i < count; i++)
-        h_send[i] = (float)(mode + i);
+        h_send[i] = (float)(test_id + i);
     CUDA_CHECK(cudaMemcpy(send_buff, h_send, count * sizeof(float), cudaMemcpyHostToDevice));
 
-    printf("[TEST] Mode %d starting. Msg Count: %d, Size: %zu KB\n",
-           mode, num_msgs, (count * sizeof(float)) / 1024);
+    printf("[TEST] Test %d starting. Msg Count: %d, Size: %zu KB\n",
+           test_id, num_msgs, (count * sizeof(float)) / 1024);
 }
 
 /**
@@ -120,63 +117,63 @@ void send_recv_all(void)
     CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
-/** Mode 1: Baseline — send/recv all messages and verify. */
+/** Test 1: Baseline — send/recv all messages and verify. */
 int basic_p2p(void)
 {
     setup();
     send_recv_all();
-    printf("[TEST] Mode 1: Communication complete.\n");
+    printf("[TEST] Test 1: Communication complete.\n");
     int errors = verify();
     teardown();
     return errors;
 }
 
-/** Mode 2: Complete all comms, then sleep to allow post-completion checkpoint. */
+/** Test 2: Complete all comms, then sleep to allow post-completion checkpoint. */
 int post_ckpt_p2p(void)
 {
     setup();
     send_recv_all();
-    printf("[TEST] Mode 2: Messaging finished. Sleeping 20s for post-ckpt...\n");
+    printf("[TEST] Test 2: Messaging finished. Sleeping 20s for post-ckpt...\n");
     sleep(20);
     int errors = verify();
     teardown();
     return errors;
 }
 
-/** Mode 3: Sleep before NCCL init to allow pre-init checkpoint, then run comms. */
+/** Test 3: Sleep before NCCL init to allow pre-init checkpoint, then run comms. */
 int pre_init_ckpt_p2p(void)
 {
-    printf("[TEST] Mode 3: Sleeping 10s before NCCL init...\n");
+    printf("[TEST] Test 3: Sleeping 10s before NCCL init...\n");
     sleep(10);
     setup();
     send_recv_all();
-    printf("[TEST] Mode 3: Communication complete.\n");
+    printf("[TEST] Test 3: Communication complete.\n");
     int errors = verify();
     teardown();
     return errors;
 }
 
 /**
- * Mode 4: Send all messages, sleep to allow in-transit checkpoint,
+ * Test 4: Send all messages, sleep to allow in-transit checkpoint,
  * then post matching receives. Use msg_count arg for single vs multi.
  */
 int in_transit_p2p(void)
 {
     setup();
 
-    printf("[TEST] Mode %d: Sending %d messages...\n", mode, num_msgs);
+    printf("[TEST] Test %d: Sending %d messages...\n", test_id, num_msgs);
     for (int i = 0; i < num_msgs; i++)
         NCCL_CHECK(ncclSend(send_buff, count, ncclFloat, 0, comm, stream));
 
-    printf("[TEST] Mode %d: Messages SENT. Sleeping 20s for in-transit ckpt...\n", mode);
+    printf("[TEST] Test %d: Messages SENT. Sleeping 20s for in-transit ckpt...\n", test_id);
     sleep(20);
 
-    printf("[TEST] Mode %d: Waking up. Starting receives...\n", mode);
+    printf("[TEST] Test %d: Waking up. Starting receives...\n", test_id);
     for (int i = 0; i < num_msgs; i++)
         NCCL_CHECK(ncclRecv(recv_buff, count, ncclFloat, 0, comm, stream));
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    printf("[TEST] Mode %d: All receives complete.\n", mode);
+    printf("[TEST] Test %d: All receives complete.\n", test_id);
 
     int errors = verify();
     teardown();
@@ -186,8 +183,8 @@ int in_transit_p2p(void)
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
-        printf("Usage: %s <mode> [msg_count] [size_kb]\n", argv[0]);
-        printf("Modes:\n");
+        printf("Usage: %s <test_id> [msg_count] [size_kb]\n", argv[0]);
+        printf("Tests:\n");
         printf("  1: Basic P2P\n");
         printf("  2: Post-completion checkpoint\n");
         printf("  3: Pre-init checkpoint\n");
@@ -195,18 +192,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    mode = atoi(argv[1]);
+    test_id = atoi(argv[1]);
     num_msgs = (argc >= 3) ? atoi(argv[2]) : 1;
     int size_kb = (argc >= 4) ? atoi(argv[3]) : 4;
     count = (size_kb * 1024) / sizeof(float);
 
-    switch (mode) {
+    switch (test_id) {
         case 1: return basic_p2p();
         case 2: return post_ckpt_p2p();
         case 3: return pre_init_ckpt_p2p();
         case 4: return in_transit_p2p();
         default:
-            fprintf(stderr, "Unknown test mode: %d\n", mode);
+            fprintf(stderr, "Unknown test_id: %d\n", test_id);
             return 1;
     }
 }
