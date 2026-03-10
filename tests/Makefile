@@ -57,7 +57,7 @@ test5: $(DRIVER)
 # --- Helper Macros ---
 
 define run_test
-	echo -e "${GREEN}==> Running $(2) (Mode $(1)) <==${NC}"; \
+	echo -e "${GREEN}==> Running $(2) (Test $(1)) <==${NC}"; \
 	$(MAKE) kill; \
 	rm -f ckpt_*.dmtcp; \
 	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(3) --with-plugin $(PLUGIN) ./$(DRIVER) $(1) $(4) $(5) & \
