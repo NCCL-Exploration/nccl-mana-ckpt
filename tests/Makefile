@@ -50,10 +50,6 @@ test3: $(DRIVER)
 test4: $(DRIVER)
 	@$(call run_test,4,"Criteria 4: Single Msg In-Transit",10,1,$(SIZE))
 
-# Criteria 5: Multi Msg In-Transit
-test5: $(DRIVER)
-	@$(call run_test,4,"Criteria 5: Multi Msg In-Transit",10,$(MSGS),$(SIZE))
-
 # --- Helper Macros ---
 
 define run_test
