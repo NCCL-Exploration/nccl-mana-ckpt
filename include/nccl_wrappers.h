@@ -2,6 +2,7 @@
 #define NCCL_WRAPPERS_H
 
 #include <nccl.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {

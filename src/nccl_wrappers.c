@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <dlfcn.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <nccl.h>
 #include "nccl_wrappers.h"
 #include "dmtcp_kvdb_c.h"
