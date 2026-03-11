@@ -86,11 +86,36 @@ static int all_drained() {
 }
 
 static void drain_nccl() {
-    printf("[NCCL Drain] Starting drain on rank %d\n", g_my_rank);
+    printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g_seq_num);
     
     // Set pending flag to capture any late messages if threads are still running
     ckpt_pending = 1;
     __sync_synchronize();
+
+    char my_seq_key[64];
+    snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
+    dmtcp_kvdb_incr(my_seq_key, g_seq_num);
+
+    // Wait for all ranks to publish their sequence and find the MAX
+    uint64_t max_seq = g_seq_num;
+    for (int i = 0; i < g_nranks; i++) {
+        char key[64];
+        snprintf(key, sizeof(key), "rank_%d_seq", i);
+        uint64_t rank_seq = 0;
+        // Busy wait for other ranks to publish (in a real distributed KVDB)
+        while ((rank_seq = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
+            usleep(1000);
+        }
+        if (rank_seq > max_seq) max_seq = rank_seq;
+    }
+
+    g_target_seq = max_seq;
+    printf("[NCCL Drain] Rank %d target seq set to %lu\n", g_my_rank, g_target_seq);
+
+    // Wait for application thread to reach target_seq
+    while (g_seq_num < g_target_seq) {
+        usleep(1000);
+    }
 
     drain_streams();
     
@@ -99,7 +124,7 @@ static void drain_nccl() {
          usleep(1000);
     }
     
-    printf("[NCCL Drain] Drain complete on rank %d\n", g_my_rank);
+    printf("[NCCL Drain] Drain complete on rank %d at seq %lu\n", g_my_rank, g_seq_num);
 }
 
 // ncclSend and ncclRecv are now in nccl_wrappers.c
@@ -116,6 +141,7 @@ resume()
 {
   printf("*** The application has now been checkpointed. ***\n");
   ckpt_pending = 0;
+  g_target_seq = 0;
   g_num_streams = 0;
 }
 
@@ -124,6 +150,8 @@ restart()
 {
   printf("The application is now restarting from a checkpoint.\n");
   ckpt_pending = 0;
+  g_target_seq = 0;
+  g_seq_num = 0; // Sequence should probably reset or be restored from ckpt
   g_num_streams = 0;
   g_my_rank = -1;
   g_nranks = 0;
