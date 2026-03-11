@@ -16,6 +16,8 @@ endif
 LIBNAME = src/libncclplugin
 NCCL_INCLUDE = ./include
 DMTCP_INCLUDE = ${DMTCP_ROOT}/include
+JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
+DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
 DEMO_PORT=7781
@@ -53,7 +55,7 @@ ${CRAC_ROOT}/libdmtcp_crac.so:
 	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}
 
 ${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o nccl_iprobe.o
-	${CXX} -shared -o $@ $^
+	${CXX} -shared -o $@ $^ -lnccl -ldl
 
 ${LIBNAME}.o: ${LIBNAME}.c
 	${CC} ${CFLAGS} -c -o $@ $<
@@ -65,7 +67,7 @@ nccl_iprobe.o: src/nccl_iprobe.c
 	${CC} ${CFLAGS} -c -o $@ $<
 
 dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
-	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -c -o $@ $<
+	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
 clean:
 	cd ${CRAC_ROOT} && make clean

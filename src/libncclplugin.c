@@ -94,7 +94,12 @@ static void drain_nccl() {
 
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
-    dmtcp_kvdb_incr(my_seq_key, g_seq_num);
+    // Use SET instead of INCR so we don't accumulate across checkpoints
+    dmtcp_kvdb_set(my_seq_key, g_seq_num);
+
+    // Use a DMTCP global barrier to ensure everyone has published their sequence
+    // before we try to calculate the maximum.
+    dmtcp_global_barrier("nccl-consensus-seq-published");
 
     // Wait for all ranks to publish their sequence and find the MAX
     uint64_t max_seq = g_seq_num;
@@ -110,7 +115,7 @@ static void drain_nccl() {
     }
 
     g_target_seq = max_seq;
-    printf("[NCCL Drain] Rank %d target seq set to %lu\n", g_my_rank, g_target_seq);
+    printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g_target_seq, g_seq_num);
 
     // Wait for application thread to reach target_seq
     while (g_seq_num < g_target_seq) {
