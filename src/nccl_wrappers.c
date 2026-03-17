@@ -8,8 +8,15 @@
 #include "dmtcp_kvdb_c.h"
 
 extern volatile int ckpt_pending; 
-uint64_t g_seq_num = 0;
-uint64_t g_target_seq = 0;
+typedef struct{
+    ncclComm_t comm;
+    uint64_t seq;
+    uint64_t target;
+} group_entry_t;
+// Might have to make it dynamically allocated at some point
+#define NUM_GROUPS 5 
+static group_entry_t groups[NUM_GROUPS]; // We need to change it to a Set at some point
+
 
 static ncclResult_t (*real_ncclSend)(const void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclRecv)(void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
@@ -23,19 +30,34 @@ static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
+static group_entry_t* get_or_create_group(ncclComm_t comm) {
+    for (int i = 0; i < NUM_GROUPS; i++) {
+        if (groups[i].comm == comm) return &groups[i];
+        if (groups[i].comm == NULL) {
+            groups[i].comm = comm;
+            groups[i].seq = 0;
+            groups[i].target = 0;
+            return &groups[i];
+        }
+    }
+    return NULL; // Means list is full
+}
+
+
 // Key format: "src|dest"
 static void build_msg_key(char *buf, size_t len, int src, int dest) {
     snprintf(buf, len, "%d|%d", src, dest);
 }
 
-static void increment_seq_and_wait() {
+static void increment_seq_and_wait(ncclComm_t comm) {
     // If a checkpoint is pending, we must not start a new collective
     // until the coordinator has decided on the global target sequence.
     // This rank might be fast and reach the next sequence while others are lagging.
-    while (ckpt_pending && g_target_seq != 0 && g_seq_num >= g_target_seq) {
+    group_entry_t* g = get_or_create_group(comm);
+    while (ckpt_pending && g->target != 0 && g->seq >= g->target) {
         usleep(100);
     }
-    g_seq_num++;
+    g->seq++;
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) {
@@ -118,7 +140,7 @@ ncclResult_t ncclAllReduce(
 ) {
     init_rank_info(comm);
     add_stream(stream);
-    increment_seq_and_wait();
+    increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclAllReduce);
     return real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
@@ -135,7 +157,7 @@ ncclResult_t ncclBroadcast(
 ) {
     init_rank_info(comm);
     add_stream(stream);
-    increment_seq_and_wait();
+    increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclBroadcast);
     return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
@@ -153,7 +175,7 @@ ncclResult_t ncclReduce(
 ) {
     init_rank_info(comm);
     add_stream(stream);
-    increment_seq_and_wait();
+    increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclReduce);
     return real_ncclReduce(sendbuff, recvbuff, count, datatype, op, root, comm, stream);
@@ -169,7 +191,7 @@ ncclResult_t ncclAllGather(
 ) {
     init_rank_info(comm);
     add_stream(stream);
-    increment_seq_and_wait();
+    increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclAllGather);
     return real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
@@ -186,7 +208,7 @@ ncclResult_t ncclReduceScatter(
 ) {
     init_rank_info(comm);
     add_stream(stream);
-    increment_seq_and_wait();
+    increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclReduceScatter);
     return real_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
