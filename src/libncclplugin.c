@@ -32,6 +32,22 @@ int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
 
+// skip problematic memory region?
+int dmtcp_skip_memory_region_ckpting(LocalArea *area) {
+    if (area->name[0] == '\0') return 0;
+
+    // Skip NVIDIA device files and related mappings that cause restore failures
+    if (strstr(area->name, "/dev/nvidia") ||
+        strstr(area->name, "nvidia_") ||
+        strstr(area->name, "/dev/uverbs") ||
+        strstr(area->name, "/dev/zero (deleted)")) {
+        printf("[NCCL-MANA] Skipping checkpoint of memory region: %s\n", area->name);
+        return 1;
+    }
+    
+    return 0;
+}
+
 ncclResult_t nccl_iprobe(int source, int* flag, size_t* pending) {
   if (flag == NULL || pending == NULL) return ncclInvalidArgument;
 
