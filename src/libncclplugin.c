@@ -25,22 +25,6 @@ int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
 
-// skip problematic memory region?
-int dmtcp_skip_memory_region_ckpting(LocalArea *area) {
-    if (area->name[0] == '\0') return 0;
-
-    // Skip NVIDIA device files and related mappings that cause restore failures
-    if (strstr(area->name, "/dev/nvidia") ||
-        strstr(area->name, "nvidia_") ||
-        strstr(area->name, "/dev/uverbs") ||
-        strstr(area->name, "/dev/zero (deleted)")) {
-        printf("[NCCL-MANA] Skipping checkpoint of memory region: %s\n", area->name);
-        return 1;
-    }
-    
-    return 0;
-}
-
 void add_stream(cudaStream_t stream) {
     for (int i = 0; i < g_num_streams; i++) {
         if (g_active_streams[i] == stream) return;
@@ -57,6 +41,27 @@ void init_rank_info(ncclComm_t comm) {
         ncclCommCount(comm, &g_nranks);
         printf("[NCCL Drain] Rank %d of %d\n", g_my_rank, g_nranks);
     }
+}
+
+/*
+ * Takes in the variables needed to perform a ncclSend. 
+ * Checks to make sure rank tracking has been initialized. 
+ * Then loops through all ranks and sends messages.
+ * Skips if the rank to send to matches the current rank.
+ */
+void ncclBroadcast(
+		const void* sendbuff, 
+		size_t count, 
+		ncclDatatype_t datatype, 
+		int peer, 
+		ncclComm_t comm, 
+		cudaStream_t stream
+) {
+	if (g_my_rank == -1) init_rank_info(comm);
+	for (int i = 0; i < g_nranks; i++) {
+		if (i == g_my_rank) continue;
+		ncclSend(sendbuff, count, datatype, peer, comm, stream);
+	}
 }
 
 static void drain_streams() {
