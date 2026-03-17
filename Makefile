@@ -42,6 +42,14 @@ nccl_check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so tests/
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
 		--with-plugin $$PWD/${LIBNAME}.so:${CRAC_ROOT}/libdmtcp_crac.so ./tests/single_gpu_test
 
+drain_check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so tests/send_recv
+	# Kill old coordinator
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	# Run the actual NCCL test
+	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
+		--with-plugin $$PWD/${LIBNAME}.so:${CRAC_ROOT}/libdmtcp_crac.so ./tests/send_recv
+
 tests/single_gpu_test: tests/single_gpu_test.c
 	nvcc ${CFLAGS} -o $@ $<
 
@@ -54,16 +62,13 @@ ${DMTCP_ROOT}/bin:
 ${CRAC_ROOT}/libdmtcp_crac.so:
 	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}
 
-${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o nccl_iprobe.o
-	${CXX} -shared -o $@ $^ -lnccl -ldl
+${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o
+	${CXX} -shared -o $@ $^
 
 ${LIBNAME}.o: ${LIBNAME}.c
 	${CC} ${CFLAGS} -c -o $@ $<
 
 nccl_wrappers.o: src/nccl_wrappers.c
-	${CC} ${CFLAGS} -c -o $@ $<
-
-nccl_iprobe.o: src/nccl_iprobe.c
 	${CC} ${CFLAGS} -c -o $@ $<
 
 dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp

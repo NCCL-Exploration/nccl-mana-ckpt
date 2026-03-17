@@ -8,15 +8,22 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
-// Minimal local definition of DMTCP's Area/ProcMapsArea to avoid dependency on config.h
-#define FILENAMESIZE 1024
-typedef struct {
-  char padding[88]; // Offset to name is exactly 88 bytes in DMTCP ProcMapsArea
-  char name[FILENAMESIZE];
-} LocalArea;
+#define CUDA_CHECK(cmd)                                                        \
+    do {                                                                       \
+        cudaError_t e = cmd;                                                   \
+        if (e != cudaSuccess) {                                                \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   cudaGetErrorString(e));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
+
 
 #define MAX_STREAMS 64
+#define MESSAGE_COUNT 1024
+#define MESSAGE_SIZE 4096
 
+static void *drain_buffer[MESSAGE_COUNT];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 
@@ -25,20 +32,26 @@ int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
 
-// skip problematic memory region?
-int dmtcp_skip_memory_region_ckpting(LocalArea *area) {
-    if (area->name[0] == '\0') return 0;
+ncclResult_t nccl_iprobe(int source, int* flag, size_t* pending) {
+  if (flag == NULL || pending == NULL) return ncclInvalidArgument;
 
-    // Skip NVIDIA device files and related mappings that cause restore failures
-    if (strstr(area->name, "/dev/nvidia") ||
-        strstr(area->name, "nvidia_") ||
-        strstr(area->name, "/dev/uverbs") ||
-        strstr(area->name, "/dev/zero (deleted)")) {
-        printf("[NCCL-MANA] Skipping checkpoint of memory region: %s\n", area->name);
-        return 1;
-    }
-    
-    return 0;
+  // format key and query
+  char key[64];
+  snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
+  
+  // Use our wrapper to get the count
+  int64_t count = dmtcp_kvdb_get(key);
+
+  if (pending > 0) {
+      *flag = 1;
+      *pending = (size_t)count;
+      printf("[NCCL-MANA] Probe: Found %ld messages from %d to %d\n", count, source, g_my_rank);
+  } else {
+      *flag = 0;
+      *pending = 0;
+  }
+
+  return ncclSuccess;
 }
 
 void add_stream(cudaStream_t stream) {
@@ -59,10 +72,23 @@ void init_rank_info(ncclComm_t comm) {
     }
 }
 
-static void drain_streams() {
-    for (int i = 0; i < g_num_streams; i++) {
-        cudaStreamSynchronize(g_active_streams[i]);
+static void drain_stream(cudaStream_t stream) {
+    for (size_t src = 0; src < g_nranks; src++) {
+        if (src == g_my_rank) continue;
+        int flag;
+        size_t pending;
+        nccl_iprobe(src, &flag, &pending);
+        if (!flag) continue;
+        for (size_t i = 0; i < pending; i++) {
+            void *tmp_buf;
+            CUDA_CHECK(cudaMalloc(&tmp_buf, pending * MESSAGE_SIZE));
+            void *copy = malloc(MESSAGE_SIZE);
+            CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
+            drain_buffer[i] = copy;
+            CUDA_CHECK(cudaFree(&tmp_buf));
+        }
     }
+    cudaStreamSynchronize(stream);
 }
 
 // Key format: "src|dest"
@@ -90,7 +116,7 @@ static void drain_nccl() {
     
     // Set pending flag to capture any late messages if threads are still running
     ckpt_pending = 1;
-    __sync_synchronize();
+    // __sync_synchronize();
 
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
@@ -122,7 +148,9 @@ static void drain_nccl() {
         usleep(1000);
     }
 
-    drain_streams();
+    for (int i = 0; i < g_num_streams; i++) {
+        drain_stream(g_active_streams[i]);
+    }
     
     while (!all_drained()) {
         // TODO: Backoff?
