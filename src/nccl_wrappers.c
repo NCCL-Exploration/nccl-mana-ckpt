@@ -43,6 +43,40 @@ static group_entry_t* get_or_create_group(ncclComm_t comm) {
     return NULL; // Means list is full
 }
 
+static size_t get_nccl_type_size(ncclDataType_t type) {
+    switch (type) {
+        case ncclInt8:
+        case ncclUint8:
+#if NCCL_MAJOR >= 2
+        case ncclChar:
+#endif
+            return 1;
+        case ncclHalf:
+#if NCCL_MAJOR >= 2
+        case ncclFloat16:
+#endif
+            return 2;
+        case ncclInt32:
+        case ncclUint32:
+        case ncclFloat32:
+#if NCCL_MAJOR >= 2
+        case ncclInt:
+        case ncclUint:
+        case ncclFloat:
+#endif
+            return 4;
+        case ncclInt64:
+        case ncclUint64:
+        case ncclFloat64:
+#if NCCL_MAJOR >= 2
+        case ncclDouble:
+#endif
+            return 8;
+        default:
+            return 4;
+    }
+}
+
 
 // Key format: "src|dest"
 static void build_msg_key(char *buf, size_t len, int src, int dest) {
@@ -93,9 +127,10 @@ ncclResult_t ncclSend(
     if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), g_my_rank, peer);
+        size_t bytes = count * get_nccl_type_size(datatype);
         
-        if (!dmtcp_kvdb_incr(key, 1)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to increment pending message count for %s\n", key);
+        if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
+             fprintf(stderr, "[NCCL-MANA] Failed to increment pending message size for %s\n", key);
              abort();
         }
     }
@@ -119,8 +154,10 @@ ncclResult_t ncclRecv(
     if (ckpt_pending) {
         char key[64];
         build_msg_key(key, sizeof(key), peer, g_my_rank);
-        if (!dmtcp_kvdb_incr(key, -1)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message count for %s\n", key);
+        size_t bytes = count * get_nccl_type_size(datatype);
+
+        if (!dmtcp_kvdb_set(key, 0) {
+             fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message size for %s\n", key);
              abort();
         }
     }
