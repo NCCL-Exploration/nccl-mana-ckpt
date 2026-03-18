@@ -8,15 +8,22 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
-// Minimal local definition of DMTCP's Area/ProcMapsArea to avoid dependency on config.h
-#define FILENAMESIZE 1024
-typedef struct {
-  char padding[88]; // Offset to name is exactly 88 bytes in DMTCP ProcMapsArea
-  char name[FILENAMESIZE];
-} LocalArea;
+#define CUDA_CHECK(cmd)                                                        \
+    do {                                                                       \
+        cudaError_t e = cmd;                                                   \
+        if (e != cudaSuccess) {                                                \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   cudaGetErrorString(e));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
+
 
 #define MAX_STREAMS 64
+#define MESSAGE_COUNT 1024
+#define MESSAGE_SIZE 4096
 
+static void *drain_buffer[MESSAGE_COUNT];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 
@@ -68,6 +75,7 @@ static void drain_streams() {
     for (int i = 0; i < g_num_streams; i++) {
         cudaStreamSynchronize(g_active_streams[i]);
     }
+    cudaStreamSynchronize(stream);
 }
 
 // Key format: "src|dest"
@@ -95,7 +103,7 @@ static void drain_nccl() {
     
     // Set pending flag to capture any late messages if threads are still running
     ckpt_pending = 1;
-    __sync_synchronize();
+    // __sync_synchronize();
 
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
@@ -127,7 +135,9 @@ static void drain_nccl() {
         usleep(1000);
     }
 
-    drain_streams();
+    for (int i = 0; i < g_num_streams; i++) {
+        drain_stream(g_active_streams[i]);
+    }
     
     while (!all_drained()) {
         // TODO: Backoff?

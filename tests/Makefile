@@ -50,6 +50,9 @@ test3: $(DRIVER)
 test4: $(DRIVER)
 	@$(call run_test,4,"Criteria 4: Single Msg In-Transit",10,1,$(SIZE))
 
+send_recv: send_recv.c
+	nvcc ${CFLAGS} -o $@ $<
+
 # --- Helper Macros ---
 
 define run_test
