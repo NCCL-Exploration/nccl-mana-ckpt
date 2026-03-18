@@ -130,7 +130,7 @@ ncclResult_t ncclSend(
         size_t bytes = count * get_nccl_type_size(datatype);
         
         if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to increment pending message size for %s\n", key);
+             fprintf(stderr, "[NCCL-MANA] Failed to set pending message size for %s\n", key);
              abort();
         }
     }
@@ -157,7 +157,7 @@ ncclResult_t ncclRecv(
         size_t bytes = count * get_nccl_type_size(datatype);
 
         if (!dmtcp_kvdb_set(key, 0) {
-             fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message size for %s\n", key);
+             fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
              abort();
         }
     }
