@@ -26,6 +26,8 @@
 static void *drain_buffer[MESSAGE_COUNT];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
+uint64_t g_target_seq = 0;
+uint64_t g_seq_num = 0;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
