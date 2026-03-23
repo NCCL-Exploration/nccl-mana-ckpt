@@ -26,6 +26,8 @@
 static void *drain_buffer[MESSAGE_COUNT];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
+uint64_t g_target_seq = 0;
+uint64_t g_seq_num = 0;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
@@ -50,16 +52,41 @@ void init_rank_info(ncclComm_t comm) {
     }
 }
 
+ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending) {
+  if (flag == NULL || pending == NULL) return ncclInvalidArgument;
+
+  // format key and query
+  char key[64];
+  snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
+  
+  // Use our wrapper to get the count
+  int64_t count = dmtcp_kvdb_get(key);
+
+  if (pending > 0) {
+      *flag = 1;
+      *pending = (size_t)count;
+      printf("[NCCL-MANA] Probe: Found %ld messages from %d to %d\n", count, source, g_my_rank);
+  } else {
+      *flag = 0;
+      *pending = 0;
+  }
+
+  return ncclSuccess;
+}
+
 /*
+ * Renaming as this is conflicting with ncclBroadcast defined in the header
+ * This function is already implemented in nccl_wrappers.c
+ *
  * Takes in the variables needed to perform a ncclSend. 
  * Checks to make sure rank tracking has been initialized. 
  * Then loops through all ranks and sends messages.
  * Skips if the rank to send to matches the current rank.
  */
-void ncclBroadcast(
+void ncclBroadcast_(
 		const void* sendbuff, 
 		size_t count, 
-		ncclDatatype_t datatype, 
+		ncclDataType_t datatype, 
 		int peer, 
 		ncclComm_t comm, 
 		cudaStream_t stream
@@ -71,9 +98,21 @@ void ncclBroadcast(
 	}
 }
 
-static void drain_streams() {
-    for (int i = 0; i < g_num_streams; i++) {
-        cudaStreamSynchronize(g_active_streams[i]);
+static void drain_stream(cudaStream_t stream) {
+    for (size_t src = 0; src < g_nranks; src++) {
+        if (src == g_my_rank) continue;
+        int flag;
+        size_t pending;
+        ncclIprobe(src, g_comm, &flag, &pending);
+        if (!flag) continue;
+        for (size_t i = 0; i < pending; i++) {
+            void *tmp_buf;
+            CUDA_CHECK(cudaMalloc(&tmp_buf, pending * MESSAGE_SIZE));
+            void *copy = malloc(MESSAGE_SIZE);
+            CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
+            drain_buffer[i] = copy;
+            CUDA_CHECK(cudaFree(&tmp_buf));
+        }
     }
     cudaStreamSynchronize(stream);
 }
