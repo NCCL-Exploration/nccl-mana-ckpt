@@ -4,10 +4,7 @@
  * Tests NCCL send/recv under various checkpoint scenarios using a
  * Usage: ./nccl_test <test_id> [msg_count] [size_kb]
  *
- *   Test 1: Basic P2P — complete send/recv, verify data.
- *   Test 2: Post-checkpoint — complete send/recv, sleep for checkpoint.
- *   Test 3: Pre-init checkpoint — sleep before NCCL init, then send/recv.
- *   Test 4: In-transit — send all, sleep for checkpoint, then recv all.
+ *   Test 1: In-transit — send all, sleep for checkpoint, then recv all.
  *           Use msg_count=1 for single message, msg_count>1 for multi.
  */
 
@@ -114,7 +111,7 @@ void send_recv_all(void)
 }
 
 /**
- * Test 4: Send all messages, sleep to allow in-transit checkpoint,
+ * Test 1: Send all messages, sleep to allow in-transit checkpoint,
  * then post matching receives. Use msg_count arg for single vs multi.
  */
 int in_transit_p2p(void)
