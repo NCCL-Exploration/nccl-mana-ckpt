@@ -24,6 +24,7 @@ static ncclResult_t (*real_ncclAllReduce)(const void*, void*, size_t, ncclDataTy
 static ncclResult_t (*real_ncclBroadcast)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclReduce)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclAllGather)(const void*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t) = NULL;
+static ncclResult_t (*real_ncclGather)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclReduceScatter)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int) = NULL;
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
@@ -232,6 +233,23 @@ ncclResult_t ncclAllGather(
 
     LOAD_SYM(ncclAllGather);
     return real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
+}
+
+ncclResult_t ncclGather(
+    const void* sendbuff,
+    void* recvbuff,
+    size_t count,
+    ncclDataType_t datatype,
+    int root,
+    ncclComm_t comm,
+    cudaStream_t stream
+) {
+    init_rank_info(comm);
+    add_stream(stream);
+    increment_seq_and_wait(comm);
+
+    LOAD_SYM(ncclGather);
+    return real_ncclGather(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
 
 ncclResult_t ncclReduceScatter(
