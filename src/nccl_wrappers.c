@@ -48,36 +48,21 @@ static size_t get_nccl_type_size(ncclDataType_t type) {
     switch (type) {
         case ncclInt8:
         case ncclUint8:
-#if NCCL_MAJOR >= 2
-        case ncclChar:
-#endif
             return 1;
         case ncclHalf:
-#if NCCL_MAJOR >= 2
-        case ncclFloat16:
-#endif
             return 2;
         case ncclInt32:
         case ncclUint32:
         case ncclFloat32:
-#if NCCL_MAJOR >= 2
-        case ncclInt:
-        case ncclUint:
-        case ncclFloat:
-#endif
             return 4;
         case ncclInt64:
         case ncclUint64:
         case ncclFloat64:
-#if NCCL_MAJOR >= 2
-        case ncclDouble:
-#endif
             return 8;
         default:
             return 4;
     }
 }
-
 
 // Key format: "src|dest"
 static void build_msg_key(char *buf, size_t len, int src, int dest) {
@@ -125,15 +110,13 @@ ncclResult_t ncclSend(
     init_rank_info(comm);
     add_stream(stream);
 
-    if (ckpt_pending) {
-        char key[64];
-        build_msg_key(key, sizeof(key), g_my_rank, peer);
-        size_t bytes = count * get_nccl_type_size(datatype);
-        
-        if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to set pending message size for %s\n", key);
-             abort();
-        }
+    char key[64];
+    build_msg_key(key, sizeof(key), g_my_rank, peer);
+    size_t bytes = count * get_nccl_type_size(datatype);
+
+    if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
+        fprintf(stderr, "[NCCL-MANA] Failed to set pending message size for %s\n", key);
+        abort();
     }
 
     LOAD_SYM(ncclSend);
@@ -152,15 +135,13 @@ ncclResult_t ncclRecv(
     init_rank_info(comm);
     add_stream(stream);
 
-    if (ckpt_pending) {
-        char key[64];
-        build_msg_key(key, sizeof(key), peer, g_my_rank);
-        size_t bytes = count * get_nccl_type_size(datatype);
+    char key[64];
+    build_msg_key(key, sizeof(key), peer, g_my_rank);
+    size_t bytes = count * get_nccl_type_size(datatype);
 
-        if (!dmtcp_kvdb_set(key, 0) {
-             fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
-             abort();
-        }
+    if (!dmtcp_kvdb_set(key, 0)) {
+        fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
+        abort();
     }
 
     LOAD_SYM(ncclRecv);

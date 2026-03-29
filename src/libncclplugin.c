@@ -20,10 +20,9 @@
 
 
 #define MAX_STREAMS 64
-#define MESSAGE_COUNT 1024
 #define MESSAGE_SIZE 4096
 
-static void *drain_buffer[MESSAGE_COUNT];
+static void *drain_buffer[MESSAGE_SIZE];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 uint64_t g_target_seq = 0;
@@ -60,12 +59,12 @@ ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending)
   snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
   
   // Use our wrapper to get the count
-  int64_t count = dmtcp_kvdb_get(key);
+  int64_t size = dmtcp_kvdb_get(key);
 
-  if (pending > 0) {
+  if (size > 0) {
       *flag = 1;
-      *pending = (size_t)count;
-      printf("[NCCL-MANA] Probe: Found %ld messages from %d to %d\n", count, source, g_my_rank);
+      *pending = (size_t)size;
+      printf("[NCCL-MANA] Probe: Found message of size %ld from %d to %d\n", size, source, g_my_rank);
   } else {
       *flag = 0;
       *pending = 0;
@@ -98,52 +97,48 @@ void ncclBroadcast_(
 	}
 }
 
-static void drain_stream(cudaStream_t stream) {
-    for (size_t src = 0; src < g_nranks; src++) {
-        if (src == g_my_rank) continue;
-        int flag;
-        size_t pending;
-        ncclIprobe(src, g_comm, &flag, &pending);
-        if (!flag) continue;
-        for (size_t i = 0; i < pending; i++) {
-            void *tmp_buf;
-            CUDA_CHECK(cudaMalloc(&tmp_buf, pending * MESSAGE_SIZE));
-            void *copy = malloc(MESSAGE_SIZE);
-            CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
-            drain_buffer[i] = copy;
-            CUDA_CHECK(cudaFree(&tmp_buf));
-        }
-    }
-    cudaStreamSynchronize(stream);
-}
-
 // Key format: "src|dest"
 static void build_msg_key(char *buf, size_t len, int src, int dest) {
     snprintf(buf, len, "%d|%d", src, dest);
 }
 
-static int all_drained() {
-    for (int source = 0; source < g_nranks; source++) {
-        if (source == g_my_rank) continue;
-        
-        char key[64];
-        build_msg_key(key, sizeof(key), source, g_my_rank);
-        
-        int64_t val = dmtcp_kvdb_get(key);
-        if (val > 0) {
-            return 0;
-        }
+
+static void drain_messages() {
+    printf("DRAIN: %d ranks found\n", g_nranks);
+    for (size_t src = 0; src < g_nranks; src++) {
+        if (src == g_my_rank) continue;
+        int flag;
+        size_t message_size;
+        ncclIprobe(src, g_comm, &flag, &message_size);
+
+        if (!flag) continue;
+
+        void *tmp_buf;
+        CUDA_CHECK(cudaSetDevice(g_my_rank));
+        CUDA_CHECK(cudaMalloc(&tmp_buf, MESSAGE_SIZE));
+        printf("Pending message found!\n");
+
+        printf("[NCCL Drain] Rank %d: draining message of size %zu from %zu\n", g_my_rank, message_size, src);
+        fflush(stdout);
+
+        ncclRecv(tmp_buf, MESSAGE_SIZE / sizeof(float), ncclFloat, src, g_comm, 0);
+        printf("[NCCL Drain] Rank %d: recv posted, syncing...\n", g_my_rank);
+        fflush(stdout);
+
+        cudaStreamSynchronize(0);
+        printf("[NCCL Drain] Rank %d: sync done\n", g_my_rank);
+        fflush(stdout);
+
+        // Save to drain buffer for replay after resume if needed
+        void *copy = malloc(MESSAGE_SIZE);
+        CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
+        *drain_buffer = copy;
+
+        CUDA_CHECK(cudaFree(tmp_buf));
     }
-    return 1;
 }
 
-static void drain_nccl() {
-    printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g_seq_num);
-    
-    // Set pending flag to capture any late messages if threads are still running
-    ckpt_pending = 1;
-    // __sync_synchronize();
-
+static void sequence_number_consensus() {
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
     // Use SET instead of INCR so we don't accumulate across checkpoints
@@ -169,13 +164,44 @@ static void drain_nccl() {
     g_target_seq = max_seq;
     printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g_target_seq, g_seq_num);
 
+}
+
+static int all_drained() {
+    for (int source = 0; source < g_nranks; source++) {
+        if (source == g_my_rank) continue;
+        
+        char key[64];
+        build_msg_key(key, sizeof(key), source, g_my_rank);
+        
+        int64_t val = dmtcp_kvdb_get(key);
+        if (val > 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void drain_nccl() {
+    printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g_seq_num);
+    
+    // Set pending flag to capture any late messages if threads are still running
+    ckpt_pending = 1;
+    // __sync_synchronize();
+
+    // Sync any active streams first
+    for (int i = 0; i < g_num_streams; i++) {
+        cudaStreamSynchronize(g_active_streams[i]);
+    }
+
+    // Drain messages
+    drain_messages();
+
+    // Sequence number consensus
+    sequence_number_consensus();
+
     // Wait for application thread to reach target_seq
     while (g_seq_num < g_target_seq) {
         usleep(1000);
-    }
-
-    for (int i = 0; i < g_num_streams; i++) {
-        drain_stream(g_active_streams[i]);
     }
     
     while (!all_drained()) {

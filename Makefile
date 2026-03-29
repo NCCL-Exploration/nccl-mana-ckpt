@@ -22,35 +22,34 @@ LINK = ${CC}
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
 
 plugin: src/libncclplugin.so
 
-check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
+check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	# Note that full path of plugin (using $$PWD in this case) is required.
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
-	  --with-plugin $$PWD/${LIBNAME}.so:${CRAC_ROOT}/libdmtcp_crac.so ${DMTCP_ROOT}/test/dmtcp1
+	  --with-plugin $$PWD/${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 
-nccl_check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so tests/single_gpu_test
-	# Kill old coordinator
-	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
-	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+nccl_check: ${LIBNAME}.so tests/single_gpu_test
 	# Run the actual NCCL test
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
-		--with-plugin $$PWD/${LIBNAME}.so:${CRAC_ROOT}/libdmtcp_crac.so ./tests/single_gpu_test
+		--with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
 
-drain_check: ${DMTCP_ROOT}/bin ${CRAC_ROOT}/libdmtcp_crac.so ${LIBNAME}.so tests/send_recv
-	# Kill old coordinator
+drain_check: ${LIBNAME}.so tests/drain
+	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	# Launch DMTCP coordinator
+	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
-	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
-		--with-plugin $$PWD/${LIBNAME}.so:${CRAC_ROOT}/libdmtcp_crac.so ./tests/send_recv
+	mpirun -np 2  ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8 \
+	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain
 
-tests/single_gpu_test: tests/single_gpu_test.c
+tests/drain: tests/drain.c
 	nvcc ${CFLAGS} -o $@ $<
 
 ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
@@ -77,4 +76,4 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 clean:
 	cd ${CRAC_ROOT} && make clean
 	cd tests && make clean
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_restart_script*.sh *.o
+	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o
