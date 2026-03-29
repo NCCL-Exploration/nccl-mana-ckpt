@@ -26,7 +26,7 @@ override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl -lmpi -L/shared/E
 
 plugin: src/libncclplugin.so
 
-check: ${DMTCP_ROOT}/bin ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
+check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
@@ -39,7 +39,7 @@ nccl_check: ${LIBNAME}.so tests/single_gpu_test
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
 		--with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
 
-drain_check: ${DMTCP_ROOT}/bin ${LIBNAME}.so tests/drain
+drain_check: ${LIBNAME}.so tests/drain
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
@@ -56,7 +56,7 @@ ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 	cd ${DMTCP_ROOT}/test && make dmtcp1
 
 ${DMTCP_ROOT}/bin:
-	# cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
+	cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
 
 ${CRAC_ROOT}/libdmtcp_crac.so:
 	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}
