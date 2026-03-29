@@ -90,14 +90,12 @@ ncclResult_t ncclSend(
     init_rank_info(comm);
     add_stream(stream);
 
-    if (ckpt_pending) {
-        char key[64];
-        build_msg_key(key, sizeof(key), g_my_rank, peer);
-        
-        if (!dmtcp_kvdb_incr(key, 1)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to increment pending message count for %s\n", key);
-             abort();
-        }
+    char key[64];
+    build_msg_key(key, sizeof(key), g_my_rank, peer);
+
+    if (!dmtcp_kvdb_incr(key, 1)) {
+        fprintf(stderr, "[NCCL-MANA] Failed to increment pending message count for %s\n", key);
+        abort();
     }
 
     LOAD_SYM(ncclSend);
@@ -116,13 +114,11 @@ ncclResult_t ncclRecv(
     init_rank_info(comm);
     add_stream(stream);
 
-    if (ckpt_pending) {
-        char key[64];
-        build_msg_key(key, sizeof(key), peer, g_my_rank);
-        if (!dmtcp_kvdb_incr(key, -1)) {
-             fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message count for %s\n", key);
-             abort();
-        }
+    char key[64];
+    build_msg_key(key, sizeof(key), peer, g_my_rank);
+    if (!dmtcp_kvdb_incr(key, -1)) {
+        fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message count for %s\n", key);
+        abort();
     }
 
     LOAD_SYM(ncclRecv);
