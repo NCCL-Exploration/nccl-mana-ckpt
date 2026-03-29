@@ -24,6 +24,7 @@ static ncclResult_t (*real_ncclAllReduce)(const void*, void*, size_t, ncclDataTy
 static ncclResult_t (*real_ncclBroadcast)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclReduce)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclAllGather)(const void*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t) = NULL;
+static ncclResult_t (*real_ncclGather)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclReduceScatter)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int) = NULL;
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
@@ -41,6 +42,40 @@ static group_entry_t* get_or_create_group(ncclComm_t comm) {
         }
     }
     return NULL; // Means list is full
+}
+
+static size_t get_nccl_type_size(ncclDataType_t type) {
+    switch (type) {
+        case ncclInt8:
+        case ncclUint8:
+#if NCCL_MAJOR >= 2
+        case ncclChar:
+#endif
+            return 1;
+        case ncclHalf:
+#if NCCL_MAJOR >= 2
+        case ncclFloat16:
+#endif
+            return 2;
+        case ncclInt32:
+        case ncclUint32:
+        case ncclFloat32:
+#if NCCL_MAJOR >= 2
+        case ncclInt:
+        case ncclUint:
+        case ncclFloat:
+#endif
+            return 4;
+        case ncclInt64:
+        case ncclUint64:
+        case ncclFloat64:
+#if NCCL_MAJOR >= 2
+        case ncclDouble:
+#endif
+            return 8;
+        default:
+            return 4;
+    }
 }
 
 
@@ -92,9 +127,10 @@ ncclResult_t ncclSend(
 
     char key[64];
     build_msg_key(key, sizeof(key), g_my_rank, peer);
+    size_t bytes = count * get_nccl_type_size(datatype);
 
-    if (!dmtcp_kvdb_incr(key, 1)) {
-        fprintf(stderr, "[NCCL-MANA] Failed to increment pending message count for %s\n", key);
+    if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
+        fprintf(stderr, "[NCCL-MANA] Failed to set pending message size for %s\n", key);
         abort();
     }
 
@@ -116,8 +152,10 @@ ncclResult_t ncclRecv(
 
     char key[64];
     build_msg_key(key, sizeof(key), peer, g_my_rank);
-    if (!dmtcp_kvdb_incr(key, -1)) {
-        fprintf(stderr, "[NCCL-MANA] Failed to decrement pending message count for %s\n", key);
+    size_t bytes = count * get_nccl_type_size(datatype);
+
+    if (!dmtcp_kvdb_set(key, 0) {
+        fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
         abort();
     }
 
@@ -191,6 +229,23 @@ ncclResult_t ncclAllGather(
 
     LOAD_SYM(ncclAllGather);
     return real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
+}
+
+ncclResult_t ncclGather(
+    const void* sendbuff,
+    void* recvbuff,
+    size_t count,
+    ncclDataType_t datatype,
+    int root,
+    ncclComm_t comm,
+    cudaStream_t stream
+) {
+    init_rank_info(comm);
+    add_stream(stream);
+    increment_seq_and_wait(comm);
+
+    LOAD_SYM(ncclGather);
+    return real_ncclGather(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
 
 ncclResult_t ncclReduceScatter(
