@@ -139,7 +139,7 @@ ncclResult_t ncclRecv(
     build_msg_key(key, sizeof(key), peer, g_my_rank);
     size_t bytes = count * get_nccl_type_size(datatype);
 
-    if (!dmtcp_kvdb_set(key, 0) {
+    if (!dmtcp_kvdb_set(key, 0)) {
         fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
         abort();
     }
