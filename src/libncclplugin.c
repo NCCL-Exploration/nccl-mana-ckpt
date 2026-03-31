@@ -155,6 +155,7 @@ static void sequence_number_consensus() {
         snprintf(key, sizeof(key), "rank_%d_seq", i);
         uint64_t rank_seq = 0;
         // Busy wait for other ranks to publish (in a real distributed KVDB)
+		// TODO: We can remove this right? because the barrier already guarantees all ranks are synchronized
         while ((rank_seq = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
             usleep(1000);
         }
