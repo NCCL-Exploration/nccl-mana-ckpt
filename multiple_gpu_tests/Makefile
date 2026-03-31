@@ -14,9 +14,12 @@ INTERVAL = 0             # Manual checkpointing for precise control
 export NCCL_DEBUG=WARN
 
 # --- Configurable Parameters (override on command line) ---
-MSGS  ?= 5               # Number of messages per test
-SIZE  ?= 1024            # Message size in KB
-NGPUS ?= 2               # Number of GPUs to use (auto-detected if omitted from driver)
+# MSGS  = Number of messages per test
+# SIZE  = Message size in KB
+# NGPUS = Number of GPUs to use
+MSGS  ?= 5
+SIZE  ?= 1024
+NGPUS ?= 2
 
 # Colors for output
 GREEN = \033[0;32m
@@ -32,22 +35,22 @@ test_all: test1 test2 test3 test4
 # Test 1: Basic P2P ring — no checkpoint, just verify correctness
 #   CKPT_DELAY=0 → no checkpoint triggered
 test1: $(DRIVER)
-	@$(call run_test,1,"Test 1: Basic P2P (ring)",0,$(MSGS),$(SIZE),$(NGPUS))
+	@$(call run_test,1,Test 1: Basic P2P ring,0,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 2: Post-completion checkpoint — comms finish, then sleep 20s
 #   CKPT_DELAY=5 → checkpoint ~5s after launch (comms should be done)
 test2: $(DRIVER)
-	@$(call run_test,2,"Test 2: Post-completion checkpoint",5,$(MSGS),$(SIZE),$(NGPUS))
+	@$(call run_test,2,Test 2: Post-completion checkpoint,5,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 3: Pre-init checkpoint — sleep 10s before NCCL init
 #   CKPT_DELAY=5 → checkpoint during the pre-init sleep window
 test3: $(DRIVER)
-	@$(call run_test,3,"Test 3: Pre-init checkpoint",5,$(MSGS),$(SIZE),$(NGPUS))
+	@$(call run_test,3,Test 3: Pre-init checkpoint,5,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 4: In-transit checkpoint — send, sleep 20s, then recv
 #   CKPT_DELAY=10 → checkpoint while messages are in-flight
 test4: $(DRIVER)
-	@$(call run_test,4,"Test 4: In-transit checkpoint",10,$(MSGS),$(SIZE),$(NGPUS))
+	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
 
 # --- Helper Macro ---
 # Args: (1)=test_id (2)=description (3)=ckpt_delay (4)=msgs (5)=size_kb (6)=num_gpus
