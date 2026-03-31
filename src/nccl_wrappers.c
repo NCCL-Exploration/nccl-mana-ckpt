@@ -31,7 +31,7 @@ static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
-static group_entry_t* get_or_create_group(ncclComm_t comm) {
+group_entry_t* get_or_create_group(ncclComm_t comm) {
     for (int i = 0; i < NUM_GROUPS; i++) {
         if (groups[i].comm == comm) return &groups[i];
         if (groups[i].comm == NULL) {
@@ -248,4 +248,8 @@ ncclResult_t ncclReduceScatter(
 
     LOAD_SYM(ncclReduceScatter);
     return real_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
+}
+
+void reset_groups() {
+    memset(groups, 0, sizeof(groups));
 }
