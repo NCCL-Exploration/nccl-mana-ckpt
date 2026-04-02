@@ -57,7 +57,7 @@ ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending)
 
   // format key and query
   char key[64];
-  snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
+  sprintf(key, "%d|%d", source, g_my_rank);
   
   // Use our wrapper to get the count
   int64_t size = dmtcp_kvdb_get(key);
