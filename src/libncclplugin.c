@@ -99,8 +99,8 @@ void ncclBroadcast_(
 }
 
 // Key format: "src|dest"
-static void build_msg_key(char *buf, size_t len, int src, int dest) {
-    snprintf(buf, len, "%d|%d", src, dest);
+static void build_msg_key(char *buf, int src, int dest) {
+    sprintf(buf, "%d|%d", src, dest);
 }
 
 
@@ -170,7 +170,7 @@ static int all_drained() {
         if (source == g_my_rank) continue;
         
         char key[64];
-        build_msg_key(key, sizeof(key), source, g_my_rank);
+        build_msg_key(key, source, g_my_rank);
         
         int64_t val = dmtcp_kvdb_get(key);
         if (val > 0) {
