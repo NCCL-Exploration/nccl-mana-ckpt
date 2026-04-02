@@ -7,7 +7,19 @@
 #include "nccl_wrappers.h"
 #include "dmtcp_kvdb_c.h"
 
+#define CUDA_CHECK(cmd)                                                        \
+    do {                                                                       \
+        cudaError_t e = cmd;                                                   \
+        if (e != cudaSuccess) {                                                \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   cudaGetErrorString(e));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
+
+extern void *drain_buffer;
 extern volatile int ckpt_pending; 
+
 typedef struct{
     ncclComm_t comm;
     uint64_t seq;
@@ -131,6 +143,12 @@ ncclResult_t ncclRecv(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
+    if (drain_buffer != NULL) {
+        CUDA_CHECK(cudaMemcpy(recvbuff, drain_buffer, count * get_nccl_type_size(datatype), cudaMemcpyHostToDevice));
+        free(drain_buffer);
+        drain_buffer = NULL;
+        return ncclSuccess;
+    }
     // Call plugin helpers
     init_rank_info(comm);
     add_stream(stream);

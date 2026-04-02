@@ -22,11 +22,12 @@
 #define MAX_STREAMS 64
 #define MESSAGE_SIZE 4096
 
-static void *drain_buffer[MESSAGE_SIZE];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 uint64_t g_target_seq = 0;
 uint64_t g_seq_num = 0;
+
+void *drain_buffer = NULL;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
@@ -130,10 +131,8 @@ static void drain_messages() {
         fflush(stdout);
 
         // Save to drain buffer for replay after resume if needed
-        void *copy = malloc(MESSAGE_SIZE);
-        CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
-        *drain_buffer = copy;
-
+        drain_buffer = malloc(message_size);
+        CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(tmp_buf));
     }
 }

@@ -46,7 +46,7 @@ drain_check: ${LIBNAME}.so tests/drain
 	# Launch DMTCP coordinator
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
-	mpirun -np 2  ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8 \
+	mpirun -np 2  ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
 	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain
 
 tests/drain: tests/drain.c
@@ -76,4 +76,4 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 clean:
 	cd ${CRAC_ROOT} && make clean
 	cd tests && make clean
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o
+	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files
