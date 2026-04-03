@@ -25,8 +25,6 @@
 static void *drain_buffer[MESSAGE_SIZE];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
-uint64_t g_target_seq = 0;
-uint64_t g_seq_num = 0;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
@@ -139,30 +137,33 @@ static void drain_messages() {
 }
 
 static void sequence_number_consensus() {
+	group_entry_t *g = get_or_create_group(g_comm);
+	
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
     // Use SET instead of INCR so we don't accumulate across checkpoints
-    dmtcp_kvdb_set(my_seq_key, g_seq_num);
+    dmtcp_kvdb_set(my_seq_key, g->seq);
 
     // Use a DMTCP global barrier to ensure everyone has published their sequence
     // before we try to calculate the maximum.
     dmtcp_global_barrier("nccl-consensus-seq-published");
 
     // Wait for all ranks to publish their sequence and find the MAX
-    uint64_t max_seq = g_seq_num;
+    uint64_t max_seq = g->seq;
     for (int i = 0; i < g_nranks; i++) {
         char key[64];
         snprintf(key, sizeof(key), "rank_%d_seq", i);
         uint64_t rank_seq = 0;
         // Busy wait for other ranks to publish (in a real distributed KVDB)
+		// TODO: We can remove this right? because the barrier already guarantees all ranks are synchronized
         while ((rank_seq = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
             usleep(1000);
         }
         if (rank_seq > max_seq) max_seq = rank_seq;
     }
 
-    g_target_seq = max_seq;
-    printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g_target_seq, g_seq_num);
+    g->target = max_seq;
+    printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g->target, g->seq);
 
 }
 
@@ -200,7 +201,8 @@ static void drain_nccl() {
     sequence_number_consensus();
 
     // Wait for application thread to reach target_seq
-    while (g_seq_num < g_target_seq) {
+	group_entry_t *g = get_or_create_group(g_comm);
+    while (g->seq < g->target) {
         usleep(1000);
     }
     
@@ -226,8 +228,7 @@ resume()
 {
   printf("*** The application has now been checkpointed. ***\n");
   ckpt_pending = 0;
-  g_target_seq = 0;
-  g_num_streams = 0;
+  reset_groups();
 }
 
 static void
@@ -235,12 +236,11 @@ restart()
 {
   printf("The application is now restarting from a checkpoint.\n");
   ckpt_pending = 0;
-  g_target_seq = 0;
-  g_seq_num = 0; // Sequence should probably reset or be restored from ckpt
   g_num_streams = 0;
   g_my_rank = -1;
   g_nranks = 0;
   g_comm = NULL;
+  reset_groups();
 }
 
 static void

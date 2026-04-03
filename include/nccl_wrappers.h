@@ -16,6 +16,16 @@ extern volatile int ckpt_pending;
 extern uint64_t g_seq_num;
 extern uint64_t g_target_seq;
 
+// exposed types for group management in ncclwrappers
+typedef struct {
+    ncclComm_t comm;
+    uint64_t seq;
+    uint64_t target;
+} group_entry_t;
+
+group_entry_t* get_or_create_group(ncclComm_t comm);
+void reset_groups();
+
 // Helper functions provided by libncclplugin.c
 void add_stream(cudaStream_t stream);
 void init_rank_info(ncclComm_t comm);
