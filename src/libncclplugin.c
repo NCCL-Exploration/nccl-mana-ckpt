@@ -22,9 +22,10 @@
 #define MAX_STREAMS 64
 #define MESSAGE_SIZE 4096
 
-static void *drain_buffer[MESSAGE_SIZE];
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
+
+void *drain_buffer = NULL;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
@@ -54,7 +55,7 @@ ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending)
 
   // format key and query
   char key[64];
-  snprintf(key, sizeof(key), "%d|%d", source, g_my_rank);
+  sprintf(key, "%d|%d", source, g_my_rank);
   
   // Use our wrapper to get the count
   int64_t size = dmtcp_kvdb_get(key);
@@ -96,8 +97,8 @@ void ncclBroadcast_(
 }
 
 // Key format: "src|dest"
-static void build_msg_key(char *buf, size_t len, int src, int dest) {
-    snprintf(buf, len, "%d|%d", src, dest);
+static void build_msg_key(char *buf, int src, int dest) {
+    sprintf(buf, "%d|%d", src, dest);
 }
 
 
@@ -128,10 +129,8 @@ static void drain_messages() {
         fflush(stdout);
 
         // Save to drain buffer for replay after resume if needed
-        void *copy = malloc(MESSAGE_SIZE);
-        CUDA_CHECK(cudaMemcpy(copy, tmp_buf, MESSAGE_SIZE, cudaMemcpyDeviceToHost));
-        *drain_buffer = copy;
-
+        drain_buffer = malloc(message_size);
+        CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(tmp_buf));
     }
 }
@@ -172,7 +171,7 @@ static int all_drained() {
         if (source == g_my_rank) continue;
         
         char key[64];
-        build_msg_key(key, sizeof(key), source, g_my_rank);
+        build_msg_key(key, source, g_my_rank);
         
         int64_t val = dmtcp_kvdb_get(key);
         if (val > 0) {
