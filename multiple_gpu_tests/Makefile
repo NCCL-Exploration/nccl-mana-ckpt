@@ -26,6 +26,8 @@ GREEN = \033[0;32m
 RED   = \033[0;31m
 NC    = \033[0m
 
+# Running test 1 from the make file does not use all gpus available
+
 # --- Primary Entry Points ---
 all: $(DRIVER)
 
