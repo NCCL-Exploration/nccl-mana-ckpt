@@ -235,40 +235,35 @@ int pre_init_ckpt_p2p(void)
 }
 
 /**
- * Test 4: Send all messages on the ring, sleep for in-transit checkpoint,
- * then post matching receives.
+ * Test 4: In-transit checkpoint — post send+recv as async ops on CUDA
+ * streams, then sleep WITHOUT synchronizing.  The checkpoint fires while
+ * the transfers are still in-flight on the GPU.  After waking, sync and
+ * verify data integrity.
+ *
+ * NOTE: The old version posted sends-only (no matching recvs) in the
+ * ncclGroup call, which deadlocks — NCCL requires paired send/recv
+ * within the same group to make progress.
  */
 int in_transit_p2p(void)
 {
     setup();
 
-    printf("[TEST 4] Sending %d ring messages...\n", num_msgs);
-    for (int m = 0; m < num_msgs; m++) {
-        NCCL_CHECK(ncclGroupStart());
-        for (int i = 0; i < num_gpus; i++) {
-            int dst = (i + 1) % num_gpus;
-            NCCL_CHECK(ncclSend(gpu[i].send_buf, count, ncclFloat, dst,
-                                gpu[i].comm, gpu[i].stream));
-        }
-        NCCL_CHECK(ncclGroupEnd());
-    }
+    /* Post all ring send+recv — these are non-blocking (async on streams) */
+    printf("[TEST 4] Posting %d ring send+recv (async, no sync yet)...\n", num_msgs);
+    for (int m = 0; m < num_msgs; m++)
+        send_recv_ring();
 
-    printf("[TEST 4] Messages SENT. Sleeping 20s for in-transit ckpt...\n");
+    /* Do NOT synchronize — the transfers are still in-flight on the
+       CUDA streams.  Sleep to give the Makefile time to trigger the
+       checkpoint while data is genuinely in transit. */
+    printf("[TEST 4] Ops posted. Sleeping 20s for in-transit ckpt...\n");
+    printf("[TEST 4]   (checkpoint should trigger during this window)\n");
     sleep(20);
 
-    printf("[TEST 4] Waking up. Posting receives...\n");
-    for (int m = 0; m < num_msgs; m++) {
-        NCCL_CHECK(ncclGroupStart());
-        for (int i = 0; i < num_gpus; i++) {
-            int src = (i - 1 + num_gpus) % num_gpus;
-            NCCL_CHECK(ncclRecv(gpu[i].recv_buf, count, ncclFloat, src,
-                                gpu[i].comm, gpu[i].stream));
-        }
-        NCCL_CHECK(ncclGroupEnd());
-    }
-
+    /* Now synchronize and verify */
+    printf("[TEST 4] Waking up — synchronizing streams...\n");
     sync_all();
-    printf("[TEST 4] All receives complete.\n");
+    printf("[TEST 4] Streams synchronized.\n");
 
     int errors = verify();
     teardown();

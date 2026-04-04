@@ -49,8 +49,8 @@ test2: $(DRIVER)
 test3: $(DRIVER)
 	@$(call run_test,3,Test 3: Pre-init checkpoint,5,$(MSGS),$(SIZE),$(NGPUS))
 
-# Test 4: In-transit checkpoint — send, sleep 20s, then recv
-#   CKPT_DELAY=10 → checkpoint while messages are in-flight
+# Test 4: In-transit checkpoint — async send+recv posted, no sync yet
+#   CKPT_DELAY=10 → checkpoint while CUDA streams are still processing
 test4: $(DRIVER)
 	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
 
