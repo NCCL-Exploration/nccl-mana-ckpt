@@ -90,9 +90,10 @@ void ncclBroadcast_(
 		cudaStream_t stream
 ) {
 	if (g_my_rank == -1) init_rank_info(comm);
+	if (g_my_rank != root) return;
 	for (int i = 0; i < g_nranks; i++) {
 		if (i == g_my_rank) continue;
-		ncclSend(sendbuff, count, datatype, peer, comm, stream);
+		ncclSend(sendbuff, count, datatype, i, comm, stream);
 	}
 }
 
