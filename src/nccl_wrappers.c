@@ -6,6 +6,7 @@
 #include <nccl.h>
 #include "nccl_wrappers.h"
 #include "dmtcp_kvdb_c.h"
+#include <string.h>
 
 #define CUDA_CHECK(cmd)                                                        \
     do {                                                                       \
@@ -20,11 +21,7 @@
 extern void *drain_buffer;
 extern volatile int ckpt_pending; 
 
-typedef struct{
-    ncclComm_t comm;
-    uint64_t seq;
-    uint64_t target;
-} group_entry_t;
+/* group_entry_t is defined in nccl_wrappers.h */
 // Might have to make it dynamically allocated at some point
 #define NUM_GROUPS 5 
 static group_entry_t groups[NUM_GROUPS]; // We need to change it to a Set at some point
@@ -42,6 +39,8 @@ static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
+
+static void prepare_collective(ncclComm_t comm, cudaStream_t stream);
 
 group_entry_t* get_or_create_group(ncclComm_t comm) {
     for (int i = 0; i < NUM_GROUPS; i++) {
@@ -254,7 +253,7 @@ void reset_groups() {
     memset(groups, 0, sizeof(groups));
 }
 
-static void prepare_collective(ncclComm_t comm, cudaStream_t stream){
+static void prepare_collective(ncclComm_t comm, cudaStream_t stream) {
     init_rank_info(comm);
     add_stream(stream);
     increment_seq_and_wait(comm);
