@@ -19,7 +19,7 @@ export NCCL_DEBUG=WARN
 # NGPUS = Number of GPUs to use
 MSGS  ?= 5
 SIZE  ?= 1024
-NGPUS ?= 2
+NGPUS ?= $(shell nvidia-smi --list-gpus 2>/dev/null | wc -l)
 
 # Colors for output
 GREEN = \033[0;32m
