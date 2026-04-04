@@ -7,7 +7,19 @@
 #include "nccl_wrappers.h"
 #include "dmtcp_kvdb_c.h"
 
+#define CUDA_CHECK(cmd)                                                        \
+    do {                                                                       \
+        cudaError_t e = cmd;                                                   \
+        if (e != cudaSuccess) {                                                \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__,               \
+                   cudaGetErrorString(e));                                     \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
+
+extern void *drain_buffer;
 extern volatile int ckpt_pending; 
+
 typedef struct{
     ncclComm_t comm;
     uint64_t seq;
@@ -31,7 +43,7 @@ static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
-static group_entry_t* get_or_create_group(ncclComm_t comm) {
+group_entry_t* get_or_create_group(ncclComm_t comm) {
     for (int i = 0; i < NUM_GROUPS; i++) {
         if (groups[i].comm == comm) return &groups[i];
         if (groups[i].comm == NULL) {
@@ -131,6 +143,12 @@ ncclResult_t ncclRecv(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
+    if (drain_buffer != NULL) {
+        CUDA_CHECK(cudaMemcpy(recvbuff, drain_buffer, count * get_nccl_type_size(datatype), cudaMemcpyHostToDevice));
+        free(drain_buffer);
+        drain_buffer = NULL;
+        return ncclSuccess;
+    }
     // Call plugin helpers
     init_rank_info(comm);
     add_stream(stream);
@@ -157,10 +175,7 @@ ncclResult_t ncclAllReduce(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclAllReduce);
     return real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
 }
@@ -174,10 +189,7 @@ ncclResult_t ncclBroadcast(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclBroadcast);
     return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
@@ -192,10 +204,7 @@ ncclResult_t ncclReduce(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclReduce);
     return real_ncclReduce(sendbuff, recvbuff, count, datatype, op, root, comm, stream);
 }
@@ -208,10 +217,7 @@ ncclResult_t ncclAllGather(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclAllGather);
     return real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
 }
@@ -225,10 +231,7 @@ ncclResult_t ncclGather(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclGather);
     return real_ncclGather(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
@@ -242,10 +245,18 @@ ncclResult_t ncclReduceScatter(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-
+    prepare_collective(comm, stream);
     LOAD_SYM(ncclReduceScatter);
     return real_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
 }
+
+void reset_groups() {
+    memset(groups, 0, sizeof(groups));
+}
+
+static void prepare_collective(ncclComm_t comm, cudaStream_t stream){
+    init_rank_info(comm);
+    add_stream(stream);
+    increment_seq_and_wait(comm);
+}
+

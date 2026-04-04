@@ -73,11 +73,11 @@ int main(int argc, char **argv) {
         printf("[rank 0] Sending...\n");
         NCCLCHECK(ncclSend(d_buf, NELEMS, ncclFloat, 1, comm, stream));
         CUDACHECK(cudaStreamSynchronize(stream));
-        printf("[rank 0] Send complete. Sleeping 30s...\n");
-        sleep(30);
+        printf("[rank 0] Send complete. Sleeping 10s...\n");
+        sleep(10);
 
     } else {
-        printf("[rank 1] Sleeping 10s — CHECKPOINT NOW (dmtcp_command -c)\n");
+        printf("[rank 1] Sleeping 10s... [CHECKPOINT WINDOW]\n");
         sleep(10);
 
         printf("[rank 1] Receiving...\n");
