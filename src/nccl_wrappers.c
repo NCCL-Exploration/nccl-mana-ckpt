@@ -78,7 +78,7 @@ static void build_msg_key(char *buf, size_t len, int src, int dest) {
     snprintf(buf, len, "%d|%d", src, dest);
 }
 
-static void increment_seq_and_wait(ncclComm_t comm) {
+void increment_seq_and_wait(ncclComm_t comm) {
     // If a checkpoint is pending, we must not start a new collective
     // until the coordinator has decided on the global target sequence.
     // This rank might be fast and reach the next sequence while others are lagging.
