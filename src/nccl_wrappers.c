@@ -37,6 +37,7 @@ static ncclResult_t (*real_ncclGather)(const void*, void*, size_t, ncclDataType_
 static ncclResult_t (*real_ncclReduceScatter)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int) = NULL;
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
+static ncclResult_t (*real_ncclScatter)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
@@ -237,6 +238,23 @@ ncclResult_t ncclGather(
     prepare_collective(comm, stream);
     LOAD_SYM(ncclGather);
     return real_ncclGather(sendbuff, recvbuff, count, datatype, root, comm, stream);
+}
+
+ncclResult_t ncclScatter(
+    const void* sendbuff,
+    void* recvbuff,
+    size_t sendcount,
+    ncclDataType_t datatype,
+    int root,
+    ncclComm_t comm,
+    cudaStream_t stream
+) {
+    init_rank_info(comm);
+    add_stream(stream);
+    increment_seq_and_wait(comm);
+
+    LOAD_SYM(ncclScatter);
+    return real_ncclScatter(sendbuff, recvbuff, sendcount, datatype, root, comm, stream);
 }
 
 ncclResult_t ncclReduceScatter(
