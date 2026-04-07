@@ -182,7 +182,8 @@ static int all_drained() {
 }
 
 static void drain_nccl() {
-    printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g_seq_num);
+	group_entry_t *g = get_or_create_group(g_comm);
+    printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g->seq);
     
     // Set pending flag to capture any late messages if threads are still running
     ckpt_pending = 1;
@@ -200,7 +201,7 @@ static void drain_nccl() {
     sequence_number_consensus();
 
     // Wait for application thread to reach target_seq
-	group_entry_t *g = get_or_create_group(g_comm);
+	
     while (g->seq < g->target) {
         usleep(1000);
     }
@@ -210,7 +211,7 @@ static void drain_nccl() {
          usleep(1000);
     }
     
-    printf("[NCCL Drain] Drain complete on rank %d at seq %lu\n", g_my_rank, g_seq_num);
+    printf("[NCCL Drain] Drain complete on rank %d at seq %lu\n", g_my_rank, g->seq);
 }
 
 // ncclSend and ncclRecv are now in nccl_wrappers.c
