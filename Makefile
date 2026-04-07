@@ -56,6 +56,9 @@ cc_simple_check: ${LIBNAME}.so tests/cc_simple
 	mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} \
 		--with-plugin $$PWD/${LIBNAME}.so ./tests/cc_simple
 
+tests/cc:
+	gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread
+	./test_nccl_wrappers
 
 tests/drain: tests/drain.c
 	nvcc ${CFLAGS} -o $@ $<

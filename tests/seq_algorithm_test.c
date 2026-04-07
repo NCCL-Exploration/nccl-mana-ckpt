@@ -5,7 +5,8 @@
 #include "nccl_wrappers.h"
 
 
-// gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/stubs.c -I include -lpthread ./test_nccl_wrappers
+// gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread 
+//./test_nccl_wrappers
 extern volatile int ckpt_pending;
  
 #define TEST_COMM ((ncclComm_t)0x1)
