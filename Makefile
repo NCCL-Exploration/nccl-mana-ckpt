@@ -49,6 +49,14 @@ drain_check: ${LIBNAME}.so tests/drain
 	mpirun -np 2  ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
 	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain
 
+cc_simple_check: ${LIBNAME}.so tests/cc_simple
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
+	mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} \
+		--with-plugin $$PWD/${LIBNAME}.so ./tests/cc_simple
+
+
 tests/drain: tests/drain.c
 	nvcc ${CFLAGS} -o $@ $<
 
