@@ -244,6 +244,53 @@ ncclResult_t ncclGather(
     return real_ncclGather(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
 
+ncclResult_t ncclGather_p2p(
+    const void       *sendbuff,
+    void             *recvbuff,
+    size_t            sendcount,
+    ncclDataType_t    datatype,
+    int               root,
+    ncclComm_t        comm,
+    cudaStream_t      stream)
+{
+    int rank, nranks;
+    ncclResult_t ret;
+
+    if ((ret = ncclCommUserRank(comm, &rank))   != ncclSuccess) return ret;
+    if ((ret = ncclCommCount(comm, &nranks))    != ncclSuccess) return ret;
+
+    size_t elem_bytes = nccl_type_size(datatype);
+    if (elem_bytes == 0) return ncclInvalidArgument;
+
+    /*
+     * Open a group so NCCL can schedule all point-to-point ops together.
+     * This is mandatory when driving multiple send/recv from one thread
+     * to prevent deadlock on rendezvous-protocol transports.
+     */
+    if ((ret = ncclGroupStart()) != ncclSuccess) return ret;
+
+    if (rank == root) {
+        /* Root posts a Recv slot for every rank, including itself. */
+        for (int r = 0; r < nranks; r++) {
+            char *slot = (char *)recvbuff + (size_t)r * sendcount * elem_bytes;
+            ret = ncclRecv(slot, sendcount, datatype, r, comm, stream);
+            if (ret != ncclSuccess) {
+                ncclGroupEnd(); /* best-effort cleanup */
+                return ret;
+            }
+        }
+    }
+
+    /* Every rank (including root) sends its contribution. */
+    ret = ncclSend(sendbuff, sendcount, datatype, root, comm, stream);
+    if (ret != ncclSuccess) {
+        ncclGroupEnd();
+        return ret;
+    }
+
+    return ncclGroupEnd();
+}
+
 ncclResult_t ncclScatter(
     const void* sendbuff,
     void* recvbuff,
@@ -278,10 +325,3 @@ ncclResult_t ncclReduceScatter(
 void reset_groups() {
     memset(groups, 0, sizeof(groups));
 }
-
-static void prepare_collective(ncclComm_t comm, cudaStream_t stream) {
-    init_rank_info(comm);
-    add_stream(stream);
-    increment_seq_and_wait(comm);
-}
-
