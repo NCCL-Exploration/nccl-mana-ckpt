@@ -90,9 +90,10 @@ void ncclBroadcast_(
 		cudaStream_t stream
 ) {
 	if (g_my_rank == -1) init_rank_info(comm);
+	if (g_my_rank != peer) return;
 	for (int i = 0; i < g_nranks; i++) {
 		if (i == g_my_rank) continue;
-		ncclSend(sendbuff, count, datatype, peer, comm, stream);
+		ncclSend(sendbuff, count, datatype, i, comm, stream);
 	}
 }
 
@@ -182,7 +183,7 @@ static int all_drained() {
 }
 
 static void drain_nccl() {
-	group_entry_t *g = get_or_create_group(g_comm);
+    group_entry_t *g = get_or_create_group(g_comm);
     printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g->seq);
     
     // Set pending flag to capture any late messages if threads are still running
@@ -194,21 +195,30 @@ static void drain_nccl() {
         cudaStreamSynchronize(g_active_streams[i]);
     }
 
-    // Drain messages
-    drain_messages();
+    // Check how many DMTCP peers are connected.  In a single-process
+    // multi-GPU setup, g_nranks > 1 (NCCL ranks) but there is only one
+    // DMTCP process — DMTCP checkpoints it atomically, so inter-process
+    // drain and consensus are unnecessary (and would deadlock).
+    int numPeers = 0, isRunning = 0;
+    dmtcp_get_coordinator_status(&numPeers, &isRunning);
+    printf("[NCCL Drain] DMTCP peers: %d, NCCL ranks: %d\n", numPeers, g_nranks);
 
-    // Sequence number consensus
-    sequence_number_consensus();
+    if (numPeers > 1) {
+        // Multi-process: full drain + consensus
+        drain_messages();
+        sequence_number_consensus();
 
-    // Wait for application thread to reach target_seq
-	
-    while (g->seq < g->target) {
-        usleep(1000);
-    }
-    
-    while (!all_drained()) {
-        // TODO: Backoff?
-         usleep(1000);
+        // Wait for application thread to reach target_seq
+        while (g->seq < g->target) {
+            usleep(1000);
+        }
+
+        while (!all_drained()) {
+            // TODO: Backoff?
+             usleep(1000);
+        }
+    } else {
+        printf("[NCCL Drain] Single process — skipping multi-process consensus\n");
     }
     
     printf("[NCCL Drain] Drain complete on rank %d at seq %lu\n", g_my_rank, g->seq);

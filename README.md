@@ -47,6 +47,12 @@ cd nccl-mana-ckpt
 git submodule update --init --recursive --remote
 ```
 
+### 2a. DMTCP Patches (Will get fixed over time)
+
+a/src/plugin/ipc/file/fileconnlist.cpp:400 - +strstr(area.name, "nvidia") != NULL ||
+
+a/src/threadwrappers.cpp:106&109 - -JASSERT
+
 ### 3. Optionally, Build the Plugin
 ```bash
 make
