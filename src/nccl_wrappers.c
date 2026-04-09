@@ -259,7 +259,7 @@ ncclResult_t ncclGather_p2p(
     if ((ret = ncclCommUserRank(comm, &rank))   != ncclSuccess) return ret;
     if ((ret = ncclCommCount(comm, &nranks))    != ncclSuccess) return ret;
 
-    size_t elem_bytes = nccl_type_size(datatype);
+    size_t elem_bytes = get_nccl_type_size(datatype);
     if (elem_bytes == 0) return ncclInvalidArgument;
 
     /*
