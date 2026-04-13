@@ -20,6 +20,8 @@ JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
 DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
+MPICH_BIN = /shared/EL9/explorer/MPICH/4.3.0b1/bin
+
 DEMO_PORT=7781
 
 override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
@@ -39,28 +41,41 @@ nccl_check: ${LIBNAME}.so tests/single_gpu_test
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
 		--with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
 
-drain_check: ${LIBNAME}.so tests/drain
+drain_recv_check: ${LIBNAME}.so tests/drain_recv
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	# Launch DMTCP coordinator
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
-	mpirun -np 2  ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain
+	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
+	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain_recv
+
+drain_send_check: ${LIBNAME}.so tests/drain_send
+	# Kill an old coordinator on this port if present, just in case.
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	# Launch DMTCP coordinator
+	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
+	# Run the actual NCCL test
+	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
+	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain_send
 
 cc_simple_check: ${LIBNAME}.so tests/cc_simple
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
-	mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} \
+	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} \
 		--with-plugin $$PWD/${LIBNAME}.so ./tests/cc_simple
 
 tests/cc:
 	gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread
 	./test_nccl_wrappers
 
-tests/drain: tests/drain.c
+tests/drain_recv: tests/drain_recv.c
+	nvcc ${CFLAGS} -o $@ $<
+
+tests/drain_send: tests/drain_send.c
 	nvcc ${CFLAGS} -o $@ $<
 
 ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
