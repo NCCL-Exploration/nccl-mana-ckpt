@@ -6,7 +6,7 @@
 #include <nccl.h>
 #include <string.h>
 #include "nccl_wrappers.h"
-#include "dmtcp_kvdb_c.h"
+#include "inflight.h"
 #include <string.h>
 
 
@@ -20,8 +20,7 @@
         }                                                                      \
     } while (0)
 
-extern void *drain_buffer;
-extern volatile int ckpt_pending; 
+extern volatile int ckpt_pending;
 
 /* group_entry_t is defined in nccl_wrappers.h */
 // Might have to make it dynamically allocated at some point
@@ -78,10 +77,6 @@ static size_t get_nccl_type_size(ncclDataType_t type) {
     }
 }
 
-// Key format: "src|dest"
-static void build_msg_key(char *buf, size_t len, int src, int dest) {
-    snprintf(buf, len, "%d|%d", src, dest);
-}
 
 void increment_seq_and_wait(ncclComm_t comm) {
     // If a checkpoint is pending, we must not start a new collective
@@ -124,14 +119,9 @@ ncclResult_t ncclSend(
     init_rank_info(comm);
     add_stream(stream);
 
-    char key[64];
-    build_msg_key(key, sizeof(key), g_my_rank, peer);
+    // Local tracking — no coordinator I/O on the hot path
     size_t bytes = count * get_nccl_type_size(datatype);
-
-    if (!dmtcp_kvdb_set(key, (int64_t)bytes)) {
-        fprintf(stderr, "[NCCL-MANA] Failed to set pending message size for %s\n", key);
-        abort();
-    }
+    inflight_mark_send(g_my_rank, peer, bytes);
 
     LOAD_SYM(ncclSend);
     return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
@@ -145,24 +135,20 @@ ncclResult_t ncclRecv(
     ncclComm_t comm,
     cudaStream_t stream
 ) {
-    if (drain_buffer != NULL) {
-        CUDA_CHECK(cudaMemcpy(recvbuff, drain_buffer, count * get_nccl_type_size(datatype), cudaMemcpyHostToDevice));
-        free(drain_buffer);
-        drain_buffer = NULL;
+    // Fast-path: replay a message that was drained at checkpoint time
+    drain_msg_t *drained = drain_queue_peek(peer);
+    if (drained != NULL) {
+        size_t bytes = count * get_nccl_type_size(datatype);
+        size_t copy_bytes = (drained->bytes < bytes) ? drained->bytes : bytes;
+        CUDA_CHECK(cudaMemcpy(recvbuff, drained->data, copy_bytes, cudaMemcpyHostToDevice));
+        drain_queue_pop(peer);  // frees drained->data
         return ncclSuccess;
     }
-    // Call plugin helpers
+
+    // Normal path — local tracking, no coordinator I/O
     init_rank_info(comm);
     add_stream(stream);
-
-    char key[64];
-    build_msg_key(key, sizeof(key), peer, g_my_rank);
-    size_t bytes = count * get_nccl_type_size(datatype);
-
-    if (!dmtcp_kvdb_set(key, 0)) {
-        fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
-        abort();
-    }
+    inflight_mark_recv(peer, g_my_rank);
 
     LOAD_SYM(ncclRecv);
     return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
