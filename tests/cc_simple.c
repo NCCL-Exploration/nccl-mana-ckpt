@@ -82,8 +82,10 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
-        if (i == 10)
-            printf("[rank %d] iter 10 — CHECKPOINT NOW: dmtcp_command -c\n", rank);
+        if (i == 10){
+	    printf("[rank %d] iter 10 — CHECKPOINT NOW: dmtcp_command -c\n", rank);
+	    sleep(10);
+	}
     }
 
     CUDACHECK(cudaFree(d_buf));

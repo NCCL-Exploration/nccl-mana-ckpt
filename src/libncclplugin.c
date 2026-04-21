@@ -135,17 +135,17 @@ static void drain_messages() {
 }
 
 static void sequence_number_consensus() {
-	group_entry_t *g = get_or_create_group(g_comm);
-	
+    group_entry_t *g =  get_or_create_group(g_comm);
+    printf("[rank %d] publishing seq %lu\n", g_my_rank, g->seq);
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
     // Use SET instead of INCR so we don't accumulate across checkpoints
     dmtcp_kvdb_set(my_seq_key, g->seq);
-
+    printf("[rank %d] reaching barrier\n", g_my_rank);
     // Use a DMTCP global barrier to ensure everyone has published their sequence
     // before we try to calculate the maximum.
     dmtcp_global_barrier("nccl-consensus-seq-published");
-
+    printf("[rank %d] past barrier\n", g_my_rank);
     // Wait for all ranks to publish their sequence and find the MAX
     uint64_t max_seq = g->seq;
     for (int i = 0; i < g_nranks; i++) {
@@ -196,17 +196,22 @@ static void drain_nccl() {
     
     // Set pending flag to capture any late messages if threads are still running
     ckpt_pending = 1;
-
-    // Sync any active streams first
-    for (int i = 0; i < g_num_streams; i++) {
-        cudaStreamSynchronize(g_active_streams[i]);
+    // __sync_synchronize();
+    printf("[rank %d] syncing %d streams\n", g_my_rank, g_num_streams);
+	    // Sync any active streams first
+    if(!all_drained()){	
+	    for (int i = 0; i < g_num_streams; i++) {
+        	printf("[rank %d] syncing stream %d\n", g_my_rank, i);
+        	cudaStreamSynchronize(g_active_streams[i]);
+    	}
     }
-
+    printf("[rank %d] streams synced\n", g_my_rank);
+    
     // Check how many DMTCP peers are connected.
     int numPeers = 0, isRunning = 0;
     dmtcp_get_coordinator_status(&numPeers, &isRunning);
     printf("[NCCL Drain] DMTCP peers: %d, NCCL ranks: %d\n", numPeers, g_nranks);
-
+    
     if (numPeers > 1) {
         // Flush the local pending table to KVDB (one batch of writes)
         flush_pending_to_kvdb();
@@ -242,11 +247,12 @@ checkpoint()
 static void
 resume()
 {
+  printf("[rank %d] RESUME called\n", g_my_rank);
   printf("*** The application has now been checkpointed. ***\n");
   ckpt_pending = 0;
   reset_groups();
   inflight_init();
-  // NOTE: drain_queues are NOT reset — they hold messages to replay via ncclRecv
+  printf("[rank %d] RESUME complete\n", g_my_rank);
 }
 
 static void

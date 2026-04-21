@@ -83,6 +83,10 @@ void increment_seq_and_wait(ncclComm_t comm) {
     // until the coordinator has decided on the global target sequence.
     // This rank might be fast and reach the next sequence while others are lagging.
     group_entry_t* g = get_or_create_group(comm);
+    if (g == NULL) {
+        fprintf(stderr, "[rank %d] get_or_create_group returned NULL\n", g_my_rank);
+        abort();
+    }
     while (ckpt_pending && g->target != 0 && g->seq >= g->target) {
         usleep(100);
     }
