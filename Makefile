@@ -22,7 +22,7 @@ LINK = ${CC}
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
 
 plugin: src/libncclplugin.so
 
@@ -72,13 +72,16 @@ ${DMTCP_ROOT}/bin:
 ${CRAC_ROOT}/libdmtcp_crac.so:
 	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}
 
-${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o
+${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o inflight.o
 	${CXX} -shared -o $@ $^
 
 ${LIBNAME}.o: ${LIBNAME}.c
 	${CC} ${CFLAGS} -c -o $@ $<
 
 nccl_wrappers.o: src/nccl_wrappers.c
+	${CC} ${CFLAGS} -c -o $@ $<
+
+inflight.o: src/inflight.c
 	${CC} ${CFLAGS} -c -o $@ $<
 
 dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp

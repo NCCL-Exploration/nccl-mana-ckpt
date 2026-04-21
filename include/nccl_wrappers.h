@@ -3,6 +3,7 @@
 
 #include <nccl.h>
 #include <stdint.h>
+#include "inflight.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,8 +14,6 @@ extern int g_my_rank;
 extern int g_nranks;
 extern ncclComm_t g_comm;
 extern volatile int ckpt_pending;
-extern uint64_t g_seq_num;
-extern uint64_t g_target_seq;
 
 // exposed types for group management in ncclwrappers
 typedef struct {

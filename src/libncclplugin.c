@@ -7,6 +7,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include "inflight.h"
 
 #define CUDA_CHECK(cmd)                                                        \
     do {                                                                       \
@@ -25,7 +26,6 @@
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
 
-void *drain_buffer = NULL;
 
 ncclComm_t g_comm = NULL;
 int g_nranks = 0;
@@ -53,17 +53,11 @@ void init_rank_info(ncclComm_t comm) {
 ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending) {
   if (flag == NULL || pending == NULL) return ncclInvalidArgument;
 
-  // format key and query
-  char key[64];
-  sprintf(key, "%d|%d", source, g_my_rank);
-  
-  // Use our wrapper to get the count
-  int64_t size = dmtcp_kvdb_get(key);
-
-  if (size > 0) {
+  // Read from local pending table — no coordinator I/O
+  if (inflight_has_pending(source, g_my_rank)) {
       *flag = 1;
-      *pending = (size_t)size;
-      printf("[NCCL-MANA] Probe: Found message of size %ld from %d to %d\n", size, source, g_my_rank);
+      *pending = inflight_pending_bytes(source, g_my_rank);
+      printf("[NCCL-MANA] Probe: Found message of size %zu from %d to %d\n", *pending, source, g_my_rank);
   } else {
       *flag = 0;
       *pending = 0;
@@ -90,9 +84,10 @@ void ncclBroadcast_(
 		cudaStream_t stream
 ) {
 	if (g_my_rank == -1) init_rank_info(comm);
+	if (g_my_rank != peer) return;
 	for (int i = 0; i < g_nranks; i++) {
 		if (i == g_my_rank) continue;
-		ncclSend(sendbuff, count, datatype, peer, comm, stream);
+		ncclSend(sendbuff, count, datatype, i, comm, stream);
 	}
 }
 
@@ -104,23 +99,22 @@ static void build_msg_key(char *buf, int src, int dest) {
 
 static void drain_messages() {
     printf("DRAIN: %d ranks found\n", g_nranks);
-    for (size_t src = 0; src < g_nranks; src++) {
+    for (int src = 0; src < g_nranks; src++) {
         if (src == g_my_rank) continue;
-        int flag;
-        size_t message_size;
-        ncclIprobe(src, g_comm, &flag, &message_size);
 
-        if (!flag) continue;
+        // Check local pending table — no KVDB reads
+        if (!inflight_has_pending(src, g_my_rank)) continue;
+
+        size_t message_size = inflight_pending_bytes(src, g_my_rank);
+        printf("[NCCL Drain] Rank %d: draining message of size %zu from %d\n",
+               g_my_rank, message_size, src);
+        fflush(stdout);
 
         void *tmp_buf;
         CUDA_CHECK(cudaSetDevice(g_my_rank));
-        CUDA_CHECK(cudaMalloc(&tmp_buf, MESSAGE_SIZE));
-        printf("Pending message found!\n");
+        CUDA_CHECK(cudaMalloc(&tmp_buf, message_size));
 
-        printf("[NCCL Drain] Rank %d: draining message of size %zu from %zu\n", g_my_rank, message_size, src);
-        fflush(stdout);
-
-        ncclRecv(tmp_buf, MESSAGE_SIZE / sizeof(float), ncclFloat, src, g_comm, 0);
+        ncclRecv(tmp_buf, message_size / sizeof(float), ncclFloat, src, g_comm, 0);
         printf("[NCCL Drain] Rank %d: recv posted, syncing...\n", g_my_rank);
         fflush(stdout);
 
@@ -128,10 +122,15 @@ static void drain_messages() {
         printf("[NCCL Drain] Rank %d: sync done\n", g_my_rank);
         fflush(stdout);
 
-        // Save to drain buffer for replay after resume if needed
-        drain_buffer = malloc(message_size);
-        CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
+        // Copy to host and push into drain queue for replay on resume
+        void *host_copy = malloc(message_size);
+        CUDA_CHECK(cudaMemcpy(host_copy, tmp_buf, message_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(tmp_buf));
+
+        drain_queue_push(src, host_copy, message_size);
+
+        // Mark as received locally
+        inflight_mark_recv(src, g_my_rank);
     }
 }
 
@@ -166,15 +165,25 @@ static void sequence_number_consensus() {
 
 }
 
+static void flush_pending_to_kvdb() {
+    // One-time batch flush of the local pending table to KVDB.
+    // Only called at checkpoint time for multi-process consensus.
+    for (int src = 0; src < g_nranks; src++) {
+        for (int dst = 0; dst < g_nranks; dst++) {
+            if (src == dst) continue;
+            char key[64];
+            build_msg_key(key, src, dst);
+            size_t bytes = inflight_pending_bytes(src, dst);
+            dmtcp_kvdb_set(key, (int64_t)bytes);
+        }
+    }
+}
+
 static int all_drained() {
+    // Check local pending table — no KVDB reads
     for (int source = 0; source < g_nranks; source++) {
         if (source == g_my_rank) continue;
-        
-        char key[64];
-        build_msg_key(key, source, g_my_rank);
-        
-        int64_t val = dmtcp_kvdb_get(key);
-        if (val > 0) {
+        if (inflight_has_pending(source, g_my_rank)) {
             return 0;
         }
     }
@@ -182,7 +191,7 @@ static int all_drained() {
 }
 
 static void drain_nccl() {
-	group_entry_t *g = get_or_create_group(g_comm);
+    group_entry_t *g = get_or_create_group(g_comm);
     printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g->seq);
     
     // Set pending flag to capture any late messages if threads are still running
@@ -191,27 +200,36 @@ static void drain_nccl() {
     printf("[rank %d] syncing %d streams\n", g_my_rank, g_num_streams);
 	    // Sync any active streams first
     if(!all_drained()){	
-	for (int i = 0; i < g_num_streams; i++) {
+	    for (int i = 0; i < g_num_streams; i++) {
         	printf("[rank %d] syncing stream %d\n", g_my_rank, i);
         	cudaStreamSynchronize(g_active_streams[i]);
     	}
     }
     printf("[rank %d] streams synced\n", g_my_rank);
-    // Drain messages
-    drain_messages();
-
-    // Sequence number consensus
-    sequence_number_consensus();
-
-    // Wait for application thread to reach target_seq
-	
-    while (g->seq < g->target) {
-        usleep(1000);
-    }
     
-    while (!all_drained()) {
-        // TODO: Backoff?
-         usleep(1000);
+    // Check how many DMTCP peers are connected.
+    int numPeers = 0, isRunning = 0;
+    dmtcp_get_coordinator_status(&numPeers, &isRunning);
+    printf("[NCCL Drain] DMTCP peers: %d, NCCL ranks: %d\n", numPeers, g_nranks);
+    
+    if (numPeers > 1) {
+        // Flush the local pending table to KVDB (one batch of writes)
+        flush_pending_to_kvdb();
+
+        // Multi-process: full drain + consensus
+        drain_messages();
+        sequence_number_consensus();
+
+        // Wait for application thread to reach target_seq
+        while (g->seq < g->target) {
+            usleep(1000);
+        }
+
+        while (!all_drained()) {
+            usleep(1000);
+        }
+    } else {
+        printf("[NCCL Drain] Single process — skipping multi-process consensus\n");
     }
     
     printf("[NCCL Drain] Drain complete on rank %d at seq %lu\n", g_my_rank, g->seq);
@@ -233,6 +251,7 @@ resume()
   printf("*** The application has now been checkpointed. ***\n");
   ckpt_pending = 0;
   reset_groups();
+  inflight_init();
   printf("[rank %d] RESUME complete\n", g_my_rank);
 }
 
@@ -246,6 +265,8 @@ restart()
   g_nranks = 0;
   g_comm = NULL;
   reset_groups();
+  inflight_init();
+  // NOTE: drain_queues are NOT reset — they survive restart for ncclRecv replay
 }
 
 static void
