@@ -94,7 +94,7 @@ kill:
 	-killall -9 $(DRIVER) 2>/dev/null || true
 
 clean:
-	rm -f $(DRIVER) single_gpu_test multiproc send_recv drain_send drain_recv cc_simple
+	rm -f $(DRIVER) single_gpu_test tests_drain multiproc
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 test5 kill clean
+.PHONY: all test_all test1 test2 test3 test4 test5 kill clean drain

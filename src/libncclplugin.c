@@ -50,20 +50,20 @@ void init_rank_info(ncclComm_t comm) {
     }
 }
 
-ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int* flag, size_t* pending) {
+ncclResult_t ncclIprobe(int source, ncclComm_t comm, int* flag, size_t* pending) {
   if (flag == NULL || pending == NULL) return ncclInvalidArgument;
 
   // format key and query
   char key[64];
-  sprintf(key, "%d|%d", source, dest);
+  sprintf(key, "%d|%d", source, g_my_rank);
   
   // Use our wrapper to get the count
   int64_t size = dmtcp_kvdb_get(key);
 
-  if (size != 0) {
+  if (size > 0) {
       *flag = 1;
       *pending = (size_t)size;
-      printf("[NCCL-MANA] Probe: Found message of size %ld from %d to %d\n", size, source, dest);
+      printf("[NCCL-MANA] Probe: Found message of size %ld from %d to %d\n", size, source, g_my_rank);
   } else {
       *flag = 0;
       *pending = 0;
@@ -105,47 +105,34 @@ static void build_msg_key(char *buf, int src, int dest) {
 
 static void drain_messages() {
     printf("DRAIN: %d ranks found\n", g_nranks);
-    CUDA_CHECK(cudaSetDevice(g_my_rank));
-
-    for (int peer = 0; peer < g_nranks; peer++) {
-        if (peer == g_my_rank) continue;
-
+    for (size_t src = 0; src < g_nranks; src++) {
+        if (src == g_my_rank) continue;
         int flag;
-        int64_t message_size;
+        size_t message_size;
+        ncclIprobe(src, g_comm, &flag, &message_size);
 
-        // Inbound: did peer send to me? (key: peer|me, positive = need to recv)
-        ncclIprobe(peer, g_my_rank, g_comm, &flag, &message_size);
-        if (flag && message_size > 0) {
-            void *tmp_buf;
-            CUDA_CHECK(cudaMalloc(&tmp_buf, message_size));
-            printf("[NCCL Drain] Rank %d: draining recv of %ld bytes from %d\n",
-                   g_my_rank, message_size, peer);
-            fflush(stdout);
+        if (!flag) continue;
 
-            call_real_ncclRecv(tmp_buf, message_size, ncclInt8, peer, g_comm, 0);
-            cudaStreamSynchronize(0);
+        void *tmp_buf;
+        CUDA_CHECK(cudaSetDevice(g_my_rank));
+        CUDA_CHECK(cudaMalloc(&tmp_buf, MESSAGE_SIZE));
+        printf("Pending message found!\n");
 
-            drain_buffer = malloc(message_size);
-            CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaFree(tmp_buf));
-        }
+        printf("[NCCL Drain] Rank %d: draining message of size %zu from %zu\n", g_my_rank, message_size, src);
+        fflush(stdout);
 
-        // Outbound: do I owe peer a send? (key: me|peer, negative = need to send)
-        ncclIprobe(g_my_rank, peer, g_comm, &flag, &message_size);
-        if (flag && message_size < 0) {
-            size_t size = (size_t)(-message_size);
-            void *tmp_buf;
-            CUDA_CHECK(cudaMalloc(&tmp_buf, size));
-            CUDA_CHECK(cudaMemset(tmp_buf, 0, size));
-            printf("[NCCL Drain] Rank %d: draining send of %zu bytes to %d\n",
-                   g_my_rank, size, peer);
-            fflush(stdout);
+        ncclRecv(tmp_buf, MESSAGE_SIZE / sizeof(float), ncclFloat, src, g_comm, 0);
+        printf("[NCCL Drain] Rank %d: recv posted, syncing...\n", g_my_rank);
+        fflush(stdout);
 
-            call_real_ncclSend(tmp_buf, size, ncclInt8, peer, g_comm, 0);
-            cudaStreamSynchronize(0);
+        cudaStreamSynchronize(0);
+        printf("[NCCL Drain] Rank %d: sync done\n", g_my_rank);
+        fflush(stdout);
 
-            CUDA_CHECK(cudaFree(tmp_buf));
-        }
+        // Save to drain buffer for replay after resume if needed
+        drain_buffer = malloc(message_size);
+        CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(tmp_buf));
     }
 }
 
