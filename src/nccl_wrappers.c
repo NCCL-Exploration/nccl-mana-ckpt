@@ -45,16 +45,6 @@ static ncclResult_t (*real_ncclScatter)(const void*, void*, size_t, ncclDataType
 
 static void prepare_collective(ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t call_real_ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
-    LOAD_SYM(ncclSend);
-    return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
-}
-
-ncclResult_t call_real_ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
-    LOAD_SYM(ncclRecv);
-    return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
-}
-
 group_entry_t* get_or_create_group(ncclComm_t comm) {
     for (int i = 0; i < NUM_GROUPS; i++) {
         if (groups[i].comm == comm) return &groups[i];
@@ -169,7 +159,7 @@ ncclResult_t ncclRecv(
     build_msg_key(key, sizeof(key), peer, g_my_rank);
     size_t bytes = count * get_nccl_type_size(datatype);
 
-    if (!dmtcp_kvdb_set(key, dmtcp_kvdb_get(key) - (int64_t)bytes)) {
+    if (!dmtcp_kvdb_set(key, 0)) {
         fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
         abort();
     }
