@@ -162,16 +162,7 @@ ncclResult_t ncclRecv(
     // Normal path — local tracking, no coordinator I/O
     init_rank_info(comm);
     add_stream(stream);
-
-    char key[64];
-    build_msg_key(key, sizeof(key), peer, g_my_rank);
-    size_t bytes = count * get_nccl_type_size(datatype);
-
-    if (!dmtcp_kvdb_set(key, dmtcp_kvdb_get(key) - (int64_t)bytes)) {
-        fprintf(stderr, "[NCCL-MANA] Failed to unset pending message size for %s\n", key);
-        abort();
-    }
-    inflight_mark_recv(peer, g_my_rank);
+    inflight_mark_recv(peer, g_my_rank, count * get_nccl_type_size(datatype));
 
     LOAD_SYM(ncclRecv);
     return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);

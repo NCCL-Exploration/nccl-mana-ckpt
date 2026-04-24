@@ -127,8 +127,6 @@ static void drain_messages() {
         fflush(stdout);
 
         int flag;
-        int64_t message_size;
-
         // Inbound: did peer send to me? (key: peer|me, positive = need to recv)
         ncclIprobe(peer, g_my_rank, g_comm, &flag, &message_size);
         if (flag && message_size > 0) {
@@ -141,7 +139,7 @@ static void drain_messages() {
             call_real_ncclRecv(tmp_buf, message_size, ncclInt8, peer, g_comm, 0);
             cudaStreamSynchronize(0);
 
-            drain_buffer = malloc(message_size);
+            void *drain_buffer = malloc(message_size);
             CUDA_CHECK(cudaMemcpy(drain_buffer, tmp_buf, message_size, cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaFree(tmp_buf));
         }
@@ -168,10 +166,10 @@ static void drain_messages() {
         CUDA_CHECK(cudaMemcpy(host_copy, tmp_buf, message_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(tmp_buf));
 
-        drain_queue_push(src, host_copy, message_size);
+        drain_queue_push(peer, host_copy, message_size);
 
         // Mark as received locally
-        inflight_mark_recv(src, g_my_rank);
+        inflight_mark_recv(peer, g_my_rank);
     }
 }
 
