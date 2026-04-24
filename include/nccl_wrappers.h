@@ -3,6 +3,7 @@
 
 #include <nccl.h>
 #include <stdint.h>
+#include "inflight.h"
 
 #ifdef __cplusplus
 extern "C" {
