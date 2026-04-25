@@ -22,7 +22,7 @@ extern pending_entry_t local_pending[MAX_RANKS][MAX_RANKS];
 
 void   inflight_init(void);
 void   inflight_mark_send(int src, int dst, size_t bytes);
-void   inflight_mark_recv(int src, int dst);
+void   inflight_mark_recv(int src, int dst, size_t bytes);
 int    inflight_has_pending(int src, int dst);
 size_t inflight_pending_bytes(int src, int dst);
 

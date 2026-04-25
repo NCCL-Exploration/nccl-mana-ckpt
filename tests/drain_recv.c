@@ -1,12 +1,12 @@
 /*
- * drain.c
+ * drain_recv.c
  *
  * 2 MPI processes on 2 GPUs.
  * Rank 0: ncclSend → sleep(30)
  * Rank 1: sleep(10) → ncclRecv
  *
  * Build & Run:
- *   Run `make drain_check` in parent directory
+ *   Run `make drain_recv_check` in parent directory
  */
 
 #include <stdio.h>

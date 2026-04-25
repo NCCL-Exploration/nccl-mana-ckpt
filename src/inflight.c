@@ -12,11 +12,11 @@ void inflight_init(void) {
 }
 
 void inflight_mark_send(int src, int dst, size_t bytes) {
-    local_pending[src][dst].bytes = bytes;
+    local_pending[src][dst].bytes += bytes;
 }
 
-void inflight_mark_recv(int src, int dst) {
-    local_pending[src][dst].bytes = 0;
+void inflight_mark_recv(int src, int dst, size_t bytes) {
+    local_pending[src][dst].bytes -= bytes;
 }
 
 int inflight_has_pending(int src, int dst) {
