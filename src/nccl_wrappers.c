@@ -98,9 +98,23 @@ void increment_seq_and_wait(ncclComm_t comm) {
         abort();
     }
     while (ckpt_pending && g->target != 0 && g->seq >= g->target) {
+        for (int r = 0; r < g_nranks; r++){
+            if(r == g_my_rank) continue;
+            char key[64];
+            snprintf(key, sizeof(key), "target|%p|%d", (void*)comm, r);
+            int64_t new_target = dmtcp_kvdb_get(key);
+            if (new_target > g->target) g->target = new_target;
+        }
         usleep(100);
     }
     g->seq++;
+
+    if (ckpt_pending && g->seq > g->target){
+        g->target = g->seq;
+        char key[64];
+        snprintf(key, sizeof(key), "target|%p|%d", (void*)comm, g_my_rank);
+        dmtcp_kvdb_set(key, (int64_t)g->target);
+    }
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) {
