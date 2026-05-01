@@ -98,13 +98,15 @@ void increment_seq_and_wait(ncclComm_t comm) {
         abort();
     }
     while (ckpt_pending && g->target != 0 && g->seq >= g->target) {
+        int64_t max_target = g->target;
         for (int r = 0; r < g_nranks; r++){
             if(r == g_my_rank) continue;
             char key[64];
             snprintf(key, sizeof(key), "target|%p|%d", (void*)comm, r);
             int64_t new_target = dmtcp_kvdb_get(key);
-            if (new_target > g->target) g->target = new_target;
+            if (new_target > max_target) max_target = new_target;
         }
+        g->target = max_target;
         usleep(100);
     }
     g->seq++;
