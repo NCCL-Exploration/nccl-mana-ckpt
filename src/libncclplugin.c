@@ -169,7 +169,7 @@ static void drain_messages() {
         drain_queue_push(peer, host_copy, message_size);
 
         // Mark as received locally
-        inflight_mark_recv(peer, g_my_rank);
+        inflight_mark_recv(peer, g_my_rank, message_size);
     }
 }
 
