@@ -68,6 +68,13 @@ cc_simple_check: ${LIBNAME}.so tests/cc_simple
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
 		--with-plugin $$PWD/${LIBNAME}.so ./tests/cc_simple
 
+cc_complex_check: ${LIBNAME}.so tests/cc_complex
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	 --coord-port ${DEMO_PORT} 2>/dev/null || true
+	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
+	${MPICH_BIN}/mpirun -np 3 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
+                --with-plugin $$PWD/${LIBNAME}.so ./tests/cc_complex
+
 tests/cc:
 	gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread
 	./test_nccl_wrappers
