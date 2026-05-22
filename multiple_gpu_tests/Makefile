@@ -9,6 +9,7 @@ NCCL_PLUGIN = ../src/libncclplugin.so
 CRAC_PLUGIN = $(CRAC_ROOT)/libdmtcp_crac.so
 PLUGIN = $(NCCL_PLUGIN)
 DRIVER = nccl_test_driver_multiple
+P2P_DRIVER = nccl_p2p_tests
 PORT     = 7782          # Different port from single-GPU Makefile to avoid conflicts
 INTERVAL = 0             # Manual checkpointing for precise control
 export NCCL_DEBUG=WARN
@@ -20,6 +21,8 @@ export NCCL_DEBUG=WARN
 MSGS  ?= 5
 SIZE  ?= 1024
 NGPUS ?= $(shell nvidia-smi --list-gpus 2>/dev/null | wc -l)
+GATHER_COUNT ?= 16
+GATHER_ROOT  ?= 0
 
 # Colors for output
 GREEN = \033[0;32m
@@ -33,6 +36,11 @@ all: $(DRIVER)
 
 test_all: test1 test2 test3 test4
 	@echo -e "${GREEN}All multi-GPU test criteria completed.${NC}"
+
+gather_p2p_test: $(P2P_DRIVER)
+	@echo -e "${GREEN}==> Running ncclGather_p2p correctness test <==${NC}"
+	@echo "  Params: count=$(GATHER_COUNT), root=$(GATHER_ROOT), gpus=$(NGPUS)"
+	@./$(P2P_DRIVER) $(GATHER_COUNT) $(GATHER_ROOT) $(NGPUS)
 
 # Test 1: Basic P2P ring — no checkpoint, just verify correctness
 #   CKPT_DELAY=0 → no checkpoint triggered
@@ -91,12 +99,16 @@ endef
 $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
+$(P2P_DRIVER): $(P2P_DRIVER).cpp $(NCCL_PLUGIN)
+	$(CC) $(CFLAGS) -o $@ $< $(NCCL_PLUGIN) -ldl
+
 kill:
 	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
 	-killall -9 $(DRIVER) 2>/dev/null || true
+	-killall -9 $(P2P_DRIVER) 2>/dev/null || true
 
 clean:
-	rm -f $(DRIVER)
+	rm -f $(DRIVER) $(P2P_DRIVER)
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 kill clean
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test kill clean
