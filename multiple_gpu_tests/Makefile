@@ -37,10 +37,13 @@ all: $(DRIVER)
 test_all: test1 test2 test3 test4
 	@echo -e "${GREEN}All multi-GPU test criteria completed.${NC}"
 
-gather_p2p_test: $(P2P_DRIVER)
+gather_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
 	@echo -e "${GREEN}==> Running ncclGather_p2p correctness test <==${NC}"
 	@echo "  Params: count=$(GATHER_COUNT), root=$(GATHER_ROOT), gpus=$(NGPUS)"
-	@./$(P2P_DRIVER) $(GATHER_COUNT) $(GATHER_ROOT) $(NGPUS)
+	@$(MAKE) kill
+	@$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(INTERVAL) \
+		--with-plugin $(PLUGIN) ./$(P2P_DRIVER) \
+		$(GATHER_COUNT) $(GATHER_ROOT) $(NGPUS)
 
 # Test 1: Basic P2P ring — no checkpoint, just verify correctness
 #   CKPT_DELAY=0 → no checkpoint triggered
@@ -99,8 +102,13 @@ endef
 $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(P2P_DRIVER): $(P2P_DRIVER).cpp
-	$(CC) $(CFLAGS) -o $@ $< -ldl
+$(P2P_DRIVER): $(P2P_DRIVER).cpp $(NCCL_PLUGIN)
+	$(CC) $(CFLAGS) -o $@ $< $(NCCL_PLUGIN) -ldl
+
+$(NCCL_PLUGIN): FORCE
+	$(MAKE) -C .. plugin
+
+FORCE:
 
 kill:
 	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
@@ -111,4 +119,4 @@ clean:
 	rm -f $(DRIVER) $(P2P_DRIVER)
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test kill clean
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test kill clean FORCE
