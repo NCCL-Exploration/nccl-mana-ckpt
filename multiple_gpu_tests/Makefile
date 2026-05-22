@@ -1,5 +1,5 @@
 CC = nvcc
-CFLAGS = -O3 -g -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib -I../include
+CFLAGS = -O3 -g -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib -I../include -I../src
 DMTCP_ROOT ?= ../dmtcp
 CRAC_ROOT   ?= ../crac
 DMTCP_LAUNCH  = $(DMTCP_ROOT)/bin/dmtcp_launch
@@ -99,8 +99,8 @@ endef
 $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(P2P_DRIVER): $(P2P_DRIVER).cpp $(NCCL_PLUGIN)
-	$(CC) $(CFLAGS) -o $@ $< $(NCCL_PLUGIN) -ldl
+$(P2P_DRIVER): $(P2P_DRIVER).cpp
+	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 kill:
 	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
