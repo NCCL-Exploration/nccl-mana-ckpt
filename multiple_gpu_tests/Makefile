@@ -102,8 +102,8 @@ endef
 $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(P2P_DRIVER): $(P2P_DRIVER).cpp $(NCCL_PLUGIN)
-	$(CC) $(CFLAGS) -o $@ $< $(NCCL_PLUGIN) -ldl
+$(P2P_DRIVER): $(P2P_DRIVER).cpp
+	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 $(NCCL_PLUGIN): FORCE
 	$(MAKE) -C .. plugin

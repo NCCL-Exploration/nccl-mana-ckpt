@@ -1,11 +1,10 @@
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <nccl.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <vector>
-
-#include "nccl_wrappers.h"
 
 #define CUDA_CHECK(cmd)                                                        \
     do {                                                                       \
@@ -33,6 +32,26 @@ struct GpuCtx {
     float *send_buf;
     float *recv_buf;
 };
+
+typedef ncclResult_t (*ncclGatherP2pFn)(const void *, void *, size_t,
+                                        ncclDataType_t, int, ncclComm_t,
+                                        cudaStream_t);
+
+static ncclGatherP2pFn resolve_nccl_gather_p2p(void)
+{
+    dlerror();
+    void *sym = dlsym(RTLD_DEFAULT, "ncclGather_p2p");
+    const char *err = dlerror();
+    if (err != NULL || sym == NULL) {
+        fprintf(stderr,
+                "Error: could not resolve ncclGather_p2p. "
+                "Run this test with the NCCL DMTCP plugin loaded. %s\n",
+                err ? err : "");
+        exit(1);
+    }
+
+    return (ncclGatherP2pFn)sym;
+}
 
 static void usage(const char *prog)
 {
@@ -84,6 +103,8 @@ static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root
 static void run_gather(std::vector<GpuCtx> *gpu, size_t count, int num_gpus,
                        int root)
 {
+    ncclGatherP2pFn ncclGather_p2p = resolve_nccl_gather_p2p();
+
     /* Batch every rank's gather call for the single-thread multi-GPU launch. */
     NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < num_gpus; i++) {
