@@ -6,6 +6,7 @@
 #include <nccl.h>
 #include <string.h>
 #include "nccl_wrappers.h"
+#include "dmtcp_kvdb_c.h"
 #include "inflight.h"
 #include <string.h>
 
@@ -149,9 +150,12 @@ ncclResult_t ncclSend(
     init_rank_info(comm);
     add_stream(stream);
 
+    int rank = g_my_rank;
+    ncclCommUserRank(comm, &rank);
+
     // Local tracking — no coordinator I/O on the hot path
     size_t bytes = count * get_nccl_type_size(datatype);
-    inflight_mark_send(g_my_rank, peer, bytes);
+    inflight_mark_send(rank, peer, bytes);
 
     LOAD_SYM(ncclSend);
     return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
@@ -178,7 +182,10 @@ ncclResult_t ncclRecv(
     // Normal path — local tracking, no coordinator I/O
     init_rank_info(comm);
     add_stream(stream);
-    inflight_mark_recv(peer, g_my_rank, count * get_nccl_type_size(datatype));
+
+    int rank = g_my_rank;
+    ncclCommUserRank(comm, &rank);
+    inflight_mark_recv(peer, rank, count * get_nccl_type_size(datatype));
 
     LOAD_SYM(ncclRecv);
     return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
@@ -277,21 +284,19 @@ ncclResult_t ncclGather_p2p(
 
     size_t elem_bytes = get_nccl_type_size(datatype);
     if (elem_bytes == 0) return ncclInvalidArgument;
+    if (root < 0 || root >= nranks) return ncclInvalidArgument;
+    if (rank == root && recvbuff == NULL) return ncclInvalidArgument;
 
     /*
-     * Open a group so NCCL can schedule all point-to-point ops together.
-     * This is mandatory when driving multiple send/recv from one thread
-     * to prevent deadlock on rendezvous-protocol transports.
+     * The caller owns ncclGroupStart/ncclGroupEnd.  This lets a single-thread
+     * multi-GPU caller batch every rank's p2p gather work in one outer group.
      */
-    if ((ret = ncclGroupStart()) != ncclSuccess) return ret;
-
     if (rank == root) {
         /* Root posts a Recv slot for every rank, including itself. */
         for (int r = 0; r < nranks; r++) {
             char *slot = (char *)recvbuff + (size_t)r * sendcount * elem_bytes;
             ret = ncclRecv(slot, sendcount, datatype, r, comm, stream);
             if (ret != ncclSuccess) {
-                ncclGroupEnd(); /* best-effort cleanup */
                 return ret;
             }
         }
@@ -299,12 +304,9 @@ ncclResult_t ncclGather_p2p(
 
     /* Every rank (including root) sends its contribution. */
     ret = ncclSend(sendbuff, sendcount, datatype, root, comm, stream);
-    if (ret != ncclSuccess) {
-        ncclGroupEnd();
-        return ret;
-    }
+    if (ret != ncclSuccess) return ret;
 
-    return ncclGroupEnd();
+    return ncclSuccess;
 }
 
 ncclResult_t ncclScatter(
