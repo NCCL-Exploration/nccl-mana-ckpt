@@ -20,11 +20,11 @@ JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
 DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
-MPICH_BIN = /shared/EL9/explorer/MPICH/4.3.0b1/bin
+MPICH_BIN = /usr/bin
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -I/usr/lib/x86_64-linux-gnu/openmpi/include -lnccl -lmpi
 
 plugin: src/libncclplugin.so
 

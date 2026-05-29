@@ -1,0 +1,8 @@
+
+is_nccl_exe:505111 terminated with signal 11 at PC=7b2e7e6b40d8 SP=7ffd58cb50b0.  Backtrace:
+/lib/x86_64-linux-gnu/libc.so.6(__libc_free+0x28) [0x7b2e7e6b40d8]
+./is_nccl_exe(+0xaf92) [0x5a0f54a9cf92]
+./is_nccl_exe(+0xc94b) [0x5a0f54a9e94b]
+/lib/x86_64-linux-gnu/libc.so.6(+0x2a578) [0x7b2e7e62a578]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x8b) [0x7b2e7e62a63b]
+./is_nccl_exe(+0xac75) [0x5a0f54a9cc75]

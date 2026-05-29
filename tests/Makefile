@@ -1,5 +1,5 @@
 CC = nvcc
-CFLAGS = -O3 -g -lnccl -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib -I../include
+CFLAGS = -O3 -g -lnccl -I../include
 
 DMTCP_ROOT ?= ../dmtcp
 CRAC_ROOT ?= ../crac
