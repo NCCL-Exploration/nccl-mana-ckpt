@@ -2,232 +2,245 @@
 
 An NCCL checkpointing plugin for [DMTCP](https://github.com/dmtcp/dmtcp) +
 [CRAC](https://github.com/xuyao0127/crac).
-Intercepts NCCL collective and point-to-point calls, tracks CUDA streams and
-in-flight messages, and drains outstanding operations before a DMTCP checkpoint
-is taken.
+
+The plugin interposes NCCL calls, tracks communicators, CUDA streams, sequence
+progress, and in-flight point-to-point messages, then drains or synchronizes
+that state before DMTCP checkpoints the process.
 
 ## Prerequisites
 
 | Dependency | Notes |
 |------------|-------|
-| **NVIDIA GPU + drivers** | Required for CUDA / NCCL |
-| **CUDA Toolkit** (`nvcc`) | Used as the compiler (`CC` / `CXX` in the Makefiles) |
-| **NCCL** | Link path is hardcoded — see [NCCL Path](#nccl-library-path) below |
-| **DMTCP** (submodule) | Official repo: [dmtcp/dmtcp](https://github.com/dmtcp/dmtcp) |
-| **CRAC** (submodule) | Plugin for CUDA support: [xuyao0127/crac](https://github.com/xuyao0127/crac) |
-| **MPI** | Only needed for `tests/multiproc.c` |
-| Standard build tools | `make`, `gcc` / `g++`, `git` |
+| NVIDIA GPU + drivers | Required for CUDA and NCCL |
+| CUDA Toolkit (`nvcc`) | Used as `CC` and `CXX` in the Makefiles |
+| NCCL | Library paths are hardcoded in Makefiles; update them for your system |
+| DMTCP | Defaults to the `dmtcp/` submodule, or set `DMTCP_ROOT` |
+| CRAC | Defaults to the `crac/` submodule, or set `CRAC_ROOT` |
+| MPI | Needed for multi-process tests and examples |
+| Build tools | `make`, `gcc` / `g++`, `git` |
 
-### NCCL Library Path
+### Local Paths
 
-Both `Makefile` (root) and `tests/Makefile` contain a hardcoded `-L` path for
-the NCCL library:
+The root `Makefile`, `tests/Makefile`, `single_gpu_tests/Makefile`, and
+`multiple_gpu_tests/Makefile` contain hardcoded NCCL `-L` paths. Update those
+paths before building if NCCL is installed somewhere else.
 
+By default:
+
+```bash
+DMTCP_ROOT=./dmtcp
+CRAC_ROOT=./crac
 ```
-/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
+
+For external installs, pass or export the roots:
+
+```bash
+export DMTCP_ROOT=~/dmtcp
+export CRAC_ROOT=~/crac
 ```
-
-If your NCCL is installed elsewhere, update the path in **both** files before
-building.
-
----
 
 ## Quick Start
-
-### 1. Clone the repository
 
 ```bash
 git clone git@github.com:NCCL-Exploration/nccl-mana-ckpt.git
 cd nccl-mana-ckpt
-```
-
-### 2. Update submodules
-
-```bash
 git submodule update --init --recursive --remote
 ```
 
-### 2a. DMTCP Patches (Will get fixed over time)
-
-a/src/plugin/ipc/file/fileconnlist.cpp:400 - +strstr(area.name, "nvidia") != NULL ||
-
-a/src/threadwrappers.cpp:106&109 - -JASSERT
-
-### 3. Optionally, Build the Plugin
-```bash
-make
-```
-
-OR
+Build the NCCL plugin:
 
 ```bash
 make plugin
 ```
 
-This produces `src/libncclplugin.so`.
+or:
 
-### 3. Run Single GPU Test
+```bash
+make
+```
+
+Both produce `src/libncclplugin.so`.
+
+Run the root single-GPU check:
 
 ```bash
 make nccl_check
 ```
 
-This should make any dependencies (`dmtcp`, `crac`, and/or `libncclplugin.so`) before running the test.
+`nccl_check` builds `tests/single_gpu_test` and launches it under DMTCP with
+`src/libncclplugin.so`.
 
----
+## Plugin Loading
+
+CUDA/NCCL checkpoint and restart flows normally require both plugins:
+
+1. `src/libncclplugin.so`: this repository's NCCL checkpoint plugin.
+2. `crac/libdmtcp_crac.so`: CRAC's split-CUDA plugin for GPU memory
+   checkpoint/restore.
+
+DMTCP accepts multiple plugins as a colon-separated list:
+
+```bash
+${DMTCP_ROOT}/bin/dmtcp_launch \
+  --with-plugin $PWD/src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
+  ./your_test
+```
+
+The focused test Makefiles under `tests/` and `single_gpu_tests/` use the
+NCCL+CRAC plugin pair. Some root `Makefile` check targets currently launch only
+the NCCL plugin; use the focused test Makefiles or adjust `--with-plugin` when
+you need full CUDA checkpoint/restart coverage.
 
 ## Running Tests
 
-### Important: Loading Both Plugins
-
-When running under DMTCP with CUDA/NCCL, you must load **two** plugins:
-
-1. **`libncclplugin.so`** — this project's NCCL checkpoint plugin
-2. **`libdmtcp_crac.so`** — CRAC's split-CUDA plugin (handles GPU memory
-   checkpoint/restore)
-
-They are specified together with a colon separator in the `--with-plugin` flag.
-
-### Checkpoint the Single-GPU Test
+### Single-GPU Driver
 
 ```bash
 cd tests
+make DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
+make test_all DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
+```
 
-# Build the test
-nvcc -O3 -g -lnccl -L/path/to/nccl/lib -o single_gpu_test single_gpu_test.cpp
+Runnable criteria in `tests/Makefile`:
 
-# Launch under DMTCP with both plugins
-~/dmtcp/bin/dmtcp_launch --interval 10 \
-  --with-plugin $PWD/../src/libncclplugin.so:~/crac/libdmtcp_crac.so \
+```bash
+make test1 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Basic P2P, no checkpoint
+make test2 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Checkpoint after completion
+make test3 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Checkpoint before NCCL init
+make test4 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # In-transit message checkpoint
+```
+
+`test_all` depends on the runnable criteria above and restarts from any
+checkpoint file produced during each run.
+
+### Manual Single-GPU Launch
+
+```bash
+cd tests
+nvcc -O3 -g -lnccl -L/path/to/nccl/lib -I../include \
+  -o single_gpu_test single_gpu_test.c
+
+${DMTCP_ROOT}/bin/dmtcp_launch --coord-port 7781 --interval 10 \
+  --with-plugin $PWD/../src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
   ./single_gpu_test
 ```
 
-The `--interval 10` flag tells DMTCP to checkpoint automatically every 10
-seconds. The test sleeps for 40 seconds, so a checkpoint will be taken during
-execution.
-
-### Restart from Checkpoint
+Restart from the newest checkpoint:
 
 ```bash
-# Find the latest checkpoint file
 CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
-
-# Restart
-~/dmtcp/bin/dmtcp_restart --coord-port 7781 $CKPT
+${DMTCP_ROOT}/bin/dmtcp_restart --coord-port 7781 "$CKPT"
 ```
 
-### Run the Automated Test Suite
+### Multi-GPU Tests
 
 ```bash
-cd tests
-
-# Build the test driver
-make DMTCP_ROOT=~/dmtcp
-
-# Run all 5 test criteria:
-make test_all DMTCP_ROOT=~/dmtcp
-
-# Or individual tests:
-make test1 DMTCP_ROOT=~/dmtcp   # Basic P2P — no checkpoint
-make test2 DMTCP_ROOT=~/dmtcp   # Checkpoint after messages complete
-make test3 DMTCP_ROOT=~/dmtcp   # Checkpoint before NCCL init
-make test4 DMTCP_ROOT=~/dmtcp   # Checkpoint with 1 message in-transit
-make test5 DMTCP_ROOT=~/dmtcp   # Checkpoint with N messages in-transit
+cd multiple_gpu_tests
+make test_all DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
 ```
 
-> **Note:** The tests Makefile currently does not load `libdmtcp_crac.so`
-> automatically. You may need to update the `run_test` macro in
-> `tests/Makefile` to include both plugins in the `--with-plugin` flag.
+Useful overrides:
+
+```bash
+make test4 MSGS=8 SIZE=4096 NGPUS=4
+```
+
+The P2P gather correctness entrypoint compares `ncclGather_p2p` against
+`ncclGather`:
+
+```bash
+make gather_p2p_test GATHER_COUNT=16 GATHER_ROOT=0 NGPUS=4
+```
 
 ### Cleanup
 
 ```bash
-# Kill the DMTCP coordinator and stale processes:
 make kill
-
-# Remove build artifacts and checkpoint files:
 make clean
 ```
 
----
+Run cleanup from the directory containing the Makefile whose tests you ran.
 
 ## Project Structure
 
-```
+```text
 nccl-mana-ckpt/
-├── include/
-│   └── nccl_wrappers.h       # Shared declarations for wrapper globals/helpers
-├── src/
-│   ├── libncclplugin.c       # DMTCP plugin: event hooks, stream drain, memory skip
-│   ├── nccl_wrappers.c       # NCCL interposition (Send/Recv/AllReduce/CommInit)
-│   ├── nccl_iprobe.c         # ncclIprobe: query pending messages via KVDB
-│   ├── dmtcp_kvdb_c.cpp      # Local key-value store for message tracking
-│   └── dmtcp_kvdb_c.h        # C-linkage header for the KV store
-├── tests/
-│   ├── Makefile              # Test orchestration (test1–5, checkpoint, restart)
-│   ├── nccl_test_driver.cpp  # Main test driver with 5 checkpoint modes
-│   ├── single_gpu_test.cpp   # Simple single-GPU example
-│   ├── multiproc.c           # Multi-rank MPI+NCCL test
-│   └── test_drain.cpp        # In-flight drain sketch (not runnable)
-├── Makefile                  # Root build: plugin .so + sanity checks
-└── README.md
+|-- include/
+|   `-- nccl_wrappers.h
+|-- src/
+|   |-- libncclplugin.c
+|   |-- nccl_wrappers.c
+|   |-- nccl_iprobe.c
+|   |-- dmtcp_kvdb_c.cpp
+|   |-- dmtcp_kvdb_c.h
+|   |-- inflight.c
+|   `-- inflight.h
+|-- tests/
+|   |-- Makefile
+|   |-- nccl_test_driver.cpp
+|   |-- single_gpu_test.c
+|   |-- multiproc.c
+|   |-- drain_send.c
+|   |-- drain_recv.c
+|   |-- cc_simple.c
+|   `-- cc_complex.c
+|-- single_gpu_tests/
+|-- multiple_gpu_tests/
+|-- crac/
+|-- dmtcp/
+|-- Makefile
+|-- README.md
+`-- AGENTS.md
 ```
 
-### How It Works
+## How It Works
 
-The plugin hooks into DMTCP's event system:
+`src/libncclplugin.c` registers DMTCP event hooks:
 
-- **`DMTCP_EVENT_PRESUSPEND`** — Called before GPU threads are suspended.
-  The plugin drains all in-flight NCCL operations and synchronizes CUDA
-  streams at this point, **before** the CRAC plugin suspends GPU state.
-  This ordering is critical: the CRAC CUDA API needs active GPU threads to
-  dump GPU state to CPU memory.
+- `DMTCP_EVENT_PRESUSPEND`: mark checkpoint pending, synchronize tracked CUDA
+  streams when needed, drain in-flight P2P messages, and coordinate sequence
+  progress across ranks before checkpoint.
+- `DMTCP_EVENT_RESUME`: clear checkpoint state after a checkpoint and reset
+  wrapper/in-flight tracking for continued execution.
+- `DMTCP_EVENT_RESTART`: reset runtime state after restart while preserving
+  drained messages that must be replayed through later `ncclRecv` calls.
 
-- **`DMTCP_EVENT_RESUME`** / **`DMTCP_EVENT_RESTART`** — Reset plugin state
-  after checkpoint or restart.
+`src/nccl_wrappers.c` interposes NCCL calls with `dlsym(RTLD_NEXT, ...)`.
+Current wrappers cover `ncclCommInitRank`, `ncclCommInitAll`, `ncclSend`,
+`ncclRecv`, `ncclAllReduce`, `ncclBroadcast`, `ncclReduce`, `ncclAllGather`,
+`ncclGather`, `ncclScatter`, `ncclReduceScatter`, and `ncclGather_p2p`.
 
-NCCL functions (`ncclSend`, `ncclRecv`, `ncclAllReduce`, `ncclCommInitRank`,
-`ncclCommInitAll`) are intercepted via wrapper functions that track
-communicator rank info and active CUDA streams.
-
----
+`src/inflight.c` tracks local pending bytes by source/destination rank and
+stores drained host-side messages for replay. `src/dmtcp_kvdb_c.cpp` provides
+the local key-value interface used for checkpoint-time coordination.
 
 ## Troubleshooting
 
 ### `mmap failed: Invalid argument` on Restart
 
-Make sure you are loading **both** plugins. The CRAC split-CUDA plugin
-(`libdmtcp_crac.so`) is essential for handling GPU memory regions during
-checkpoint/restart. Without it, DMTCP will try to checkpoint GPU-mapped
-memory and fail.
+Load both the NCCL plugin and CRAC's split-CUDA plugin. Without CRAC, DMTCP may
+try to checkpoint GPU-mapped memory directly.
 
 ```bash
-# Correct — two plugins, colon-separated:
-~/dmtcp/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:~/crac/libdmtcp_crac.so \
-  ./your_test
-
-# Wrong — only the NCCL plugin:
-~/dmtcp/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so \
+${DMTCP_ROOT}/bin/dmtcp_launch \
+  --with-plugin $PWD/src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
   ./your_test
 ```
 
 ### NCCL Library Not Found
 
-```bash
-# Locate your NCCL library:
-find / -name "libnccl.so*" 2>/dev/null
+Find `libnccl.so` and update the hardcoded `-L` path in the Makefile you are
+using:
 
-# Update -L path in Makefile (line 18) and tests/Makefile (line 2).
+```bash
+find / -name "libnccl.so*" 2>/dev/null
 ```
 
 ### Coordinator Connection Failures
 
-```bash
-# Kill stale coordinators:
-~/dmtcp/bin/dmtcp_command --quit --coord-port 7781 2>/dev/null
+Stop stale coordinators and confirm the port is free:
 
-# Check if port 7781 is already in use:
+```bash
+${DMTCP_ROOT}/bin/dmtcp_command --quit --coord-port 7781 2>/dev/null || true
 ss -tlnp | grep 7781
 ```
