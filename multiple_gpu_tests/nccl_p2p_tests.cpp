@@ -59,13 +59,32 @@ static ncclGatherP2pFn resolve_nccl_gather_p2p(void)
 
 static ncclGatherFn resolve_nccl_gather(void)
 {
+    const char *libnccl_names[] = {"libnccl.so.2", "libnccl.so"};
+    void *handle = NULL;
+
+    for (size_t i = 0; i < sizeof(libnccl_names) / sizeof(libnccl_names[0]);
+         i++) {
+        dlerror();
+        handle = dlopen(libnccl_names[i], RTLD_NOW | RTLD_LOCAL);
+        if (handle != NULL)
+            break;
+    }
+
+    if (handle == NULL) {
+        const char *err = dlerror();
+        fprintf(stderr,
+                "Error: could not open libnccl to resolve ncclGather. %s\n",
+                err ? err : "");
+        exit(1);
+    }
+
     dlerror();
-    void *sym = dlsym(RTLD_DEFAULT, "ncclGather");
+    void *sym = dlsym(handle, "ncclGather");
     const char *err = dlerror();
     if (err != NULL || sym == NULL) {
         fprintf(stderr,
-                "Error: could not resolve ncclGather. "
-                "Run this test with NCCL available at runtime. %s\n",
+                "Error: libnccl does not export ncclGather. "
+                "Cannot use NVIDIA ncclGather as the reference oracle. %s\n",
                 err ? err : "");
         exit(1);
     }
