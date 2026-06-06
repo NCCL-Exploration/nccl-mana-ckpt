@@ -30,11 +30,15 @@ struct GpuCtx {
     ncclComm_t comm;
     cudaStream_t stream;
     float *send_buf;
-    float *recv_buf;
+    float *p2p_recv_buf;
+    float *nccl_recv_buf;
 };
 
 typedef ncclResult_t (*ncclGatherP2pFn)(const void *, void *, size_t,
                                         ncclDataType_t, int, ncclComm_t,
+                                        cudaStream_t);
+typedef ncclResult_t (*ncclAllGatherFn)(const void *, void *, size_t,
+                                        ncclDataType_t, ncclComm_t,
                                         cudaStream_t);
 
 static ncclGatherP2pFn resolve_nccl_gather_p2p(void)
@@ -51,6 +55,41 @@ static ncclGatherP2pFn resolve_nccl_gather_p2p(void)
     }
 
     return (ncclGatherP2pFn)sym;
+}
+
+static ncclAllGatherFn resolve_nccl_all_gather(void)
+{
+    const char *libnccl_names[] = {"libnccl.so.2", "libnccl.so"};
+    void *handle = NULL;
+
+    for (size_t i = 0; i < sizeof(libnccl_names) / sizeof(libnccl_names[0]);
+         i++) {
+        dlerror();
+        handle = dlopen(libnccl_names[i], RTLD_NOW | RTLD_LOCAL);
+        if (handle != NULL)
+            break;
+    }
+
+    if (handle == NULL) {
+        const char *err = dlerror();
+        fprintf(stderr,
+                "Error: could not open libnccl to resolve ncclAllGather. %s\n",
+                err ? err : "");
+        exit(1);
+    }
+
+    dlerror();
+    void *sym = dlsym(handle, "ncclAllGather");
+    const char *err = dlerror();
+    if (err != NULL || sym == NULL) {
+        fprintf(stderr,
+                "Error: libnccl does not export ncclAllGather. "
+                "Cannot use NVIDIA ncclAllGather as the reference oracle. %s\n",
+                err ? err : "");
+        exit(1);
+    }
+
+    return (ncclAllGatherFn)sym;
 }
 
 static void usage(const char *prog)
@@ -76,11 +115,14 @@ static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root
         GpuCtx *ctx = &(*gpu)[i];
         ctx->comm = comms[i];
         ctx->send_buf = NULL;
-        ctx->recv_buf = NULL;
+        ctx->p2p_recv_buf = NULL;
+        ctx->nccl_recv_buf = NULL;
 
         CUDA_CHECK(cudaSetDevice(i));
         CUDA_CHECK(cudaStreamCreate(&ctx->stream));
         CUDA_CHECK(cudaMalloc((void **)&ctx->send_buf, count * sizeof(float)));
+        CUDA_CHECK(cudaMalloc((void **)&ctx->nccl_recv_buf,
+                              num_gpus * count * sizeof(float)));
 
         std::vector<float> h_send(count);
         for (size_t j = 0; j < count; j++)
@@ -91,29 +133,52 @@ static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root
     }
 
     CUDA_CHECK(cudaSetDevice(root));
-    CUDA_CHECK(cudaMalloc((void **)&(*gpu)[root].recv_buf,
+    CUDA_CHECK(cudaMalloc((void **)&(*gpu)[root].p2p_recv_buf,
                           num_gpus * count * sizeof(float)));
 
     std::vector<float> sentinel(num_gpus * count, -1.0f);
-    CUDA_CHECK(cudaMemcpy((*gpu)[root].recv_buf, sentinel.data(),
+    CUDA_CHECK(cudaMemcpy((*gpu)[root].p2p_recv_buf, sentinel.data(),
                           sentinel.size() * sizeof(float),
                           cudaMemcpyHostToDevice));
+    for (int i = 0; i < num_gpus; i++) {
+        CUDA_CHECK(cudaSetDevice(i));
+        CUDA_CHECK(cudaMemcpy((*gpu)[i].nccl_recv_buf, sentinel.data(),
+                              sentinel.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
+    }
 }
 
 static void run_gather(std::vector<GpuCtx> *gpu, size_t count, int num_gpus,
                        int root)
 {
     ncclGatherP2pFn ncclGather_p2p = resolve_nccl_gather_p2p();
+    ncclAllGatherFn ncclAllGather = resolve_nccl_all_gather();
 
-    /* Batch every rank's gather call for the single-thread multi-GPU launch. */
+    /* Batch every rank's p2p gather call for the single-thread launch. */
     NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
-        void *recv_buf = (i == root) ? (*gpu)[root].recv_buf : NULL;
+        void *recv_buf = (i == root) ? (*gpu)[root].p2p_recv_buf : NULL;
 
         NCCL_CHECK(ncclGather_p2p((*gpu)[i].send_buf, recv_buf, count,
                                   ncclFloat, root, (*gpu)[i].comm,
                                   (*gpu)[i].stream));
+    }
+    NCCL_CHECK(ncclGroupEnd());
+
+    for (int i = 0; i < num_gpus; i++) {
+        CUDA_CHECK(cudaSetDevice(i));
+        CUDA_CHECK(cudaStreamSynchronize((*gpu)[i].stream));
+    }
+
+    /* Run reference NCCL AllGather; root's buffer has Gather's same layout. */
+    NCCL_CHECK(ncclGroupStart());
+    for (int i = 0; i < num_gpus; i++) {
+        CUDA_CHECK(cudaSetDevice(i));
+
+        NCCL_CHECK(ncclAllGather((*gpu)[i].send_buf,
+                                 (*gpu)[i].nccl_recv_buf, count, ncclFloat,
+                                 (*gpu)[i].comm, (*gpu)[i].stream));
     }
     NCCL_CHECK(ncclGroupEnd());
 
@@ -126,24 +191,30 @@ static void run_gather(std::vector<GpuCtx> *gpu, size_t count, int num_gpus,
 static int verify(const std::vector<GpuCtx> &gpu, size_t count, int num_gpus,
                   int root)
 {
-    std::vector<float> h_recv(num_gpus * count);
+    std::vector<float> h_p2p_recv(num_gpus * count);
+    std::vector<float> h_nccl_recv(num_gpus * count);
 
     CUDA_CHECK(cudaSetDevice(root));
-    CUDA_CHECK(cudaMemcpy(h_recv.data(), gpu[root].recv_buf,
-                          h_recv.size() * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(h_p2p_recv.data(), gpu[root].p2p_recv_buf,
+                          h_p2p_recv.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_nccl_recv.data(), gpu[root].nccl_recv_buf,
+                          h_nccl_recv.size() * sizeof(float),
                           cudaMemcpyDeviceToHost));
 
     int errors = 0;
     for (int r = 0; r < num_gpus; r++) {
         for (size_t j = 0; j < count; j++) {
-            float expected = (float)(r * 1000 + j);
-            float got = h_recv[(size_t)r * count + j];
+            size_t idx = (size_t)r * count + j;
+            float p2p = h_p2p_recv[idx];
+            float nccl = h_nccl_recv[idx];
 
-            if (got != expected) {
+            if (p2p != nccl) {
                 if (errors < 10) {
                     printf("[ROOT %d] Error at slot rank=%d elem=%zu: "
-                           "expected %f, got %f\n",
-                           root, r, j, expected, got);
+                           "p2p != ncclAllGather, p2p=%f, "
+                           "ncclAllGather=%f\n",
+                           root, r, j, p2p, nccl);
                 }
                 errors++;
             }
@@ -152,10 +223,12 @@ static int verify(const std::vector<GpuCtx> &gpu, size_t count, int num_gpus,
 
     if (errors == 0) {
         printf("[GATHER_P2P] SUCCESS: root %d received %d rank slots of %zu "
-               "floats in expected order.\n",
+               "floats matching ncclAllGather.\n",
                root, num_gpus, count);
     } else {
-        printf("[GATHER_P2P] FAILURE: %d data errors found.\n", errors);
+        printf("[GATHER_P2P] FAILURE: %d p2p != ncclAllGather mismatches "
+               "found.\n",
+               errors);
     }
 
     return errors;
@@ -168,8 +241,10 @@ static void teardown(std::vector<GpuCtx> *gpu)
 
         if ((*gpu)[i].send_buf)
             CUDA_CHECK(cudaFree((*gpu)[i].send_buf));
-        if ((*gpu)[i].recv_buf)
-            CUDA_CHECK(cudaFree((*gpu)[i].recv_buf));
+        if ((*gpu)[i].p2p_recv_buf)
+            CUDA_CHECK(cudaFree((*gpu)[i].p2p_recv_buf));
+        if ((*gpu)[i].nccl_recv_buf)
+            CUDA_CHECK(cudaFree((*gpu)[i].nccl_recv_buf));
 
         CUDA_CHECK(cudaStreamDestroy((*gpu)[i].stream));
         NCCL_CHECK(ncclCommDestroy((*gpu)[i].comm));
