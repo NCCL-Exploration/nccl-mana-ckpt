@@ -146,7 +146,7 @@ make test4 MSGS=8 SIZE=4096 NGPUS=4
 ```
 
 The P2P gather correctness entrypoint compares `ncclGather_p2p` against
-`ncclGather`:
+`ncclAllGather`:
 
 ```bash
 make gather_p2p_test GATHER_COUNT=16 GATHER_ROOT=0 NGPUS=4

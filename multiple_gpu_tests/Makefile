@@ -23,6 +23,8 @@ SIZE  ?= 1024
 NGPUS ?= $(shell nvidia-smi --list-gpus 2>/dev/null | wc -l)
 GATHER_COUNT ?= 16
 GATHER_ROOT  ?= 0
+SCATTER_COUNT ?= 16
+SCATTER_ROOT  ?= 0
 
 # Colors for output
 GREEN = \033[0;32m
@@ -44,6 +46,14 @@ gather_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
 	@$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(INTERVAL) \
 		--with-plugin $(PLUGIN) ./$(P2P_DRIVER) \
 		$(GATHER_COUNT) $(GATHER_ROOT) $(NGPUS)
+
+scatter_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
+	@echo -e "${GREEN}==> Running ncclScatter_p2p correctness test <==${NC}"
+	@echo "  Params: count=$(SCATTER_COUNT), root=$(SCATTER_ROOT), gpus=$(NGPUS)"
+	@$(MAKE) kill
+	@$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(INTERVAL) \
+		--with-plugin $(PLUGIN) ./$(P2P_DRIVER) \
+		$(SCATTER_COUNT) $(SCATTER_ROOT) $(NGPUS) scatter
 
 # Test 1: Basic P2P ring — no checkpoint, just verify correctness
 #   CKPT_DELAY=0 → no checkpoint triggered
@@ -119,4 +129,4 @@ clean:
 	rm -f $(DRIVER) $(P2P_DRIVER)
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test kill clean FORCE
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test kill clean FORCE
