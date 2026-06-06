@@ -309,6 +309,50 @@ ncclResult_t ncclGather_p2p(
     return ncclSuccess;
 }
 
+ncclResult_t ncclScatter_p2p(
+    const void       *sendbuff,
+    void             *recvbuff,
+    size_t            sendcount,
+    ncclDataType_t    datatype,
+    int               root,
+    ncclComm_t        comm,
+    cudaStream_t      stream)
+{
+    int rank, nranks;
+    ncclResult_t ret;
+
+    if ((ret = ncclCommUserRank(comm, &rank)) != ncclSuccess) return ret;
+    if ((ret = ncclCommCount(comm, &nranks))  != ncclSuccess) return ret;
+
+    size_t elem_bytes = get_nccl_type_size(datatype);
+    if (elem_bytes == 0) return ncclInvalidArgument;
+    if (root < 0 || root >= nranks) return ncclInvalidArgument;
+    if (recvbuff == NULL) return ncclInvalidArgument;
+    if (rank == root && sendbuff == NULL) return ncclInvalidArgument;
+
+    /*
+     * The caller owns ncclGroupStart/ncclGroupEnd.  This mirrors
+     * ncclGather_p2p and lets a single-thread multi-GPU caller batch every
+     * rank's p2p scatter work in one outer group.
+     */
+    ret = ncclRecv(recvbuff, sendcount, datatype, root, comm, stream);
+    if (ret != ncclSuccess) return ret;
+
+    if (rank == root) {
+        /* Root sends slot r to rank r, including itself. */
+        for (int r = 0; r < nranks; r++) {
+            const char *slot =
+                (const char *)sendbuff + (size_t)r * sendcount * elem_bytes;
+            ret = ncclSend(slot, sendcount, datatype, r, comm, stream);
+            if (ret != ncclSuccess) {
+                return ret;
+            }
+        }
+    }
+
+    return ncclSuccess;
+}
+
 ncclResult_t ncclScatter(
     const void* sendbuff,
     void* recvbuff,

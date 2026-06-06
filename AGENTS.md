@@ -27,6 +27,7 @@
 | `cd tests && make test1`..`test4` | individual runnable criteria |
 | `cd multiple_gpu_tests && make test_all` | multi-GPU criteria |
 | `cd multiple_gpu_tests && make gather_p2p_test` | `ncclGather_p2p` correctness |
+| `cd multiple_gpu_tests && make scatter_p2p_test` | `ncclScatter_p2p` correctness |
 | `make clean` | clean artifacts for current Makefile |
 
 ## routing
@@ -50,5 +51,6 @@
 - Defaults: root `Makefile` uses `${CURDIR}/dmtcp` and `${CURDIR}/crac`; test Makefiles use `../dmtcp` and `../crac`.
 - Full CUDA checkpoint/restart flows need both `src/libncclplugin.so` and `crac/libdmtcp_crac.so`.
 - Some root check targets currently load only the NCCL plugin.
+- `multiple_gpu_tests/nccl_p2p_tests.cpp` compares `ncclGather_p2p` against real `ncclAllGather`; `ncclScatter_p2p` is checked against the deterministic rank-slot input pattern because this NCCL copy does not provide native `ncclScatter`.
 - `tests/Makefile` declares `test5` phony but has no `test5` recipe; document/run `test1`..`test4`.
 - Preserve user changes in dirty worktrees; do not revert unrelated `multiple_gpu_tests/` edits.

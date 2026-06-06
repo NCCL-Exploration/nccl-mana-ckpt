@@ -146,10 +146,19 @@ make test4 MSGS=8 SIZE=4096 NGPUS=4
 ```
 
 The P2P gather correctness entrypoint compares `ncclGather_p2p` against
-`ncclGather`:
+`ncclAllGather`:
 
 ```bash
 make gather_p2p_test GATHER_COUNT=16 GATHER_ROOT=0 NGPUS=4
+```
+
+The P2P scatter correctness entrypoint checks `ncclScatter_p2p` against the
+deterministic rank-slot input pattern. This does not compare against regular
+`ncclScatter` because the NCCL copy used by this project does not provide that
+symbol.
+
+```bash
+make scatter_p2p_test SCATTER_COUNT=16 SCATTER_ROOT=0 NGPUS=4
 ```
 
 ### Cleanup
@@ -208,7 +217,9 @@ nccl-mana-ckpt/
 `src/nccl_wrappers.c` interposes NCCL calls with `dlsym(RTLD_NEXT, ...)`.
 Current wrappers cover `ncclCommInitRank`, `ncclCommInitAll`, `ncclSend`,
 `ncclRecv`, `ncclAllReduce`, `ncclBroadcast`, `ncclReduce`, `ncclAllGather`,
-`ncclGather`, `ncclScatter`, `ncclReduceScatter`, and `ncclGather_p2p`.
+`ncclGather`, `ncclScatter`, `ncclReduceScatter`, `ncclGather_p2p`, and
+`ncclScatter_p2p`. Native-symbol availability still depends on the installed
+NCCL library; the NCCL copy used here does not export `ncclScatter`.
 
 `src/inflight.c` tracks local pending bytes by source/destination rank and
 stores drained host-side messages for replay. `src/dmtcp_kvdb_c.cpp` provides

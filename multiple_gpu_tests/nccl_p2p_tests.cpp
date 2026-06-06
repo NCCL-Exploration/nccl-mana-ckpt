@@ -3,6 +3,7 @@
 #include <nccl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <vector>
 
@@ -32,11 +33,16 @@ struct GpuCtx {
     float *send_buf;
     float *p2p_recv_buf;
     float *nccl_recv_buf;
+    float *scatter_send_buf;
+    float *scatter_recv_buf;
 };
 
 typedef ncclResult_t (*ncclGatherP2pFn)(const void *, void *, size_t,
                                         ncclDataType_t, int, ncclComm_t,
                                         cudaStream_t);
+typedef ncclResult_t (*ncclScatterP2pFn)(const void *, void *, size_t,
+                                         ncclDataType_t, int, ncclComm_t,
+                                         cudaStream_t);
 typedef ncclResult_t (*ncclAllGatherFn)(const void *, void *, size_t,
                                         ncclDataType_t, ncclComm_t,
                                         cudaStream_t);
@@ -55,6 +61,22 @@ static ncclGatherP2pFn resolve_nccl_gather_p2p(void)
     }
 
     return (ncclGatherP2pFn)sym;
+}
+
+static ncclScatterP2pFn resolve_nccl_scatter_p2p(void)
+{
+    dlerror();
+    void *sym = dlsym(RTLD_DEFAULT, "ncclScatter_p2p");
+    const char *err = dlerror();
+    if (err != NULL || sym == NULL) {
+        fprintf(stderr,
+                "Error: could not resolve ncclScatter_p2p. "
+                "Run this test with the NCCL DMTCP plugin loaded. %s\n",
+                err ? err : "");
+        exit(1);
+    }
+
+    return (ncclScatterP2pFn)sym;
 }
 
 static ncclAllGatherFn resolve_nccl_all_gather(void)
@@ -94,10 +116,11 @@ static ncclAllGatherFn resolve_nccl_all_gather(void)
 
 static void usage(const char *prog)
 {
-    printf("Usage: %s [count] [root] [num_gpus]\n", prog);
+    printf("Usage: %s [count] [root] [num_gpus] [mode]\n", prog);
     printf("  count    Number of floats sent by each GPU (default: 16)\n");
-    printf("  root     Gather root rank/GPU (default: 0)\n");
+    printf("  root     Collective root rank/GPU (default: 0)\n");
     printf("  num_gpus Number of GPUs to use (default: all available)\n");
+    printf("  mode     gather, scatter, or all (default: gather)\n");
 }
 
 static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root)
@@ -117,12 +140,16 @@ static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root
         ctx->send_buf = NULL;
         ctx->p2p_recv_buf = NULL;
         ctx->nccl_recv_buf = NULL;
+        ctx->scatter_send_buf = NULL;
+        ctx->scatter_recv_buf = NULL;
 
         CUDA_CHECK(cudaSetDevice(i));
         CUDA_CHECK(cudaStreamCreate(&ctx->stream));
         CUDA_CHECK(cudaMalloc((void **)&ctx->send_buf, count * sizeof(float)));
         CUDA_CHECK(cudaMalloc((void **)&ctx->nccl_recv_buf,
                               num_gpus * count * sizeof(float)));
+        CUDA_CHECK(cudaMalloc((void **)&ctx->scatter_recv_buf,
+                              count * sizeof(float)));
 
         std::vector<float> h_send(count);
         for (size_t j = 0; j < count; j++)
@@ -130,15 +157,32 @@ static void setup(std::vector<GpuCtx> *gpu, size_t count, int num_gpus, int root
 
         CUDA_CHECK(cudaMemcpy(ctx->send_buf, h_send.data(),
                               count * sizeof(float), cudaMemcpyHostToDevice));
+        std::vector<float> recv_sentinel(count, -2.0f);
+        CUDA_CHECK(cudaMemcpy(ctx->scatter_recv_buf, recv_sentinel.data(),
+                              recv_sentinel.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
     }
 
     CUDA_CHECK(cudaSetDevice(root));
     CUDA_CHECK(cudaMalloc((void **)&(*gpu)[root].p2p_recv_buf,
                           num_gpus * count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&(*gpu)[root].scatter_send_buf,
+                          num_gpus * count * sizeof(float)));
 
     std::vector<float> sentinel(num_gpus * count, -1.0f);
     CUDA_CHECK(cudaMemcpy((*gpu)[root].p2p_recv_buf, sentinel.data(),
                           sentinel.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    std::vector<float> h_scatter_send(num_gpus * count);
+    for (int r = 0; r < num_gpus; r++) {
+        for (size_t j = 0; j < count; j++) {
+            h_scatter_send[(size_t)r * count + j] =
+                (float)(100000 + r * 1000 + j);
+        }
+    }
+    CUDA_CHECK(cudaMemcpy((*gpu)[root].scatter_send_buf,
+                          h_scatter_send.data(),
+                          h_scatter_send.size() * sizeof(float),
                           cudaMemcpyHostToDevice));
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
@@ -179,6 +223,30 @@ static void run_gather(std::vector<GpuCtx> *gpu, size_t count, int num_gpus,
         NCCL_CHECK(ncclAllGather((*gpu)[i].send_buf,
                                  (*gpu)[i].nccl_recv_buf, count, ncclFloat,
                                  (*gpu)[i].comm, (*gpu)[i].stream));
+    }
+    NCCL_CHECK(ncclGroupEnd());
+
+    for (int i = 0; i < num_gpus; i++) {
+        CUDA_CHECK(cudaSetDevice(i));
+        CUDA_CHECK(cudaStreamSynchronize((*gpu)[i].stream));
+    }
+}
+
+static void run_scatter(std::vector<GpuCtx> *gpu, size_t count, int num_gpus,
+                        int root)
+{
+    ncclScatterP2pFn ncclScatter_p2p = resolve_nccl_scatter_p2p();
+
+    /* Batch every rank's p2p scatter call for the single-thread launch. */
+    NCCL_CHECK(ncclGroupStart());
+    for (int i = 0; i < num_gpus; i++) {
+        CUDA_CHECK(cudaSetDevice(i));
+        const void *send_buf =
+            (i == root) ? (*gpu)[root].scatter_send_buf : NULL;
+
+        NCCL_CHECK(ncclScatter_p2p(send_buf, (*gpu)[i].scatter_recv_buf, count,
+                                   ncclFloat, root, (*gpu)[i].comm,
+                                   (*gpu)[i].stream));
     }
     NCCL_CHECK(ncclGroupEnd());
 
@@ -234,6 +302,46 @@ static int verify(const std::vector<GpuCtx> &gpu, size_t count, int num_gpus,
     return errors;
 }
 
+static int verify_scatter(const std::vector<GpuCtx> &gpu, size_t count,
+                          int num_gpus, int root)
+{
+    int errors = 0;
+
+    for (int r = 0; r < num_gpus; r++) {
+        std::vector<float> h_recv(count);
+
+        CUDA_CHECK(cudaSetDevice(r));
+        CUDA_CHECK(cudaMemcpy(h_recv.data(), gpu[r].scatter_recv_buf,
+                              h_recv.size() * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+
+        for (size_t j = 0; j < count; j++) {
+            float expected = (float)(100000 + r * 1000 + j);
+            float actual = h_recv[j];
+
+            if (actual != expected) {
+                if (errors < 10) {
+                    printf("[ROOT %d] Scatter error at rank=%d elem=%zu: "
+                           "actual=%f expected=%f\n",
+                           root, r, j, actual, expected);
+                }
+                errors++;
+            }
+        }
+    }
+
+    if (errors == 0) {
+        printf("[SCATTER_P2P] SUCCESS: root %d scattered %zu floats to each "
+               "of %d ranks.\n",
+               root, count, num_gpus);
+    } else {
+        printf("[SCATTER_P2P] FAILURE: %d scatter mismatches found.\n",
+               errors);
+    }
+
+    return errors;
+}
+
 static void teardown(std::vector<GpuCtx> *gpu)
 {
     for (size_t i = 0; i < gpu->size(); i++) {
@@ -245,6 +353,10 @@ static void teardown(std::vector<GpuCtx> *gpu)
             CUDA_CHECK(cudaFree((*gpu)[i].p2p_recv_buf));
         if ((*gpu)[i].nccl_recv_buf)
             CUDA_CHECK(cudaFree((*gpu)[i].nccl_recv_buf));
+        if ((*gpu)[i].scatter_send_buf)
+            CUDA_CHECK(cudaFree((*gpu)[i].scatter_send_buf));
+        if ((*gpu)[i].scatter_recv_buf)
+            CUDA_CHECK(cudaFree((*gpu)[i].scatter_recv_buf));
 
         CUDA_CHECK(cudaStreamDestroy((*gpu)[i].stream));
         NCCL_CHECK(ncclCommDestroy((*gpu)[i].comm));
@@ -253,13 +365,14 @@ static void teardown(std::vector<GpuCtx> *gpu)
 
 int main(int argc, char **argv)
 {
-    if (argc > 4) {
+    if (argc > 5) {
         usage(argv[0]);
         return 1;
     }
 
     size_t count = (argc >= 2) ? strtoull(argv[1], NULL, 10) : 16;
     int root = (argc >= 3) ? atoi(argv[2]) : 0;
+    const char *mode = (argc >= 5) ? argv[4] : "gather";
 
     int available_gpus = 0;
     CUDA_CHECK(cudaGetDeviceCount(&available_gpus));
@@ -285,14 +398,32 @@ int main(int argc, char **argv)
                 num_gpus - 1, root);
         return 1;
     }
+    bool run_gather_mode =
+        strcmp(mode, "gather") == 0 || strcmp(mode, "all") == 0;
+    bool run_scatter_mode =
+        strcmp(mode, "scatter") == 0 || strcmp(mode, "all") == 0;
+    if (!run_gather_mode && !run_scatter_mode) {
+        fprintf(stderr, "Error: mode must be gather, scatter, or all; got %s\n",
+                mode);
+        return 1;
+    }
 
-    printf("[GATHER_P2P] GPUs=%d root=%d count=%zu floats\n",
-           num_gpus, root, count);
+    printf("[P2P] GPUs=%d root=%d count=%zu floats mode=%s\n", num_gpus, root,
+           count, mode);
 
     std::vector<GpuCtx> gpu;
     setup(&gpu, count, num_gpus, root);
-    run_gather(&gpu, count, num_gpus, root);
-    int errors = verify(gpu, count, num_gpus, root);
+
+    int errors = 0;
+    if (run_gather_mode) {
+        run_gather(&gpu, count, num_gpus, root);
+        errors += verify(gpu, count, num_gpus, root);
+    }
+    if (run_scatter_mode) {
+        run_scatter(&gpu, count, num_gpus, root);
+        errors += verify_scatter(gpu, count, num_gpus, root);
+    }
+
     teardown(&gpu);
 
     return errors == 0 ? 0 : 1;
