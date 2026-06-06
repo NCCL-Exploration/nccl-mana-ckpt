@@ -48,7 +48,7 @@ gather_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
 		$(GATHER_COUNT) $(GATHER_ROOT) $(NGPUS)
 
 scatter_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
-	@echo -e "${GREEN}==> Running ncclScatter_p2p vs ncclScatter correctness test <==${NC}"
+	@echo -e "${GREEN}==> Running ncclScatter_p2p correctness test <==${NC}"
 	@echo "  Params: count=$(SCATTER_COUNT), root=$(SCATTER_ROOT), gpus=$(NGPUS)"
 	@$(MAKE) kill
 	@$(DMTCP_LAUNCH) --coord-port $(PORT) --interval $(INTERVAL) \
