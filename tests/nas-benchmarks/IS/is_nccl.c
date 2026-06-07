@@ -234,6 +234,7 @@ MPI_Comm comm_work;
 INT_TYPE *key_buff_ptr_global,         /* used by full_verify to get */
          total_local_keys,             /* copies of rank info        */
          total_lesser_keys;
+INT_TYPE key_buff_offset_global;       /* offset for key_buff_ptr_global */
 
 
 int      passed_verification;
@@ -348,21 +349,31 @@ void alloc_space(void)
    else
       size_of_buffers = 13*num_keys/2;
 
-   /* allocate space */
-   cudaMallocManaged((void**)&key_array, sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&key_buff1, sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&key_buff2, sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
+   /* --------------------------------------------------------------- */
+   /* Buffers that NCCL touches must be in CUDA managed memory.        */
+   /* Host-only metadata arrays use plain malloc to avoid cudaFree     */
+   /* issues and unnecessary managed-memory overhead.                  */
+   /* --------------------------------------------------------------- */
 
+   /* NCCL-touched data buffers → cudaMallocManaged */
+   cudaMallocManaged((void**)&key_array,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
+   cudaMallocManaged((void**)&key_buff1,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
+   cudaMallocManaged((void**)&key_buff2,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
+
+   /* NCCL alltoall touches send_count/recv_count as src/dst buffers */
    cudaMallocManaged((void**)&send_count, sizeof(int)*comm_size, cudaMemAttachGlobal);
    cudaMallocManaged((void**)&recv_count, sizeof(int)*comm_size, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&send_displ, sizeof(int)*comm_size, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&recv_displ, sizeof(int)*comm_size, cudaMemAttachGlobal);
 
-   cudaMallocManaged((void**)&bucket_size, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&bucket_size_totals, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&bucket_ptrs, sizeof(INT_TYPE)*NUM_BUCKETS, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&process_bucket_distrib_ptr1, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&process_bucket_distrib_ptr2, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
+   /* bucket_size and bucket_size_totals are used in ncclAllReduce */
+   cudaMallocManaged((void**)&bucket_size,        sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
+   cudaMallocManaged((void**)&bucket_size_totals,  sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
+
+   /* Host-only arrays → plain malloc */
+   send_displ                  = (int *)malloc(sizeof(int)*comm_size);
+   recv_displ                  = (int *)malloc(sizeof(int)*comm_size);
+   bucket_ptrs                 = (INT_TYPE *)malloc(sizeof(INT_TYPE)*NUM_BUCKETS);
+   process_bucket_distrib_ptr1 = (INT_TYPE *)malloc(sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
+   process_bucket_distrib_ptr2 = (INT_TYPE *)malloc(sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
 
    if (!key_array || !key_buff1 || !key_buff2 ||
        !send_count || !recv_count || !send_displ || !recv_displ ||
@@ -373,16 +384,16 @@ void alloc_space(void)
       exit(1);
    }
 
-   memset(key_array, 0, sizeof(INT_TYPE)*size_of_buffers);
-   memset(key_buff1, 0, sizeof(INT_TYPE)*size_of_buffers);
-   memset(key_buff2, 0, sizeof(INT_TYPE)*size_of_buffers);
+   memset(key_array,  0, sizeof(INT_TYPE)*size_of_buffers);
+   memset(key_buff1,  0, sizeof(INT_TYPE)*size_of_buffers);
+   memset(key_buff2,  0, sizeof(INT_TYPE)*size_of_buffers);
    memset(send_count, 0, sizeof(int)*comm_size);
    memset(recv_count, 0, sizeof(int)*comm_size);
    memset(send_displ, 0, sizeof(int)*comm_size);
    memset(recv_displ, 0, sizeof(int)*comm_size);
-   memset(bucket_size, 0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
-   memset(bucket_size_totals, 0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
-   memset(bucket_ptrs, 0, sizeof(INT_TYPE)*NUM_BUCKETS);
+   memset(bucket_size,        0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
+   memset(bucket_size_totals,  0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
+   memset(bucket_ptrs,                 0, sizeof(INT_TYPE)*NUM_BUCKETS);
    memset(process_bucket_distrib_ptr1, 0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
    memset(process_bucket_distrib_ptr2, 0, sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
 }
@@ -392,20 +403,21 @@ void alloc_space(void)
 /*****************************************************************/
 void free_space(void)
 {
+   /* NCCL-touched buffers (cudaMallocManaged) */
    cudaFree(key_array);
    cudaFree(key_buff1);
    cudaFree(key_buff2);
-
    cudaFree(send_count);
    cudaFree(recv_count);
-   cudaFree(send_displ);
-   cudaFree(recv_displ);
-
    cudaFree(bucket_size);
    cudaFree(bucket_size_totals);
-   cudaFree(bucket_ptrs);
-   cudaFree(process_bucket_distrib_ptr1);
-   cudaFree(process_bucket_distrib_ptr2);
+
+   /* Host-only arrays (malloc) */
+   free(send_displ);
+   free(recv_displ);
+   free(bucket_ptrs);
+   free(process_bucket_distrib_ptr1);
+   free(process_bucket_distrib_ptr2);
 }
 
 
@@ -614,9 +626,14 @@ void full_verify( void )
     TIMER_START( T_VERIFY );
 
 /*  Now, finally, sort the keys:  */
-    for( i=0; i<total_local_keys; i++ )
-        key_array[--key_buff_ptr_global[key_buff2[i]]-
+/*  key_buff_ptr_global is key_buff1 with logical offset key_buff_offset_global.
+    Access key_buff_ptr_global[x] becomes key_buff1[x - key_buff_offset_global]. */
+    for( i=0; i<total_local_keys; i++ ) {
+        INT_TYPE idx = key_buff2[i] - key_buff_offset_global;
+        key_buff_ptr_global[idx]--;
+        key_array[key_buff_ptr_global[idx] -
                                  total_lesser_keys] = key_buff2[i];
+    }
     last_local_key = (total_local_keys<1)? 0 : (total_local_keys-1);
 
 /*  Send largest key value to next processor  */
@@ -846,15 +863,17 @@ void rank( int iteration )
 
 
 /*  Ranking of all keys occurs in this section:                 */
-/*  shift it backwards so no subtractions are necessary in loop */
-    key_buff_ptr = key_buff1 - min_key_val;
+/*  Use explicit offset instead of negative pointer arithmetic  */
+/*  to avoid undefined behavior with cudaMallocManaged memory.  */
+/*  key_buff_ptr[k] == key_buff1[k - min_key_val]               */
+    key_buff_ptr = key_buff1;
+    INT_TYPE key_offset = min_key_val;
 
 /*  In this section, the keys themselves are used as their 
     own indexes to determine how many of each there are: their
     individual population                                       */
     for( i=0; i<j; i++ )
-        key_buff_ptr[key_buff2[i]]++;  /* Now they have individual key   */
-                                       /* population                     */
+        key_buff_ptr[key_buff2[i] - key_offset]++;
 
 /*  To obtain ranks of each key, successively add the individual key
     population, not forgetting the total of lesser keys, m.
@@ -862,9 +881,8 @@ void rank( int iteration )
     in verification, it is no longer added to the first key population 
     here, but still needed during the partial verify test.  This is to 
     ensure that 32-bit key_buff can still be used for class D.           */
-/*    key_buff_ptr[min_key_val] += m;    */
     for( i=min_key_val; i<max_key_val; i++ )   
-        key_buff_ptr[i+1] += key_buff_ptr[i];  
+        key_buff_ptr[i+1 - key_offset] += key_buff_ptr[i - key_offset];  
 
 
 /* This is the partial verify test section */
@@ -876,7 +894,7 @@ void rank( int iteration )
         if( min_key_val <= k  &&  k <= max_key_val )
         {
             /* Add the total of lesser keys, m, here */
-            KEY_TYPE key_rank = key_buff_ptr[k-1] + m;
+            KEY_TYPE key_rank = key_buff_ptr[k-1 - key_offset] + m;
             KEY_TYPE test_rank = test_rank_array[i];
             int failed = 0;
 
@@ -935,10 +953,8 @@ void rank( int iteration )
             }
             if( key_rank != test_rank )
                 failed = 1;
-            else {
+            else
                 passed_verification++;
-                printf("Rank %d iteration %d incremented passed_verification to %d\n", my_rank, iteration, passed_verification);
-            }
             if( failed == 1 )
                 printf( "Failed partial verification: "
                         "iteration %d, processor %d, test key %d, key rank %ld\n", 
@@ -957,6 +973,7 @@ void rank( int iteration )
     if( iteration == MAX_ITERATIONS ) 
     {
         key_buff_ptr_global = key_buff_ptr;
+        key_buff_offset_global = key_offset;
         total_local_keys    = j;
         total_lesser_keys   = 0;  /* no longer set to 'm', see note above */
     }
@@ -1166,7 +1183,6 @@ int main( int argc, char **argv )
 
 
 /*  Obtain verification counter sum */
-    printf("Rank %d: local passed_verification = %d\n", my_rank, passed_verification);
     itemp = passed_verification;
     MPI_Reduce( &itemp,
                 &passed_verification,
@@ -1175,7 +1191,6 @@ int main( int argc, char **argv )
                 MPI_SUM,
                 0,
                 comm_work );
-    if (my_rank == 0) printf("Rank 0: total passed_verification = %d, expected = %d\n", passed_verification, 5*MAX_ITERATIONS + comm_size);
 
     free_space();
 
