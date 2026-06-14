@@ -3,9 +3,7 @@
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH -t 00:15:00
-#SBATCH -n 2
-#SBATCH -c 16
-#SBATCH --gpus-per-task=1
+#SBATCH -G 2
 #SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
@@ -64,7 +62,7 @@ echo ""
 echo "==> Phase 1: Initial run with checkpoint"
 $DMTCP_LAUNCH --coord-port $PORT --interval 0 \
   --with-plugin $PLUGIN \
-  srun ./is_nccl_exe &
+  srun -n 2 -c 16 --gpus-per-task=1 ./is_nccl_exe &
 PID=$!
 
 # Wait and trigger checkpoint

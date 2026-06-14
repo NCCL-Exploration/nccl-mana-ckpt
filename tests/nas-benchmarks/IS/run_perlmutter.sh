@@ -3,9 +3,7 @@
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH -t 00:10:00
-#SBATCH -n 2
-#SBATCH -c 16
-#SBATCH --gpus-per-task=1
+#SBATCH -G 2
 #SBATCH -J nas-is-nccl
 #SBATCH -o nas_is_nccl_%j.out
 #SBATCH -e nas_is_nccl_%j.err
@@ -42,7 +40,7 @@ echo "============================================="
 
 cd $SLURM_SUBMIT_DIR
 
-srun ./is_nccl_exe
+srun -n 2 -c 16 --gpus-per-task=1 ./is_nccl_exe
 
 echo ""
 echo "Job completed at $(date)"
