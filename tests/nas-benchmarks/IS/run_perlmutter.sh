@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A <ACCOUNT>          # ← Replace with your NERSC allocation (e.g., m1234)
+#SBATCH -A m4128
 #SBATCH -C gpu
 #SBATCH -q regular
 #SBATCH -t 00:10:00
