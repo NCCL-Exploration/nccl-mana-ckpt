@@ -30,14 +30,6 @@ module load cudatoolkit 2>/dev/null || true
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
 
-echo "============================================="
-echo "  NAS IS Benchmark — NCCL port"
-echo "  Nodes:  $SLURM_NNODES"
-echo "  Tasks:  $SLURM_NTASKS"
-echo "  GPUs:   $SLURM_GPUS_ON_NODE"
-echo "  Date:   $(date)"
-echo "============================================="
-
 cd $SLURM_SUBMIT_DIR
 
 srun -n 2 -c 16 --gpus-per-task=1 ./is_nccl_exe

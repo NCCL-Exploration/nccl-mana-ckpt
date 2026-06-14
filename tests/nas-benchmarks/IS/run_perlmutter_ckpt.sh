@@ -46,13 +46,6 @@ export NCCL_NET_GDR_LEVEL=PHB
 
 cd $SCRIPT_DIR
 
-echo "============================================="
-echo "  NAS IS Benchmark — DMTCP Checkpoint Test"
-echo "  DMTCP_ROOT: $DMTCP_ROOT"
-echo "  Plugins:    $PLUGIN"
-echo "  Date:       $(date)"
-echo "============================================="
-
 # Clean up any stale coordinator
 $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
 rm -f ckpt_*.dmtcp
