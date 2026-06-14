@@ -7,8 +7,8 @@
 #include <string.h>
 #include "nccl_wrappers.h"
 #include "inflight.h"
+#include "dmtcp_kvdb_c.h"
 #include <string.h>
-
 
 #define CUDA_CHECK(cmd)                                                        \
     do {                                                                       \
