@@ -66,9 +66,12 @@ NCCL_EXE  = is_nccl_exe
 MPI_EXE   = is_mpi_exe
 
 # ── Targets ──────────────────────────────────────────────────────────
-.PHONY: all clean run_nccl run_mpi run_nccl_ckpt
+.PHONY: all clean run_nccl run_mpi run_nccl_ckpt is_nccl is_mpi
 
 all: $(NCCL_EXE) $(MPI_EXE)
+
+is_nccl: $(NCCL_EXE)
+is_mpi: $(MPI_EXE)
 
 # --- NCCL version ---------------------------------------------------
 # nvcc compiles .c as CUDA host code (no device kernels needed here)
