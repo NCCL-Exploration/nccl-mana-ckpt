@@ -55,7 +55,7 @@ echo ""
 echo "==> Phase 1: Initial run with checkpoint"
 $DMTCP_LAUNCH --coord-port $PORT --interval 0 \
   --with-plugin $PLUGIN \
-  srun -n 2 -c 16 --gpus-per-task=1 ./is_nccl_exe &
+  srun -n 2 -c 16 ./is_nccl_exe &
 PID=$!
 
 # Wait and trigger checkpoint

@@ -32,7 +32,7 @@ export NCCL_NET_GDR_LEVEL=PHB
 
 cd $SLURM_SUBMIT_DIR
 
-srun -n 2 -c 16 --gpus-per-task=1 ./is_nccl_exe
+srun -n 2 -c 16 ./is_nccl_exe
 
 echo ""
 echo "Job completed at $(date)"
