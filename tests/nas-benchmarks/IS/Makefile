@@ -43,15 +43,18 @@ PORT           = 7783
 # ── Flags ────────────────────────────────────────────────────────────
 OPTFLAGS  = -O3 -g
 
-# NCCL build: compile .c through nvcc (CUDA host compiler)
-NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' \
-               -Xcompiler -Wall
+# NCCL build: compile .c through MPICC (which natively has MPI paths)
+NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
 NCCL_LDFLAGS = -lnccl -lmpi -lcudart
 
 # Add include/lib paths only if set
 ifneq ($(NCCL_HOME),)
   NCCL_CFLAGS  += -I$(NCCL_HOME)/include
   NCCL_LDFLAGS += -L$(NCCL_HOME)/lib
+endif
+ifneq ($(CUDA_HOME),)
+  NCCL_CFLAGS  += -I$(CUDA_HOME)/include
+  NCCL_LDFLAGS += -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib
 endif
 
 # MPI build
@@ -74,9 +77,9 @@ is_nccl: $(NCCL_EXE)
 is_mpi: $(MPI_EXE)
 
 # --- NCCL version ---------------------------------------------------
-# nvcc compiles .c as CUDA host code (no device kernels needed here)
+# MPICC automatically handles mpi.h, and we link cudart/nccl manually
 $(NCCL_EXE): $(NCCL_SRCS) npbparams.h c_timers.h
-	$(NVCC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
+	$(MPICC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
 
 # --- MPI version (reference) ----------------------------------------
 $(MPI_EXE): $(MPI_SRCS) npbparams.h c_timers.h
