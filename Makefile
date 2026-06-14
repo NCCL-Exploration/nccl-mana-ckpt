@@ -24,7 +24,13 @@ MPICH_BIN = /usr/bin
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -I/usr/lib/x86_64-linux-gnu/openmpi/include -lnccl -lmpi
+NCCL_HOME ?= $(NCCL_DIR)
+
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -I/usr/lib/x86_64-linux-gnu/openmpi/include
+ifneq ($(NCCL_HOME),)
+  override CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
+endif
+override CFLAGS += -lnccl -lmpi
 
 plugin: src/libncclplugin.so
 

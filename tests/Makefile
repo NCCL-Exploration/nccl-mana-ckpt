@@ -1,5 +1,9 @@
 CC = nvcc
+NCCL_HOME ?= $(NCCL_DIR)
 CFLAGS = -O3 -g -lnccl -I../include
+ifneq ($(NCCL_HOME),)
+  CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
+endif
 
 DMTCP_ROOT ?= ../dmtcp
 CRAC_ROOT ?= ../crac
