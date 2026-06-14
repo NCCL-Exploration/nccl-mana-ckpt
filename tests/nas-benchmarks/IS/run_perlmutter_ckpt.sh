@@ -5,11 +5,14 @@
 #SBATCH -t 00:15:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=2
+#SBATCH -c 64
 #SBATCH --gpus-per-task=1
 #SBATCH --gpu-bind=none
 #SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
+
+export SLURM_CPU_BIND="cores"
 
 # ─────────────────────────────────────────────────────────────────────
 #  NAS IS Benchmark (NCCL port) — DMTCP Checkpoint test on Perlmutter
