@@ -24,7 +24,7 @@ set -euo pipefail
 module load cudatoolkit 2>/dev/null || true
 
 # Paths — adjust if your layout differs
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
 DMTCP_ROOT=$ROOT_DIR/dmtcp
