@@ -27,8 +27,8 @@ module load cudatoolkit 2>/dev/null || true
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
-DMTCP_ROOT=${DMTCP_ROOT:-$ROOT_DIR/dmtcp}
-CRAC_ROOT=${CRAC_ROOT:-$ROOT_DIR/crac}
+DMTCP_ROOT=$ROOT_DIR/dmtcp
+CRAC_ROOT=$ROOT_DIR/crac
 
 DMTCP_LAUNCH=$DMTCP_ROOT/bin/dmtcp_launch
 DMTCP_CMD=$DMTCP_ROOT/bin/dmtcp_command
