@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /******************/
 /* default values */
@@ -1159,6 +1160,7 @@ int main( int argc, char **argv )
     {
         if( my_rank == 0 && CLASS != 'S' ) printf( "        %d\n", iteration );
         rank( iteration );
+        sleep(1);
     }
 
 
