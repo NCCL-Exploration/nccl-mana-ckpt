@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <nccl.h>
+#include <cuda_runtime.h>
 #include "dmtcp.h"
 #include "dmtcp_kvdb_c.h"
 #include "nccl_wrappers.h"
@@ -308,6 +309,21 @@ restart()
   // NOTE: drain_queues are NOT reset — they survive restart for ncclRecv replay
 }
 
+static void pre_init_cuda() {
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err == cudaSuccess) {
+      printf("[NCCL Plugin] Pre-initializing CUDA on control thread for %d devices...\n", device_count);
+      for (int i = 0; i < device_count; i++) {
+          cudaSetDevice(i);
+          cudaFree(0);
+      }
+      printf("[NCCL Plugin] CUDA pre-initialization complete.\n");
+  } else {
+      printf("[NCCL Plugin] Failed to get device count during pre-init: %s\n", cudaGetErrorString(err));
+  }
+}
+
 static void
 example_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data)
 {
@@ -315,6 +331,7 @@ example_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data)
   switch (event) {
   case DMTCP_EVENT_INIT:
     printf("The plugin containing %s has been initialized.\n", __FILE__);
+    pre_init_cuda();
     break;
 
   case DMTCP_EVENT_EXIT:
