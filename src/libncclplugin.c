@@ -310,6 +310,23 @@ restart()
 }
 
 static void pre_init_cuda() {
+  const char* exec_path = dmtcp_get_executable_path();
+  if (exec_path != NULL) {
+      const char* basename = strrchr(exec_path, '/');
+      basename = basename ? basename + 1 : exec_path;
+      if (strcmp(basename, "srun") == 0 ||
+          strcmp(basename, "mpirun") == 0 ||
+          strcmp(basename, "mpiexec") == 0 ||
+          strcmp(basename, "bash") == 0 ||
+          strcmp(basename, "sh") == 0 ||
+          strcmp(basename, "orted") == 0 ||
+          strcmp(basename, "slurmd") == 0 ||
+          strcmp(basename, "slurmstepd") == 0 ||
+          strncmp(basename, "dmtcp_", 6) == 0) {
+          return;
+      }
+  }
+
   int device_count = 0;
   cudaError_t err = cudaGetDeviceCount(&device_count);
   if (err == cudaSuccess) {
