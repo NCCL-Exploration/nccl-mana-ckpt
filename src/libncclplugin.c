@@ -309,7 +309,15 @@ restart()
   // NOTE: drain_queues are NOT reset — they survive restart for ncclRecv replay
 }
 
+extern char *program_invocation_short_name;
 static void pre_init_cuda() {
+  if (!program_invocation_short_name ||
+      strstr(program_invocation_short_name, "srun") ||
+      strstr(program_invocation_short_name, "bash") ||
+      strstr(program_invocation_short_name, "dmtcp_")) {
+      return;
+  }
+
   int device_count = 0;
   cudaError_t err = cudaGetDeviceCount(&device_count);
   if (err == cudaSuccess) {
