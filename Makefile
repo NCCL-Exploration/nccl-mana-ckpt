@@ -118,4 +118,4 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 clean:
 	cd ${CRAC_ROOT} && make clean
 	cd tests && make clean
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files
+	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers

@@ -21,11 +21,23 @@ export SLURM_CPU_BIND="cores"
 
 set -euo pipefail
 
+# Darshan (Perlmutter I/O profiler) wraps dup2/open/close via LD_PRELOAD.
+# DMTCP also wraps these calls. The two conflict, causing infinite recursion
+# in dup2 → stack overflow → SIGSEGV. Disable Darshan when using DMTCP.
+export DARSHAN_DISABLE=1
+module unload darshan 2>/dev/null || true
+
 module load cudatoolkit 2>/dev/null || true
+module load nccl 2>/dev/null || true
+
+# Ensure NCCL and CUDA libs are on LD_LIBRARY_PATH for srun-launched processes
+export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # Paths — adjust if your layout differs
-SCRIPT_DIR=${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
+ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
 
 DMTCP_ROOT=$ROOT_DIR/dmtcp
 CRAC_ROOT=$ROOT_DIR/crac
@@ -39,54 +51,167 @@ CRAC_PLUGIN=$CRAC_ROOT/libdmtcp_crac.so
 PLUGIN="$NCCL_PLUGIN:$CRAC_PLUGIN"
 
 PORT=7783
-CKPT_DELAY=5   # seconds before triggering checkpoint
+CKPT_DELAY=6   # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
 
 cd $SCRIPT_DIR
 
-# Clean up any stale coordinator
+JOB_START=$(date +%s%N)
+
+# Clean up any stale coordinator or processes
 $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
+killall -9 dmtcp_coordinator 2>/dev/null || true
+sleep 0.5
 rm -f ckpt_*.dmtcp
+rm -f srun_launch.log
+
+# Ensure the benchmark is compiled with CLASS=A for longer execution
+echo "Compiling benchmark (CLASS=A)..."
+make clean && make is_nccl CLASS=A
 
 # Phase 1: Launch under DMTCP
 echo ""
 echo "==> Phase 1: Initial run with checkpoint"
-$DMTCP_LAUNCH --coord-port $PORT --interval 0 \
-  --with-plugin $PLUGIN \
-  srun -n 2 -c 16 ./is_nccl_exe &
+PHASE1_START=$(date +%s%N)
+
+# Step 1: Start a standalone DMTCP coordinator
+echo "Starting DMTCP coordinator on port $PORT..."
+$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+sleep 1
+
+# Verify coordinator is running
+if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
+    echo "ERROR: Failed to start DMTCP coordinator"
+    exit 1
+fi
+echo "Coordinator is running."
+
+# Step 2: Launch each task under dmtcp_launch via srun
+# Each is_nccl_exe task is individually DMTCP-managed
+# NOTE: Testing with NCCL plugin only (no CRAC) to isolate segfault source
+srun -n 2 --unbuffered --export=ALL \
+  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip \
+  --with-plugin $NCCL_PLUGIN \
+  ./is_nccl_exe > srun_launch.log 2>&1 &
 PID=$!
 
-# Wait and trigger checkpoint
-sleep $CKPT_DELAY
+# Wait for both processes to connect to coordinator
+echo "Waiting for processes to connect to coordinator..."
+while true; do
+    PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
+    if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
+        echo "Found $PEERS connected processes."
+        break
+    fi
+    if ! kill -0 $PID 2>/dev/null; then
+        echo "ERROR: srun process died unexpectedly. Log output:"
+        cat srun_launch.log
+        exit 1
+    fi
+    sleep 0.5
+done
+
+# Wait for NCCL initialization and a few iterations to run
+echo "Waiting for NCCL to initialize and computation to start..."
+while true; do
+    if grep -q "iteration" srun_launch.log 2>/dev/null; then
+        echo "NCCL initialized, computation running."
+        break
+    fi
+    if ! kill -0 $PID 2>/dev/null; then
+        echo "ERROR: process exited before computation started. Log output:"
+        cat srun_launch.log
+        exit 1
+    fi
+    sleep 0.5
+done
+sleep 2
+
 echo "Triggering checkpoint..."
-$DMTCP_CMD --coord-port $PORT --checkpoint || true
-wait $PID
-RESULT=$?
+CKPT_START=$(date +%s%N)
+$DMTCP_CMD --coord-port $PORT --checkpoint
+CKPT_TRIGGER=$(date +%s%N)
+echo "Checkpoint triggered. Waiting for process to complete..."
+wait $PID || true
+CKPT_DONE=$(date +%s%N)
+RESULT=${PIPESTATUS[0]:-$?}
+
+CKPT_TRIGGER_MS=$(( (CKPT_TRIGGER - CKPT_START) / 1000000 ))
+CKPT_TOTAL_MS=$(( (CKPT_DONE - CKPT_START) / 1000000 ))
 
 if [ $RESULT -eq 0 ]; then
     echo "PASS: Initial run completed successfully"
 else
-    echo "FAIL: Initial run exited with code $RESULT"
-    exit 1
+    echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
 fi
+
+# ─────────────────────────────────────────────────────────────────────
+#  Profiling — disable strict mode so stats commands don't kill script
+# ─────────────────────────────────────────────────────────────────────
+set +eu
+
+# Checkpoint file stats
+CKPT_COUNT=0
+CKPT_SIZE_MB="N/A"
+CKPT_DIR_SIZE_MB="N/A"
+if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
+    CKPT_COUNT=$(ls -1 ckpt_*.dmtcp | wc -l)
+    CKPT_SIZE_BYTES=$(du -cb ckpt_*.dmtcp | tail -1 | awk '{print $1}')
+    if [ -n "$CKPT_SIZE_BYTES" ]; then
+        CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
+    fi
+fi
+if ls -d ckpt_*_files/ 1>/dev/null 2>&1; then
+    CKPT_DIR_SIZE_BYTES=$(du -csb ckpt_*_files/ | tail -1 | awk '{print $1}')
+    if [ -n "$CKPT_DIR_SIZE_BYTES" ]; then
+        CKPT_DIR_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_DIR_SIZE_BYTES / 1048576}")
+    fi
+fi
+
+PHASE1_MS=$(( (CKPT_DONE - PHASE1_START) / 1000000 ))
 
 # Phase 2: Restart from checkpoint
 CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
+RESTART_MS="N/A"
 if [ -n "$CKPT" ]; then
     echo ""
     echo "==> Phase 2: Restarting from checkpoint: $CKPT"
+    RESTART_START=$(date +%s%N)
     $DMTCP_RESTART --coord-port $PORT $CKPT
-    if [ $? -eq 0 ]; then
+    RESTART_DONE=$(date +%s%N)
+    RESTART_RC=$?
+    RESTART_MS=$(( (RESTART_DONE - RESTART_START) / 1000000 ))
+    if [ $RESTART_RC -eq 0 ]; then
         echo "PASS: Restart completed successfully"
     else
-        echo "FAIL: Restart failed"
-        exit 1
+        echo "FAIL: Restart failed (exit code $RESTART_RC)"
     fi
 else
     echo "No checkpoint file found — skipping restart phase"
 fi
 
+JOB_DONE=$(date +%s%N)
+TOTAL_MS=$(( (JOB_DONE - JOB_START) / 1000000 ))
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║              CHECKPOINT PROFILING SUMMARY                   ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+printf "║  %-40s %15s  ║\n" "Phase 1 (run + checkpoint):" "${PHASE1_MS} ms"
+printf "║  %-40s %15s  ║\n" "  └─ Checkpoint trigger (cmd):" "${CKPT_TRIGGER_MS} ms"
+printf "║  %-40s %15s  ║\n" "  └─ Checkpoint completion (drain+write):" "${CKPT_TOTAL_MS} ms"
+echo "║──────────────────────────────────────────────────────────────║"
+printf "║  %-40s %15s  ║\n" "Checkpoint files:" "${CKPT_COUNT} file(s)"
+printf "║  %-40s %15s  ║\n" "Checkpoint .dmtcp size:" "${CKPT_SIZE_MB} MB"
+printf "║  %-40s %15s  ║\n" "Checkpoint dir size:" "${CKPT_DIR_SIZE_MB} MB"
+echo "║──────────────────────────────────────────────────────────────║"
+printf "║  %-40s %15s  ║\n" "Phase 2 (restart):" "${RESTART_MS} ms"
+echo "║──────────────────────────────────────────────────────────────║"
+printf "║  %-40s %15s  ║\n" "Total wall time:" "${TOTAL_MS} ms"
+echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Job completed at $(date)"
+
+

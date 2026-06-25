@@ -120,8 +120,10 @@ void increment_seq_and_wait(ncclComm_t comm) {
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) {
+    fprintf(stderr, "[WRAPPER] ncclCommInitRank called with rank %d, nranks %d\n", rank, nranks);
     LOAD_SYM(ncclCommInitRank);
     ncclResult_t res = real_ncclCommInitRank(comm, nranks, commId, rank);
+    fprintf(stderr, "[WRAPPER] real_ncclCommInitRank returned %d\n", res);
     if (res == ncclSuccess) {
         init_rank_info(*comm);
     }
@@ -321,6 +323,10 @@ ncclResult_t ncclScatter(
     increment_seq_and_wait(comm);
 
     LOAD_SYM(ncclScatter);
+    if (!real_ncclScatter) {
+        fprintf(stderr, "[WRAPPER] ncclScatter is not available in this NCCL version\n");
+        return ncclInvalidUsage;
+    }
     return real_ncclScatter(sendbuff, recvbuff, sendcount, datatype, root, comm, stream);
 }
 
