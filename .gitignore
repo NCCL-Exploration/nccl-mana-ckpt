@@ -1,0 +1,26 @@
+# Object files and libraries
+*.o
+*.so
+
+# Output logs and slurm files
+*.out
+*.log
+
+# Checkpoint files and directories
+*.dmtcp
+ckpt_*_files/
+dmtcp_restart_script*.sh
+
+# Compiled test drivers and binaries
+**/is_nccl_exe
+**/is_mpi_exe
+**/nccl_test_driver
+test_nccl
+test_nccl_wrappers
+tests/drain_recv
+tests/drain_send
+tests/cc_simple
+tests/cc_complex
+tests/single_gpu_test
+test_nccl.c
+

@@ -20,11 +20,17 @@ JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
 DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
-MPICH_BIN = /shared/EL9/explorer/MPICH/4.3.0b1/bin
+MPICH_BIN = /usr/bin
 
 DEMO_PORT=7781
 
-override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -lnccl -lmpi -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/comm_libs/12.5/nccl/lib/ -L/shared/EL9/explorer/MPICH/4.3.0b1/lib
+NCCL_HOME ?= $(NCCL_DIR)
+
+override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -I/usr/lib/x86_64-linux-gnu/openmpi/include
+ifneq ($(NCCL_HOME),)
+  override CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
+endif
+override CFLAGS += -lnccl -lmpi
 
 plugin: src/libncclplugin.so
 
@@ -112,4 +118,4 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 clean:
 	cd ${CRAC_ROOT} && make clean
 	cd tests && make clean
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files
+	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers

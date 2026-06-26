@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <nccl.h>
+#include <cuda_runtime.h>
 #include "dmtcp.h"
 #include "dmtcp_kvdb_c.h"
 #include "nccl_wrappers.h"
@@ -31,6 +32,8 @@ ncclComm_t g_comm = NULL;
 int g_nranks = 0;
 int g_my_rank = -1;
 volatile int ckpt_pending = 0;
+
+static void pre_init_cuda();
 
 void add_stream(cudaStream_t stream) {
     for (int i = 0; i < g_num_streams; i++) {
@@ -230,6 +233,11 @@ static int all_drained() {
 }
 
 static void drain_nccl() {
+    if (g_my_rank == -1) {
+        printf("[NCCL Drain] NCCL not yet initialized — skipping drain\n");
+        return;
+    }
+    pre_init_cuda();
     group_entry_t *g = get_or_create_group(g_comm);
     printf("[NCCL Drain] Starting drain on rank %d (current seq: %lu)\n", g_my_rank, g->seq);
     
@@ -306,6 +314,52 @@ restart()
   reset_groups();
   inflight_init();
   // NOTE: drain_queues are NOT reset — they survive restart for ncclRecv replay
+}
+
+static void pre_init_cuda() {
+  printf("[NCCL Plugin] pre_init_cuda: getting executable path...\n");
+  fflush(stdout);
+  const char* exec_path = dmtcp_get_executable_path();
+  printf("[NCCL Plugin] pre_init_cuda: exec_path pointer is %p\n", exec_path);
+  fflush(stdout);
+  if (exec_path != NULL) {
+      printf("[NCCL Plugin] pre_init_cuda: exec_path is %s\n", exec_path);
+      fflush(stdout);
+      const char* basename = strrchr(exec_path, '/');
+      basename = basename ? basename + 1 : exec_path;
+      if (strcmp(basename, "srun") == 0 ||
+          strcmp(basename, "mpirun") == 0 ||
+          strcmp(basename, "mpiexec") == 0 ||
+          strcmp(basename, "bash") == 0 ||
+          strcmp(basename, "sh") == 0 ||
+          strcmp(basename, "orted") == 0 ||
+          strcmp(basename, "slurmd") == 0 ||
+          strcmp(basename, "slurmstepd") == 0 ||
+          strncmp(basename, "dmtcp_", 6) == 0) {
+          printf("[NCCL Plugin] pre_init_cuda: skipping CUDA init for %s\n", basename);
+          fflush(stdout);
+          return;
+      }
+  }
+
+
+  printf("[NCCL Plugin] pre_init_cuda: about to call cudaGetDeviceCount\n");
+  fflush(stdout);
+  int device_count = 0;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  printf("[NCCL Plugin] pre_init_cuda: cudaGetDeviceCount returned %d, device_count = %d\n", (int)err, device_count);
+  fflush(stdout);
+  if (err == cudaSuccess) {
+
+      printf("[NCCL Plugin] Pre-initializing CUDA on control thread for %d devices...\n", device_count);
+      for (int i = 0; i < device_count; i++) {
+          cudaSetDevice(i);
+          cudaFree(0);
+      }
+      printf("[NCCL Plugin] CUDA pre-initialization complete.\n");
+  } else {
+      printf("[NCCL Plugin] Failed to get device count during pre-init: %s\n", cudaGetErrorString(err));
+  }
 }
 
 static void
