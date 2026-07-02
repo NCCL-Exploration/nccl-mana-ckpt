@@ -65,7 +65,7 @@ JOB_START=$(date +%s%N)
 $MANA_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
 killall -9 mana_coordinator dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
-rm -f ckpt_*.dmtcp
+rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 rm -f srun_launch.log
 
 # Ensure the benchmark is compiled with CLASS=A for longer execution

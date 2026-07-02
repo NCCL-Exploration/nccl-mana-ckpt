@@ -27,7 +27,7 @@ export DMTCP_COORD_HOST=$(hostname)
 PORT=7783
 
 echo "==> Cleaning old checkpoint files"
-rm -rf ckpt_*.dmtcp ckpt_*_files/ dmtcp_restart_script*.sh
+rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 
 echo "==> Launching Coordinator in daemon mode"
 ${MANA_ROOT}/bin/mana_coordinator --daemon -p $PORT
