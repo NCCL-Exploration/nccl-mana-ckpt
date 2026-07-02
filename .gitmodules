@@ -8,9 +8,6 @@
 	url = https://github.com/xuyao0127/crac
 	ignore = dirty
 
-[submodule "tests/nas-benchmarks/IS/mana"]
-	path = tests/nas-benchmarks/IS/mana
-	url = git@github.com:mpickpt/mana.git
 [submodule "mana"]
 	path = mana
 	url = git@github.com:mpickpt/mana.git
