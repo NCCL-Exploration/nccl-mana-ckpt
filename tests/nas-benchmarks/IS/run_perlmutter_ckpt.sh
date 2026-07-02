@@ -191,16 +191,23 @@ RESTART_MS="N/A"
 if [ -n "$RESTART_SCRIPT" ]; then
     echo ""
     echo "==> Phase 2: Restarting from checkpoint: $RESTART_SCRIPT"
+
+    # The coordinator was started with --exit-on-last, so it dies when
+    # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
+    echo "Re-launching coordinator for restart phase..."
+    $MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
+    sleep 1
+
     RESTART_START=$(date +%s%N)
-    
+
     # Restart the process using the MANA-generated script
     ./$RESTART_SCRIPT --coord-port $PORT &
     REST_PID=$!
-    
+
     echo "Waiting for restarted process to complete..."
-    wait $REST_PID || true
-    RESTART_RC=${PIPESTATUS[0]:-$?}
-    
+    wait $REST_PID
+    RESTART_RC=$?
+
     RESTART_DONE=$(date +%s%N)
     RESTART_MS=$(( (RESTART_DONE - RESTART_START) / 1000000 ))
     if [ $RESTART_RC -eq 0 ]; then
