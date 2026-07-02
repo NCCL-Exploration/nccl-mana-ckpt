@@ -338,6 +338,8 @@ static void pre_init_cuda() {
           strcmp(basename, "orted") == 0 ||
           strcmp(basename, "slurmd") == 0 ||
           strcmp(basename, "slurmstepd") == 0 ||
+          strcmp(basename, "lower-half") == 0 ||
+          strncmp(basename, "mana_", 5) == 0 ||
           strncmp(basename, "dmtcp_", 6) == 0) {
           printf("[NCCL Plugin] pre_init_cuda: skipping CUDA init for %s\n", basename);
           fflush(stdout);
