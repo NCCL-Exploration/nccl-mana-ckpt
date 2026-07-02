@@ -186,11 +186,14 @@ fi
 PHASE1_MS=$(( (CKPT_DONE - PHASE1_START) / 1000000 ))
 
 # Phase 2: Restart from checkpoint
-RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -n 1)
+# MANA checkpoints live in ckpt_rank_* directories.  Restarts MUST go
+# through "srun mana_restart" so that the lower-half / upper-half split
+# is re-established.  Running the raw dmtcp_restart_script.sh bypasses
+# MANA's MPI reconstruction and segfaults.
 RESTART_MS="N/A"
-if [ -n "$RESTART_SCRIPT" ]; then
+if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
     echo ""
-    echo "==> Phase 2: Restarting from checkpoint: $RESTART_SCRIPT"
+    echo "==> Phase 2: Restarting from checkpoint via mana_restart"
 
     # The coordinator was started with --exit-on-last, so it dies when
     # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
@@ -200,8 +203,10 @@ if [ -n "$RESTART_SCRIPT" ]; then
 
     RESTART_START=$(date +%s%N)
 
-    # Restart the process using the MANA-generated script
-    ./$RESTART_SCRIPT --coord-port $PORT &
+    # Launch mana_restart under srun, mirroring Phase 1's topology
+    srun -n 2 --unbuffered --export=ALL \
+      $MANA_RESTART --coord-port $PORT --restartdir ./ \
+      > restart_launch.log 2>&1 &
     REST_PID=$!
 
     echo "Waiting for restarted process to complete..."
@@ -214,9 +219,11 @@ if [ -n "$RESTART_SCRIPT" ]; then
         echo "PASS: Restart completed successfully"
     else
         echo "FAIL: Restart failed (exit code $RESTART_RC)"
+        echo "--- restart_launch.log ---"
+        cat restart_launch.log
     fi
 else
-    echo "No checkpoint file found — skipping restart phase"
+    echo "No checkpoint directories found — skipping restart phase"
 fi
 
 JOB_DONE=$(date +%s%N)
