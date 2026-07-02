@@ -14,17 +14,17 @@ extern "C" {
 /* ── Local in-flight tracking ────────────────────────────────────── */
 
 typedef struct {
-    size_t bytes;  /* >0 = send posted but recv not yet matched; 0 = idle */
+    int64_t bytes;  /* >0 = send posted but recv not yet matched; 0 = idle; <0 = recv posted before send */
 } pending_entry_t;
 
 /* Process-local table: local_pending[src][dst].bytes */
 extern pending_entry_t local_pending[MAX_RANKS][MAX_RANKS];
 
-void   inflight_init(void);
-void   inflight_mark_send(int src, int dst, size_t bytes);
-void   inflight_mark_recv(int src, int dst, size_t bytes);
-int    inflight_has_pending(int src, int dst);
-size_t inflight_pending_bytes(int src, int dst);
+void    inflight_init(void);
+void    inflight_mark_send(int src, int dst, size_t bytes);
+void    inflight_mark_recv(int src, int dst, size_t bytes);
+int     inflight_has_pending(int src, int dst);
+int64_t inflight_pending_bytes(int src, int dst);
 
 /* ── Per-source drain queue ──────────────────────────────────────── */
 
