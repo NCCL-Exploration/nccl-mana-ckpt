@@ -39,12 +39,12 @@ SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
 
-DMTCP_ROOT=$ROOT_DIR/dmtcp
+MANA_ROOT=$ROOT_DIR/mana
 CRAC_ROOT=$ROOT_DIR/crac
 
-DMTCP_LAUNCH=$DMTCP_ROOT/bin/dmtcp_launch
-DMTCP_CMD=$DMTCP_ROOT/bin/dmtcp_command
-DMTCP_RESTART=$DMTCP_ROOT/bin/dmtcp_restart
+MANA_LAUNCH=$MANA_ROOT/bin/mana_launch
+MANA_CMD=$MANA_ROOT/bin/dmtcp_command
+MANA_RESTART=$MANA_ROOT/bin/mana_restart
 
 NCCL_PLUGIN=$ROOT_DIR/src/libncclplugin.so
 CRAC_PLUGIN=$CRAC_ROOT/libdmtcp_crac.so
@@ -61,8 +61,8 @@ cd $SCRIPT_DIR
 JOB_START=$(date +%s%N)
 
 # Clean up any stale coordinator or processes
-$DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
-killall -9 dmtcp_coordinator 2>/dev/null || true
+$MANA_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
+killall -9 mana_coordinator dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
 rm -f ckpt_*.dmtcp
 rm -f srun_launch.log
@@ -71,28 +71,28 @@ rm -f srun_launch.log
 echo "Compiling benchmark (CLASS=A)..."
 make clean && make is_nccl CLASS=A
 
-# Phase 1: Launch under DMTCP
+# Phase 1: Launch under MANA
 echo ""
 echo "==> Phase 1: Initial run with checkpoint"
 PHASE1_START=$(date +%s%N)
 
-# Step 1: Start a standalone DMTCP coordinator
-echo "Starting DMTCP coordinator on port $PORT..."
-$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+# Step 1: Start a standalone MANA coordinator
+echo "Starting MANA coordinator on port $PORT..."
+$MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
 sleep 1
 
 # Verify coordinator is running
-if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
-    echo "ERROR: Failed to start DMTCP coordinator"
+if ! $MANA_CMD --coord-port $PORT --status >/dev/null 2>&1; then
+    echo "ERROR: Failed to start MANA coordinator"
     exit 1
 fi
 echo "Coordinator is running."
 
-# Step 2: Launch each task under dmtcp_launch via srun
-# Each is_nccl_exe task is individually DMTCP-managed
+# Step 2: Launch each task under mana_launch via srun
+# Each is_nccl_exe task is individually MANA-managed
 # NOTE: Testing with NCCL plugin only (no CRAC) to isolate segfault source
 srun -n 2 --unbuffered --export=ALL \
-  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip \
+  $MANA_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip \
   --with-plugin $NCCL_PLUGIN \
   ./is_nccl_exe > srun_launch.log 2>&1 &
 PID=$!
@@ -100,7 +100,7 @@ PID=$!
 # Wait for both processes to connect to coordinator
 echo "Waiting for processes to connect to coordinator..."
 while true; do
-    PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
+    PEERS=$($MANA_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
     if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
         echo "Found $PEERS connected processes."
         break
@@ -131,7 +131,7 @@ sleep 2
 
 echo "Triggering checkpoint..."
 CKPT_START=$(date +%s%N)
-$DMTCP_CMD --coord-port $PORT --checkpoint
+$MANA_CMD --coord-port $PORT --checkpoint
 CKPT_TRIGGER=$(date +%s%N)
 echo "Checkpoint triggered. Waiting for process to complete..."
 wait $PID || true
@@ -179,7 +179,7 @@ if [ -n "$CKPT" ]; then
     echo ""
     echo "==> Phase 2: Restarting from checkpoint: $CKPT"
     RESTART_START=$(date +%s%N)
-    $DMTCP_RESTART --coord-port $PORT $CKPT
+    $MANA_RESTART --coord-port $PORT $CKPT
     RESTART_DONE=$(date +%s%N)
     RESTART_RC=$?
     RESTART_MS=$(( (RESTART_DONE - RESTART_START) / 1000000 ))
