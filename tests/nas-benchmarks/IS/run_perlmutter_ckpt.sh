@@ -68,6 +68,18 @@ sleep 0.5
 rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 rm -f srun_launch.log
 
+# ── Patch upstream MANA scripts for compatibility ──────────────────
+# Fix 1: Replace bash-only "&>/dev/null" with POSIX ">/dev/null 2>&1"
+#         (os.system passes to /bin/sh which may not support &>)
+# Fix 2: Change "break" to "continue" when parsing empty lines in .rc
+#         (blank lines before Host:/Port: would abort parsing early)
+for f in "$MANA_ROOT/bin/mana_launch" "$MANA_ROOT/bin/mana_restart"; do
+    if [ -f "$f" ]; then
+        sed -i 's|&>/dev/null|>/dev/null 2>\&1|g' "$f"
+        sed -i '/^  if not line:/{n;s/    break/    continue/;}' "$f"
+    fi
+done
+
 # Ensure the benchmark is compiled with CLASS=A for longer execution
 echo "Compiling benchmark (CLASS=A)..."
 make clean && make is_nccl CLASS=A
