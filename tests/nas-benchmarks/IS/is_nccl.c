@@ -356,18 +356,18 @@ void alloc_space(void)
    /* issues and unnecessary managed-memory overhead.                  */
    /* --------------------------------------------------------------- */
 
-   /* NCCL-touched data buffers → cudaMallocManaged */
-   cudaMallocManaged((void**)&key_array,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&key_buff1,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&key_buff2,  sizeof(INT_TYPE)*size_of_buffers, cudaMemAttachGlobal);
+   /* NCCL-touched data buffers → cudaMallocHost */
+   cudaMallocHost((void**)&key_array,  sizeof(INT_TYPE)*size_of_buffers);
+   cudaMallocHost((void**)&key_buff1,  sizeof(INT_TYPE)*size_of_buffers);
+   cudaMallocHost((void**)&key_buff2,  sizeof(INT_TYPE)*size_of_buffers);
 
    /* NCCL alltoall touches send_count/recv_count as src/dst buffers */
-   cudaMallocManaged((void**)&send_count, sizeof(int)*comm_size, cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&recv_count, sizeof(int)*comm_size, cudaMemAttachGlobal);
+   cudaMallocHost((void**)&send_count, sizeof(int)*comm_size);
+   cudaMallocHost((void**)&recv_count, sizeof(int)*comm_size);
 
    /* bucket_size and bucket_size_totals are used in ncclAllReduce */
-   cudaMallocManaged((void**)&bucket_size,        sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
-   cudaMallocManaged((void**)&bucket_size_totals,  sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE), cudaMemAttachGlobal);
+   cudaMallocHost((void**)&bucket_size,        sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
+   cudaMallocHost((void**)&bucket_size_totals,  sizeof(INT_TYPE)*(NUM_BUCKETS+TEST_ARRAY_SIZE));
 
    /* Host-only arrays → plain malloc */
    send_displ                  = (int *)malloc(sizeof(int)*comm_size);
@@ -404,14 +404,14 @@ void alloc_space(void)
 /*****************************************************************/
 void free_space(void)
 {
-   /* NCCL-touched buffers (cudaMallocManaged) */
-   cudaFree(key_array);
-   cudaFree(key_buff1);
-   cudaFree(key_buff2);
-   cudaFree(send_count);
-   cudaFree(recv_count);
-   cudaFree(bucket_size);
-   cudaFree(bucket_size_totals);
+   /* NCCL-touched buffers (cudaMallocHost) */
+   cudaFreeHost(key_array);
+   cudaFreeHost(key_buff1);
+   cudaFreeHost(key_buff2);
+   cudaFreeHost(send_count);
+   cudaFreeHost(recv_count);
+   cudaFreeHost(bucket_size);
+   cudaFreeHost(bucket_size_totals);
 
    /* Host-only arrays (malloc) */
    free(send_displ);
@@ -622,7 +622,7 @@ void full_verify( void )
     INT_TYPE    i, j;
     INT_TYPE    *k_ptr, last_local_key;
 
-    cudaMallocManaged((void**)&k_ptr, sizeof(INT_TYPE), cudaMemAttachGlobal);
+    cudaMallocHost((void**)&k_ptr, sizeof(INT_TYPE));
     
     TIMER_START( T_VERIFY );
 
@@ -654,7 +654,7 @@ void full_verify( void )
         if( *k_ptr > key_array[0] )
             j++;
 
-    cudaFree(k_ptr);
+    cudaFreeHost(k_ptr);
 
 
 /*  Confirm keys correctly sorted: count incorrectly sorted keys, if any */
@@ -865,7 +865,7 @@ void rank( int iteration )
 
 /*  Ranking of all keys occurs in this section:                 */
 /*  Use explicit offset instead of negative pointer arithmetic  */
-/*  to avoid undefined behavior with cudaMallocManaged memory.  */
+/*  to avoid undefined behavior with pinned host memory.  */
 /*  key_buff_ptr[k] == key_buff1[k - min_key_val]               */
     key_buff_ptr = key_buff1;
     INT_TYPE key_offset = min_key_val;

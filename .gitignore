@@ -8,6 +8,7 @@
 
 # Checkpoint files and directories
 *.dmtcp
+*.dmtcp.temp
 ckpt_*_files/
 dmtcp_restart_script*.sh
 
