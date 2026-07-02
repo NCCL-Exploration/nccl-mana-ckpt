@@ -163,32 +163,33 @@ set +eu
 CKPT_COUNT=0
 CKPT_SIZE_MB="N/A"
 CKPT_DIR_SIZE_MB="N/A"
-if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
-    CKPT_COUNT=$(ls -1 ckpt_*.dmtcp | wc -l)
-    CKPT_SIZE_BYTES=$(du -cb ckpt_*.dmtcp | tail -1 | awk '{print $1}')
+if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
+    CKPT_COUNT=$(ls -1d ckpt_rank_* | wc -l)
+    CKPT_SIZE_BYTES=$(du -csb ckpt_rank_* | tail -1 | awk '{print $1}')
     if [ -n "$CKPT_SIZE_BYTES" ]; then
         CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
-    fi
-fi
-if ls -d ckpt_*_files/ 1>/dev/null 2>&1; then
-    CKPT_DIR_SIZE_BYTES=$(du -csb ckpt_*_files/ | tail -1 | awk '{print $1}')
-    if [ -n "$CKPT_DIR_SIZE_BYTES" ]; then
-        CKPT_DIR_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_DIR_SIZE_BYTES / 1048576}")
     fi
 fi
 
 PHASE1_MS=$(( (CKPT_DONE - PHASE1_START) / 1000000 ))
 
 # Phase 2: Restart from checkpoint
-CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
+RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -n 1)
 RESTART_MS="N/A"
-if [ -n "$CKPT" ]; then
+if [ -n "$RESTART_SCRIPT" ]; then
     echo ""
-    echo "==> Phase 2: Restarting from checkpoint: $CKPT"
+    echo "==> Phase 2: Restarting from checkpoint: $RESTART_SCRIPT"
     RESTART_START=$(date +%s%N)
-    $MANA_RESTART --coord-port $PORT $CKPT
+    
+    # Restart the process using the MANA-generated script
+    ./$RESTART_SCRIPT --coord-port $PORT &
+    REST_PID=$!
+    
+    echo "Waiting for restarted process to complete..."
+    wait $REST_PID || true
+    RESTART_RC=${PIPESTATUS[0]:-$?}
+    
     RESTART_DONE=$(date +%s%N)
-    RESTART_RC=$?
     RESTART_MS=$(( (RESTART_DONE - RESTART_START) / 1000000 ))
     if [ $RESTART_RC -eq 0 ]; then
         echo "PASS: Restart completed successfully"
