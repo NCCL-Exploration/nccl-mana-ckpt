@@ -23,7 +23,7 @@ int inflight_has_pending(int src, int dst) {
     return local_pending[src][dst].bytes > 0;
 }
 
-size_t inflight_pending_bytes(int src, int dst) {
+int64_t inflight_pending_bytes(int src, int dst) {
     return local_pending[src][dst].bytes;
 }
 

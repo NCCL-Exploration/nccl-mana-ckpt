@@ -20,6 +20,7 @@ export SLURM_CPU_BIND="cores"
 # ─────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
+ulimit -c unlimited
 
 # Darshan (Perlmutter I/O profiler) wraps dup2/open/close via LD_PRELOAD.
 # DMTCP also wraps these calls. The two conflict, causing infinite recursion
@@ -90,10 +91,16 @@ echo "Coordinator is running."
 
 # Step 2: Launch each task under mana_launch via srun
 # Each is_nccl_exe task is individually MANA-managed
-# NOTE: Testing with NCCL plugin only (no CRAC) to isolate segfault source
+export NCCL_P2P_DISABLE=1
+export NCCL_CUMEM_ENABLE=0
+export NCCL_DMABUF_ENABLE=0
+export NCCL_NVLS_ENABLE=0
+export NCCL_SHM_DISABLE=1
+export NCCL_NET_GDR_LEVEL=0
+export MPICH_GPU_SUPPORT_ENABLED=0
 srun -n 2 --unbuffered --export=ALL \
-  $MANA_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip \
-  --with-plugin $NCCL_PLUGIN \
+  $MANA_LAUNCH -j --coord-port $PORT --no-gzip \
+  --with-plugin $NCCL_PLUGIN:$CRAC_PLUGIN \
   ./is_nccl_exe > srun_launch.log 2>&1 &
 PID=$!
 
