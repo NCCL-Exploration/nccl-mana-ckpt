@@ -25,6 +25,7 @@ typedef struct {
 group_entry_t* get_or_create_group(ncclComm_t comm);
 void increment_seq_and_wait(ncclComm_t comm);
 void reset_groups();
+void clear_wrapper_pointers();
 
 // Helper functions provided by libncclplugin.c
 void add_stream(cudaStream_t stream);
