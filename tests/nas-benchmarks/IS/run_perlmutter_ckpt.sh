@@ -81,8 +81,8 @@ for f in "$MANA_ROOT/bin/mana_launch" "$MANA_ROOT/bin/mana_restart"; do
 done
 
 # Ensure the benchmark is compiled with CLASS=A for longer execution
-echo "Compiling benchmark (CLASS=S)..."
-make clean && make is_nccl CLASS=S
+echo "Compiling benchmark (CLASS=A)..."
+make clean && make is_nccl CLASS=A
 
 # Phase 1: Launch under MANA
 echo ""
