@@ -56,6 +56,7 @@ CKPT_DELAY=6 # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
+export DMTCP_SLEEP_ON_FAILURE=1
 
 cd $SCRIPT_DIR
 
