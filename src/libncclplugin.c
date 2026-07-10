@@ -174,17 +174,26 @@ static void sequence_number_consensus() {
     // Wait for all ranks to publish their sequence and find the MAX
     uint64_t max_seq = g->seq;
     for (int i = 0; i < g_nranks; i++) {
+        uint64_t rank_seq;
+
         char key[64];
         snprintf(key, sizeof(key), "rank_%d_seq", i);
         uint64_t rank_seq_plus_one = 0;
         
-        // Wait for the key to be available (value > 0). 
-        // The barrier should guarantee it's immediately available.
-        while ((rank_seq_plus_one = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
-            usleep(1000);
+        if (i == g_my_rank) {
+            rank_seq = g->seq;
+        }
+
+        else {
+            // Wait for the key to be available (value > 0). 
+            // The barrier should guarantee it's immediately available.
+            while ((rank_seq_plus_one = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
+                usleep(1000);
+            }
+            
+            rank_seq = rank_seq_plus_one - 1;
         }
         
-        uint64_t rank_seq = rank_seq_plus_one - 1;
         if (rank_seq > max_seq) {
             max_seq = rank_seq;
         }
