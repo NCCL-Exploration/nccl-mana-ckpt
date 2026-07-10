@@ -1,43 +1,18 @@
-CC = nvcc
-NCCL_HOME ?= $(NCCL_DIR)
-CFLAGS = -O3 -g -lnccl -I../include
-ifneq ($(NCCL_HOME),)
-  CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
-else
-  CFLAGS += -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
-endif
+include ../Makefile.common
 
-DMTCP_ROOT ?= ../mana/dmtcp
-DMTCP_LAUNCH  = $(DMTCP_ROOT)/bin/dmtcp_launch
-DMTCP_CMD     = $(DMTCP_ROOT)/bin/dmtcp_command
-DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
-NCCL_PLUGIN = ../bin/libncclplugin.so
-CUDA_PLUGIN = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
-PLUGIN = $(NCCL_PLUGIN):$(CUDA_PLUGIN)
 DRIVER = nccl_test_driver_multiple
 P2P_DRIVER = nccl_p2p_tests
-PORT     = 7782          # Different port from single-GPU Makefile to avoid conflicts
-INTERVAL = 0             # Manual checkpointing for precise control
-export NCCL_DEBUG=WARN
+PORT = 7782
+INTERVAL = 0
 
-# --- Configurable Parameters (override on command line) ---
-# MSGS  = Number of messages per test
-# SIZE  = Message size in KB
-# NGPUS = Number of GPUs to use
-MSGS  ?= 5
-SIZE  ?= 1024
+# Default parameters for tests
+MSGS ?= 5
+SIZE ?= 1024 # in KB
 NGPUS ?= $(shell nvidia-smi --list-gpus 2>/dev/null | wc -l)
 GATHER_COUNT ?= 16
 GATHER_ROOT  ?= 0
 SCATTER_COUNT ?= 16
 SCATTER_ROOT  ?= 0
-
-# Colors for output
-GREEN = \033[0;32m
-RED   = \033[0;31m
-NC    = \033[0m
-
-# Running test 1 from the make file does not use all gpus available
 
 # --- Primary Entry Points ---
 all: $(DRIVER)
@@ -62,27 +37,34 @@ scatter_p2p_test: $(P2P_DRIVER) $(NCCL_PLUGIN)
 		$(SCATTER_COUNT) $(SCATTER_ROOT) $(NGPUS) scatter
 
 # Test 1: Basic P2P ring — no checkpoint, just verify correctness
-#   CKPT_DELAY=0 → no checkpoint triggered
-test1: $(DRIVER)
+test1: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,1,Test 1: Basic P2P ring,0,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 2: Post-completion checkpoint — comms finish, then sleep 20s
-#   CKPT_DELAY=5 → checkpoint ~5s after launch (comms should be done)
-test2: $(DRIVER)
+test2: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,2,Test 2: Post-completion checkpoint,5,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 3: Pre-init checkpoint — sleep 10s before NCCL init
-#   CKPT_DELAY=5 → checkpoint during the pre-init sleep window
-test3: $(DRIVER)
+test3: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,3,Test 3: Pre-init checkpoint,5,$(MSGS),$(SIZE),$(NGPUS))
 
 # Test 4: In-transit checkpoint — async send+recv posted, no sync yet
-#   CKPT_DELAY=10 → checkpoint while CUDA streams are still processing
-test4: $(DRIVER)
+test4: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
 
+drain_send: drain_send.c
+	nvcc ${CFLAGS} -o $@ $<
+
+drain_recv: drain_recv.c
+	nvcc ${CFLAGS} -o $@ $<
+
+cc_simple: cc_simple.c
+	nvcc ${CFLAGS} -o $@ $<
+
+cc_complex: cc_complex.c
+	nvcc ${CFLAGS} -o $@ $<
+
 # --- Helper Macro ---
-# Args: (1)=test_id (2)=description (3)=ckpt_delay (4)=msgs (5)=size_kb (6)=num_gpus
 define run_test
 	echo -e "${GREEN}==> Running $(2) <==${NC}"; \
 	echo "  Params: msgs=$(4), size=$(5)KB, gpus=$(6), ckpt_delay=$(3)s"; \
@@ -121,18 +103,8 @@ $(DRIVER): $(DRIVER).cpp
 $(P2P_DRIVER): $(P2P_DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
-$(NCCL_PLUGIN): FORCE
-	$(MAKE) -C .. plugin
-
-FORCE:
-
-kill:
-	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
-	-killall -9 $(DRIVER) 2>/dev/null || true
-	-killall -9 $(P2P_DRIVER) 2>/dev/null || true
-
 clean:
-	rm -f $(DRIVER) $(P2P_DRIVER)
+	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv cc_simple cc_complex
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test kill clean FORCE
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean

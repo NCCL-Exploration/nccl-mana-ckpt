@@ -19,9 +19,9 @@ that state before DMTCP checkpoints the process.
 
 ### Local Paths
 
-The root `Makefile`, `tests/Makefile`, `single_gpu_tests/Makefile`, and
-`multiple_gpu_tests/Makefile` contain hardcoded NCCL `-L` paths. Update those
-paths before building if NCCL is installed somewhere else.
+The root `Makefile`, `tests/single/Makefile`, and `tests/multi/Makefile` contain
+hardcoded NCCL `-L` paths. Update those paths before building if NCCL is
+installed somewhere else.
 
 By default:
 
@@ -82,7 +82,7 @@ ${DMTCP_ROOT}/bin/dmtcp_launch \
   ./your_test
 ```
 
-The focused test Makefiles under `tests/` and `single_gpu_tests/` use the
+The focused test Makefiles under `tests/single/` and `tests/multi/` use the
 NCCL+CUDA plugin pair. Some root `Makefile` check targets currently launch only
 the NCCL plugin; use the focused test Makefiles or adjust `--with-plugin` when
 you need full CUDA checkpoint/restart coverage.
@@ -131,8 +131,8 @@ ${DMTCP_ROOT}/bin/dmtcp_restart --coord-port 7781 "$CKPT"
 ### Multi-GPU Tests
 
 ```bash
-cd multiple_gpu_tests
-make test_all DMTCP_ROOT=../mana/dmtcp
+cd tests/multi
+make test_all DMTCP_ROOT=../../mana/dmtcp
 ```
 
 Useful overrides:
@@ -182,15 +182,29 @@ nccl-mana-ckpt/
 |   `-- inflight.h
 |-- tests/
 |   |-- Makefile
-|   |-- nccl_test_driver.cpp
-|   |-- single_gpu_test.c
-|   |-- multiproc.c
-|   |-- drain_send.c
-|   |-- drain_recv.c
-|   |-- cc_simple.c
-|   `-- cc_complex.c
-|-- single_gpu_tests/
-|-- multiple_gpu_tests/
+|   |-- Makefile.common
+|   |-- single/
+|   |   |-- Makefile
+|   |   |-- nccl_test_driver.cpp
+|   |   |-- single_gpu_test.c
+|   |   |-- multiproc.c
+|   |   |-- send_recv.c
+|   |   |-- seq_algorithm_test.c
+|   |   |-- seq_stubs.c
+|   |   |-- simple_init_test.cpp
+|   |   `-- test_drain.cpp
+|   |-- multi/
+|   |   |-- Makefile
+|   |   |-- nccl_test_driver_multiple.cpp
+|   |   |-- nccl_p2p_tests.cpp
+|   |   |-- pytorch_ddp_test.py
+|   |   |-- run_perlmutter_pytorch.sh
+|   |   |-- test_drain.cpp
+|   |   |-- cc_simple.c
+|   |   |-- cc_complex.c
+|   |   |-- drain_send.c
+|   |   `-- drain_recv.c
+|   `-- nas-benchmarks/
 |-- mana/
 |   `-- dmtcp/
 |-- Makefile

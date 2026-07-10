@@ -37,12 +37,12 @@ check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 5 \
 	  --with-plugin $$PWD/${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 
-nccl_check: ${LIBNAME}.so tests/single_gpu_test
+nccl_check: ${LIBNAME}.so tests/single/single_gpu_test
 	# Run the actual NCCL test
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
-		--with-plugin $$PWD/${LIBNAME}.so ./tests/single_gpu_test
+		--with-plugin $$PWD/${LIBNAME}.so ./tests/single/single_gpu_test
 
-drain_recv_check: ${LIBNAME}.so tests/drain_recv
+drain_recv_check: ${LIBNAME}.so tests/multi/drain_recv
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
@@ -50,9 +50,9 @@ drain_recv_check: ${LIBNAME}.so tests/drain_recv
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain_recv
+	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/drain_recv
 
-drain_send_check: ${LIBNAME}.so tests/drain_send
+drain_send_check: ${LIBNAME}.so tests/multi/drain_send
 	# Kill an old coordinator on this port if present, just in case.
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
@@ -60,31 +60,40 @@ drain_send_check: ${LIBNAME}.so tests/drain_send
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/drain_send
+	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/drain_send
 
-cc_simple_check: ${LIBNAME}.so tests/cc_simple
+cc_simple_check: ${LIBNAME}.so tests/multi/cc_simple
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-		--with-plugin $$PWD/${LIBNAME}.so ./tests/cc_simple
+		--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/cc_simple
 
-cc_complex_check: ${LIBNAME}.so tests/cc_complex
+cc_complex_check: ${LIBNAME}.so tests/multi/cc_complex
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	 --coord-port ${DEMO_PORT} 2>/dev/null || true
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
 	${MPICH_BIN}/mpirun -np 3 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-                --with-plugin $$PWD/${LIBNAME}.so ./tests/cc_complex
+                --with-plugin $$PWD/${LIBNAME}.so ./tests/multi/cc_complex
 
 tests/cc:
-	gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread
+	gcc -o test_nccl_wrappers tests/single/seq_algorithm_test.c src/nccl_wrappers.c tests/single/seq_stubs.c -I include -lpthread
 	./test_nccl_wrappers
 
-tests/drain_recv: tests/drain_recv.c
-	nvcc ${CFLAGS} -o $@ $<
+tests/single/single_gpu_test:
+	$(MAKE) -C tests/single single_gpu_test
 
-tests/drain_send: tests/drain_send.c
-	nvcc ${CFLAGS} -o $@ $<
+tests/multi/drain_recv:
+	$(MAKE) -C tests/multi drain_recv
+
+tests/multi/drain_send:
+	$(MAKE) -C tests/multi drain_send
+
+tests/multi/cc_simple:
+	$(MAKE) -C tests/multi cc_simple
+
+tests/multi/cc_complex:
+	$(MAKE) -C tests/multi cc_complex
 
 ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 	cd ${DMTCP_ROOT}/test && make dmtcp1

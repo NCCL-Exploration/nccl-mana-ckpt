@@ -1,0 +1,35 @@
+CC = nvcc
+NCCL_HOME ?= $(NCCL_DIR)
+CFLAGS = -O3 -g -lnccl -I../../include
+ifneq ($(NCCL_HOME),)
+  CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
+else
+  CFLAGS += -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
+endif
+
+DMTCP_ROOT ?= ../../mana/dmtcp
+
+DMTCP_LAUNCH  = $(DMTCP_ROOT)/bin/dmtcp_launch
+DMTCP_CMD     = $(DMTCP_ROOT)/bin/dmtcp_command
+DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
+
+NCCL_PLUGIN = ../../bin/libncclplugin.so
+CUDA_PLUGIN = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
+PLUGIN = $(NCCL_PLUGIN):$(CUDA_PLUGIN)
+
+export NCCL_DEBUG=WARN
+
+# Colors for output
+GREEN = \033[0;32m
+RED = \033[0;31m
+NC = \033[0m
+
+$(NCCL_PLUGIN): FORCE
+	$(MAKE) -C ../.. plugin
+
+FORCE:
+
+kill:
+	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
+	-killall -9 $(DRIVER) 2>/dev/null || true
+	-killall -9 $(P2P_DRIVER) 2>/dev/null || true
