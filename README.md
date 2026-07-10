@@ -37,34 +37,38 @@ export DMTCP_ROOT=~/mana/dmtcp
 
 ## Quick Start
 
+1. Clone the repository and initialize the submodules:
+
 ```bash
 git clone git@github.com:NCCL-Exploration/nccl-mana-ckpt.git
 cd nccl-mana-ckpt
-git submodule update --init --recursive --remote
+git submodule update --init --recursive
 ```
 
-Build the NCCL plugin:
+2. Build MANA (which automatically configures and builds its internal DMTCP):
 
 ```bash
-make plugin
+cd mana
+./configure
+make -j
+cd ..
 ```
 
-or:
+3. Build the NCCL plugin:
 
 ```bash
 make
 ```
 
-Both produce `bin/libncclplugin.so`.
+This produces the shared library at `bin/libncclplugin.so`.
 
-Run the root single-GPU check:
+4. Run the root single-GPU check:
 
 ```bash
 make nccl_check
 ```
 
-`nccl_check` builds `tests/single_gpu_test` and launches it under DMTCP with
-`bin/libncclplugin.so`.
+`nccl_check` builds `tests/single/single_gpu_test` and launches it under DMTCP with `bin/libncclplugin.so`.
 
 ## Plugin Loading
 
