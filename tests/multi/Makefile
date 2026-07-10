@@ -58,6 +58,9 @@ drain_send: drain_send.c
 drain_recv: drain_recv.c
 	nvcc ${CFLAGS} -o $@ $<
 
+drain_no_msgs: drain_no_msgs.c
+	nvcc ${CFLAGS} -o $@ $<
+
 cc_simple: cc_simple.c
 	nvcc ${CFLAGS} -o $@ $<
 
@@ -104,7 +107,7 @@ $(P2P_DRIVER): $(P2P_DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
 clean:
-	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv cc_simple cc_complex
+	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv drain_no_msgs cc_simple cc_complex
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
 .PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean
