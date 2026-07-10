@@ -61,7 +61,7 @@ group_entry_t* get_or_create_group(ncclComm_t comm) {
         if (groups[i].comm == NULL) {
             groups[i].comm = comm;
             groups[i].seq = 0;
-            groups[i].target = 0;
+            groups[i].target = -1;
             return &groups[i];
         }
     }

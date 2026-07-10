@@ -18,8 +18,8 @@ extern volatile int ckpt_pending;
 // exposed types for group management in ncclwrappers
 typedef struct {
     ncclComm_t comm;
-    uint64_t seq;
-    uint64_t target;
+    int64_t seq;
+    int64_t target;
 } group_entry_t;
 
 group_entry_t* get_or_create_group(ncclComm_t comm);
