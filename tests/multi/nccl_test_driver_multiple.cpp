@@ -81,8 +81,8 @@ void setup(void)
 
         CUDA_CHECK(cudaStreamCreate(&gpu[i].stream));
 
-        CUDA_CHECK(cudaMalloc(&gpu[i].send_buf, count * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&gpu[i].recv_buf, count * sizeof(float)));
+        CUDA_CHECK(cudaMalloc((void **)&gpu[i].send_buf, count * sizeof(float)));
+        CUDA_CHECK(cudaMalloc((void **)&gpu[i].recv_buf, count * sizeof(float)));
 
         gpu[i].h_send = (float *)malloc(count * sizeof(float));
         if (!gpu[i].h_send) {

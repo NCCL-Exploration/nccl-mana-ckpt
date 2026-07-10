@@ -57,8 +57,8 @@ int main(int argc, char *argv[]) {
     
     // Allocate and init
     float *sendbuf, *recvbuf;
-    CUDA_CHECK(cudaMalloc(&sendbuf, size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&recvbuf, size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&sendbuf, size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&recvbuf, size * sizeof(float)));
     
     float *hostbuf = (float *)malloc(size * sizeof(float));
     for (int i = 0; i < size; i++) hostbuf[i] = rank + 1.0f;

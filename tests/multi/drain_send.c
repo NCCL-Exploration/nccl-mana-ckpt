@@ -1,12 +1,16 @@
 /*
- * cc_simple.c
+ * drain_send.c
  *
  * 2 MPI processes on 2 GPUs.
- * Rank 0: ncclSend → sleep(30)
- * Rank 1: sleep(10) → ncclRecv
+ * Rank 1: ncclRecv → sleep(30)  (recv posted first)
+ * Rank 0: sleep(10) → ncclSend  (send hasn't happened yet)
+ *
+ * Checkpoint during the 10s window when recv is posted
+ * but send has not occurred. This tests draining a pending
+ * send (the mirror of drain_recv.c).
  *
  * Build & Run:
- *   Run `make drain_check` in parent directory
+ *   Run `make drain_send_check` in parent directory
  */
 
 #include <stdio.h>
@@ -18,7 +22,6 @@
 #include <cuda_runtime.h>
 
 #define NELEMS 1024
-#define NITERS 100
 
 #define CUDACHECK(cmd) do {                                 \
     cudaError_t e = cmd;                                    \
@@ -62,37 +65,50 @@ int main(int argc, char **argv) {
     CUDACHECK(cudaStreamCreate(&stream));
 
     float *d_buf;
-    CUDACHECK(cudaMalloc(&d_buf, NELEMS * sizeof(float)));
-    float *h_buf;
-    h_buf = (float *)malloc(NELEMS * sizeof(float));
+    CUDACHECK(cudaMalloc((void **)&d_buf, NELEMS * sizeof(float)));
 
-    for (int i = 0; i < NITERS; i++) {
-        for (int j = 0; j < NELEMS; j++) h_buf[j] = (float)rank;
+    if (rank == 0) {
+        float *h_buf = (float *)malloc(NELEMS * sizeof(float));
+        for (int i = 0; i < NELEMS; i++) h_buf[i] = 42.0f;
         CUDACHECK(cudaMemcpy(d_buf, h_buf, NELEMS * sizeof(float),
-                             cudaMemcpyHostToDevice));
-        NCCLCHECK(ncclAllReduce(d_buf, d_buf, NELEMS,
-                                ncclFloat, ncclSum, comm, stream));
+                  cudaMemcpyHostToDevice));
+        free(h_buf);
+
+        printf("[rank 0] Sleeping 10s... [CHECKPOINT WINDOW]\n");
+        sleep(10);
+
+        printf("[rank 0] Sending...\n");
+        NCCLCHECK(ncclSend(d_buf, NELEMS, ncclFloat, 1, comm, stream));
+        CUDACHECK(cudaStreamSynchronize(stream));
+        printf("[rank 0] Send complete.\n");
+
+    } else {
+        printf("[rank 1] Receiving (send not posted yet)...\n");
+        NCCLCHECK(ncclRecv(d_buf, NELEMS, ncclFloat, 0, comm, stream));
+        printf("[rank 1] Recv posted. Sleeping 30s...\n");
+        sleep(30);
+
         CUDACHECK(cudaStreamSynchronize(stream));
 
+        float *h_buf = (float *)malloc(NELEMS * sizeof(float));
         CUDACHECK(cudaMemcpy(h_buf, d_buf, NELEMS * sizeof(float),
-                             cudaMemcpyDeviceToHost));
-        for (int j = 0; j < NELEMS; j++) {
-            if (h_buf[j] != (float)(nranks - 1) * nranks / 2) {
-                fprintf(stderr, "[rank %d] MISMATCH iter %d\n", rank, i);
-                exit(1);
+                  cudaMemcpyDeviceToHost));
+        int ok = 1;
+        for (int i = 0; i < NELEMS; i++) {
+            if (h_buf[i] != 42.0f) {
+                fprintf(stderr, "[rank 1] MISMATCH [%d]: %.0f != 42\n",
+                        i, h_buf[i]);
+                ok = 0;
+                break;
             }
         }
-        if (i == 10){
-	    printf("[rank %d] iter 10 — CHECKPOINT NOW: dmtcp_command -c\n", rank);
-	    sleep(10);
-	}
+        if (ok) printf("[rank 1] PASS — all elements == 42\n");
+        free(h_buf);
     }
 
     CUDACHECK(cudaFree(d_buf));
-    free(h_buf);
     CUDACHECK(cudaStreamDestroy(stream));
     NCCLCHECK(ncclCommDestroy(comm));
-    printf("[rank %d] PASS\n", rank);
     MPI_Finalize();
     return 0;
 }

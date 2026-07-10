@@ -1,13 +1,5 @@
+
 [submodule "dmtcp"]
 	path = dmtcp
 	url = https://github.com/dmtcp/dmtcp
-	ignore = dirty
-
-[submodule "crac"]
-	path = crac
-	url = https://github.com/xuyao0127/crac
-	ignore = dirty
-
-[submodule "mana"]
-	path = mana
-	url = git@github.com:mpickpt/mana.git
+	branch = 4.2-dev

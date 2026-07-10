@@ -14,7 +14,7 @@ export SLURM_CPU_BIND="cores"
 #  NAS IS Benchmark (NCCL port) — DMTCP Checkpoint test on Perlmutter
 #
 #  This script:
-#    1. Runs IS under DMTCP with both NCCL + CRAC plugins
+#    1. Runs IS under DMTCP with both NCCL + CUDA plugins
 #    2. Takes a checkpoint mid-run
 #    3. Restarts from that checkpoint and verifies completion
 # ─────────────────────────────────────────────────────────────────────
@@ -40,16 +40,15 @@ SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
 
-MANA_ROOT=$ROOT_DIR/mana
-CRAC_ROOT=$ROOT_DIR/crac
+DMTCP_ROOT=$ROOT_DIR/dmtcp
 
-MANA_LAUNCH=$MANA_ROOT/bin/mana_launch
-MANA_CMD=$MANA_ROOT/bin/dmtcp_command
-MANA_RESTART=$MANA_ROOT/bin/mana_restart
+DMTCP_LAUNCH=$DMTCP_ROOT/bin/dmtcp_launch
+DMTCP_CMD=$DMTCP_ROOT/bin/dmtcp_command
+DMTCP_RESTART=$DMTCP_ROOT/bin/dmtcp_restart
 
-NCCL_PLUGIN=$ROOT_DIR/src/libncclplugin.so
-CRAC_PLUGIN=$CRAC_ROOT/libdmtcp_crac.so
-PLUGIN="$NCCL_PLUGIN:$CRAC_PLUGIN"
+NCCL_PLUGIN=$ROOT_DIR/bin/libncclplugin.so
+CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
+PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 
 PORT=7783
 CKPT_DELAY=6 # seconds before triggering checkpoint
@@ -63,47 +62,37 @@ cd $SCRIPT_DIR
 JOB_START=$(date +%s%N)
 
 # Clean up any stale coordinator or processes
-$MANA_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
-killall -9 mana_coordinator dmtcp_coordinator 2>/dev/null || true
+$DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
+killall -9 dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
 rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 rm -f srun_launch.log
 
-# ── Patch upstream MANA scripts for compatibility ──────────────────
-# Fix 1: Replace bash-only "&>/dev/null" with POSIX ">/dev/null 2>&1"
-#         (os.system passes to /bin/sh which may not support &>)
-# Fix 2: Change "break" to "continue" when parsing empty lines in .rc
-#         (blank lines before Host:/Port: would abort parsing early)
-for f in "$MANA_ROOT/bin/mana_launch" "$MANA_ROOT/bin/mana_restart"; do
-  if [ -f "$f" ]; then
-    sed -i 's|&>/dev/null|>/dev/null 2>\&1|g' "$f"
-    sed -i '/^  if not line:/{n;s/    break/    continue/;}' "$f"
-  fi
-done
+
 
 # Ensure the benchmark is compiled with CLASS=A for longer execution
 echo "Compiling benchmark (CLASS=A)..."
 make clean && make is_nccl CLASS=A
 
-# Phase 1: Launch under MANA
+# Phase 1: Launch under DMTCP
 echo ""
 echo "==> Phase 1: Initial run with checkpoint"
 PHASE1_START=$(date +%s%N)
 
-# Step 1: Start a standalone MANA coordinator
-echo "Starting MANA coordinator on port $PORT..."
-$MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
+# Step 1: Start a standalone DMTCP coordinator
+echo "Starting DMTCP coordinator on port $PORT..."
+$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
 sleep 1
 
 # Verify coordinator is running
-if ! $MANA_CMD --coord-port $PORT --status >/dev/null 2>&1; then
-  echo "ERROR: Failed to start MANA coordinator"
+if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
+  echo "ERROR: Failed to start DMTCP coordinator"
   exit 1
 fi
 echo "Coordinator is running."
 
-# Step 2: Launch each task under mana_launch via srun
-# Each is_nccl_exe task is individually MANA-managed
+# Step 2: Launch each task under dmtcp_launch via srun
+# Each is_nccl_exe task is individually DMTCP-managed
 export NCCL_P2P_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_DMABUF_ENABLE=0
@@ -112,15 +101,15 @@ export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
 srun -n 2 --unbuffered --export=ALL \
-  $MANA_LAUNCH -j --coord-port $PORT --no-gzip \
-  --with-plugin $NCCL_PLUGIN:$CRAC_PLUGIN \
+  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+  --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
   ./is_nccl_exe >srun_launch.log 2>&1 &
 PID=$!
 
 # Wait for both processes to connect to coordinator
 echo "Waiting for processes to connect to coordinator..."
 while true; do
-  PEERS=$($MANA_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
+  PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
   if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
     echo "Found $PEERS connected processes."
     break
@@ -151,7 +140,7 @@ sleep 2
 
 echo "Triggering checkpoint..."
 CKPT_START=$(date +%s%N)
-$MANA_CMD --coord-port $PORT --checkpoint
+$DMTCP_CMD --coord-port $PORT --checkpoint
 CKPT_TRIGGER=$(date +%s%N)
 echo "Checkpoint triggered. Waiting for process to complete..."
 wait $PID || true
@@ -176,9 +165,9 @@ set +eu
 CKPT_COUNT=0
 CKPT_SIZE_MB="N/A"
 CKPT_DIR_SIZE_MB="N/A"
-if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
-  CKPT_COUNT=$(ls -1d ckpt_rank_* | wc -l)
-  CKPT_SIZE_BYTES=$(du -csb ckpt_rank_* | tail -1 | awk '{print $1}')
+if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
+  CKPT_COUNT=$(ls -1 ckpt_*.dmtcp | wc -l)
+  CKPT_SIZE_BYTES=$(du -csb ckpt_*.dmtcp | tail -1 | awk '{print $1}')
   if [ -n "$CKPT_SIZE_BYTES" ]; then
     CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
   fi
@@ -187,26 +176,23 @@ fi
 PHASE1_MS=$(((CKPT_DONE - PHASE1_START) / 1000000))
 
 # Phase 2: Restart from checkpoint
-# MANA checkpoints live in ckpt_rank_* directories.  Restarts MUST go
-# through "srun mana_restart" so that the lower-half / upper-half split
-# is re-established.  Running the raw dmtcp_restart_script.sh bypasses
-# MANA's MPI reconstruction and segfaults.
+# Restarts MUST go through "srun dmtcp_restart".
 RESTART_MS="N/A"
-if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
+if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
   echo ""
-  echo "==> Phase 2: Restarting from checkpoint via mana_restart"
+  echo "==> Phase 2: Restarting from checkpoint via dmtcp_restart"
 
   # The coordinator was started with --exit-on-last, so it dies when
   # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
   echo "Re-launching coordinator for restart phase..."
-  $MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
+  $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
   sleep 1
 
   RESTART_START=$(date +%s%N)
 
-  # Launch mana_restart under srun, mirroring Phase 1's topology
+  # Launch dmtcp_restart under srun, mirroring Phase 1's topology
   srun -n 2 --unbuffered --export=ALL \
-    $MANA_RESTART --coord-port $PORT --restartdir ./ \
+    $DMTCP_RESTART --coord-port $PORT ckpt_*.dmtcp \
     >restart_launch.log 2>&1 &
   REST_PID=$!
 

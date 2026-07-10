@@ -30,11 +30,10 @@ NPROCS ?= 2
 NCCL_HOME     ?= $(NCCL_DIR)
 CUDA_HOME     ?= $(CUDA_HOME)
 
-# DMTCP / CRAC (for checkpoint tests)
+# DMTCP (for checkpoint tests)
 DMTCP_ROOT    ?= ../../../dmtcp
-CRAC_ROOT     ?= ../../../crac
-NCCL_PLUGIN    = ../../../src/libncclplugin.so
-CRAC_PLUGIN    = $(CRAC_ROOT)/libdmtcp_crac.so
+NCCL_PLUGIN    = ../../../bin/libncclplugin.so
+CUDA_PLUGIN    = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
 DMTCP_LAUNCH   = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD      = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART  = $(DMTCP_ROOT)/bin/dmtcp_restart
@@ -96,7 +95,7 @@ run_mpi: $(MPI_EXE)
 run_nccl_ckpt: $(NCCL_EXE)
 	-$(DMTCP_CMD) --coord-port $(PORT) --quit --quiet 2>/dev/null || true
 	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval 0 \
-	  --with-plugin $(NCCL_PLUGIN):$(CRAC_PLUGIN) \
+	  --with-plugin $(NCCL_PLUGIN):$(CUDA_PLUGIN) \
 	  srun -n $(NPROCS) --ntasks-per-node=$(NPROCS) --gpus-per-task=1 ./$(NCCL_EXE)
 
 # ── Cleanup ──────────────────────────────────────────────────────────

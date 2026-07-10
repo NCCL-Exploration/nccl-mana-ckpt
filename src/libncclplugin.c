@@ -162,32 +162,36 @@ static void sequence_number_consensus() {
     printf("[rank %d] publishing seq %lu\n", g_my_rank, g->seq);
     char my_seq_key[64];
     snprintf(my_seq_key, sizeof(my_seq_key), "rank_%d_seq", g_my_rank);
-    // Use SET instead of INCR so we don't accumulate across checkpoints
-    dmtcp_kvdb_set(my_seq_key, g->seq);
+    // Publish g->seq + 1 so that we can distinguish '0' (not found) from actual seq=0
+    dmtcp_kvdb_set(my_seq_key, g->seq + 1);
+    
     printf("[rank %d] reaching barrier\n", g_my_rank);
     // Use a DMTCP global barrier to ensure everyone has published their sequence
     // before we try to calculate the maximum.
     dmtcp_global_barrier("nccl-consensus-seq-published");
     printf("[rank %d] past barrier\n", g_my_rank);
+    
     // Wait for all ranks to publish their sequence and find the MAX
     uint64_t max_seq = g->seq;
     for (int i = 0; i < g_nranks; i++) {
         char key[64];
         snprintf(key, sizeof(key), "rank_%d_seq", i);
-        uint64_t rank_seq = 0;
-        // Busy wait for other ranks to publish (in a real distributed KVDB)
-		// TODO: We can remove this right? because the barrier already guarantees all ranks are synchronized
-        while ((rank_seq = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
+        uint64_t rank_seq_plus_one = 0;
+        
+        // Wait for the key to be available (value > 0). 
+        // The barrier should guarantee it's immediately available.
+        while ((rank_seq_plus_one = dmtcp_kvdb_get(key)) == 0 && i != g_my_rank) {
             usleep(1000);
-            printf("[rank %d] waiting\n", g_my_rank);
-            fflush(stdout);
         }
-        if (rank_seq > max_seq) max_seq = rank_seq;
+        
+        uint64_t rank_seq = rank_seq_plus_one - 1;
+        if (rank_seq > max_seq) {
+            max_seq = rank_seq;
+        }
     }
 
     g->target = max_seq;
     printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g->target, g->seq);
-
 }
 
 static void flush_pending_to_kvdb() {

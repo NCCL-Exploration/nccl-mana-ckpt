@@ -52,8 +52,8 @@ void setup(void)
     NCCL_CHECK(ncclCommInitAll(&comm, 1, &rank));
     CUDA_CHECK(cudaStreamCreate(&stream));
 
-    CUDA_CHECK(cudaMalloc(&send_buff, count * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&recv_buff, count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&send_buff, count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&recv_buff, count * sizeof(float)));
 
     h_send = (float *)malloc(count * sizeof(float));
     for (size_t i = 0; i < count; i++)
