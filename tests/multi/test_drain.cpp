@@ -13,7 +13,7 @@ int main(int argc, char *argv[]) {
 
   size_t count = 1024 * 1024; // 1M elements
   float *buff;
-  cudaMalloc(&buff, count * sizeof(float));
+  cudaMalloc((void **)&buff, count * sizeof(float));
 
   if (rank == 0) {
     printf("[Rank 0] Sending data to rank 1...\n");

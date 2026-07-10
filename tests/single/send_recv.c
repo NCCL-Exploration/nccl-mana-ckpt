@@ -40,8 +40,8 @@ int main(void)
     CUDA_CHECK(cudaStreamCreate(&stream));
 
     float *send_buf, *recv_buf;
-    CUDA_CHECK(cudaMalloc(&send_buf, COUNT * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&recv_buf, COUNT * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&send_buf, COUNT * sizeof(float)));
+    CUDA_CHECK(cudaMalloc((void **)&recv_buf, COUNT * sizeof(float)));
 
     float *h_send = (float *)malloc(COUNT * sizeof(float));
     for (int i = 0; i < COUNT; i++) h_send[i] = (float)i;

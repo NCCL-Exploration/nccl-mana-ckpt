@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     CUDACHECK(cudaStreamCreate(&stream));
 
     float *d_buf;
-    CUDACHECK(cudaMalloc(&d_buf, NELEMS * sizeof(float)));
+    CUDACHECK(cudaMalloc((void **)&d_buf, NELEMS * sizeof(float)));
 
     if (rank == 0) {
         float *h_buf = (float *)malloc(NELEMS * sizeof(float));
