@@ -1,4 +1,5 @@
 
-[submodule "mana"]
-	path = mana
-	url = git@github.com:mpickpt/mana.git
+[submodule "dmtcp"]
+	path = dmtcp
+	url = https://github.com/dmtcp/dmtcp
+	branch = 4.2-dev

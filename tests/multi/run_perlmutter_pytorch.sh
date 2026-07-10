@@ -13,11 +13,11 @@ cd $SLURM_SUBMIT_DIR
 
 module load pytorch
 
-# MANA Paths
-MANA_ROOT=${SLURM_SUBMIT_DIR}/../mana
-MANA_LAUNCH=${MANA_ROOT}/bin/mana_launch
-MANA_CMD=${MANA_ROOT}/bin/dmtcp_command
-PLUGIN=${SLURM_SUBMIT_DIR}/../bin/libncclplugin.so
+# DMTCP Paths
+DMTCP_ROOT=${SLURM_SUBMIT_DIR}/../../dmtcp
+DMTCP_LAUNCH=${DMTCP_ROOT}/bin/dmtcp_launch
+DMTCP_CMD=${DMTCP_ROOT}/bin/dmtcp_command
+PLUGIN=${SLURM_SUBMIT_DIR}/../../bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so
 
 # NCCL / MANA Environment
 export NCCL_P2P_DISABLE=0
@@ -30,11 +30,11 @@ echo "==> Cleaning old checkpoint files"
 rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 
 echo "==> Launching Coordinator in daemon mode"
-${MANA_ROOT}/bin/mana_coordinator --daemon -p $PORT
+${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p $PORT
 
 echo "==> Phase 1: Initial PyTorch run with checkpoint"
 # Run infinite epochs (-1) so we have plenty of time to checkpoint
-$MANA_LAUNCH --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
+$DMTCP_LAUNCH --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
     torchrun --nproc_per_node=2 pytorch_ddp_test.py --epochs -1 &
 
 APP_PID=$!
@@ -43,13 +43,13 @@ echo "Waiting 25 seconds for PyTorch to initialize and start training..."
 sleep 25
 
 echo "Triggering checkpoint..."
-$MANA_CMD --coord-port $PORT --checkpoint
+$DMTCP_CMD --coord-port $PORT --checkpoint
 
 echo "Waiting 5 seconds for checkpoint to complete..."
 sleep 5
 
 echo "Killing initial run..."
-$MANA_CMD --coord-port $PORT --quit --quiet
+$DMTCP_CMD --coord-port $PORT --quit --quiet
 kill -9 $APP_PID 2>/dev/null
 
 echo "==> Checkpoint complete. Verifying files exist:"
