@@ -9,6 +9,7 @@ ifndef DMTCP_ROOT
 endif
 
 LIBNAME = bin/libncclplugin
+CUDA_PLUGIN = ${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so
 NCCL_INCLUDE = ./include
 DMTCP_INCLUDE = ${DMTCP_ROOT}/include
 JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
@@ -40,7 +41,7 @@ check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 nccl_check: ${LIBNAME}.so tests/single/single_gpu_test
 	# Run the actual NCCL test
 	${DMTCP_ROOT}/bin/dmtcp_launch --coord-port ${DEMO_PORT} --interval 10 \
-		--with-plugin $$PWD/${LIBNAME}.so ./tests/single/single_gpu_test
+		--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/single/single_gpu_test
 
 drain_recv_check: ${LIBNAME}.so tests/multi/drain_recv
 	# Kill an old coordinator on this port if present, just in case.
@@ -50,7 +51,7 @@ drain_recv_check: ${LIBNAME}.so tests/multi/drain_recv
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/drain_recv
+	 	--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/drain_recv
 
 drain_send_check: ${LIBNAME}.so tests/multi/drain_send
 	# Kill an old coordinator on this port if present, just in case.
@@ -60,21 +61,21 @@ drain_send_check: ${LIBNAME}.so tests/multi/drain_send
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT} 
 	# Run the actual NCCL test
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-	 	--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/drain_send
+	 	--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/drain_send
 
 cc_simple_check: ${LIBNAME}.so tests/multi/cc_simple
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-		--with-plugin $$PWD/${LIBNAME}.so ./tests/multi/cc_simple
+		--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/cc_simple
 
 cc_complex_check: ${LIBNAME}.so tests/multi/cc_complex
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	 --coord-port ${DEMO_PORT} 2>/dev/null || true
 	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
 	${MPICH_BIN}/mpirun -np 3 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
-                --with-plugin $$PWD/${LIBNAME}.so ./tests/multi/cc_complex
+                --with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/cc_complex
 
 tests/cc:
 	gcc -o test_nccl_wrappers tests/single/seq_algorithm_test.c src/nccl_wrappers.c tests/single/seq_stubs.c -I include -lpthread
