@@ -13,8 +13,8 @@ DMTCP_CMD = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
 
 NCCL_PLUGIN = ../src/libncclplugin.so
-CRAC_PLUGIN = $(CRAC_ROOT)/libdmtcp_crac.so
-PLUGIN = $(NCCL_PLUGIN):$(CRAC_PLUGIN)
+CUDA_PLUGIN = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
+PLUGIN = $(NCCL_PLUGIN):$(CUDA_PLUGIN)
 
 DRIVER = nccl_test_driver
 PORT = 7781
@@ -57,6 +57,37 @@ test4: $(DRIVER)
 send_recv: send_recv.c
 	nvcc ${CFLAGS} -o $@ $<
 
+simple_init_test: simple_init_test.cpp
+	$(CC) $(CFLAGS) -o $@ $<
+
+simple_test: simple_init_test
+	@echo -e "${GREEN}==> Running Simple Init Test <==${NC}"; \
+	$(MAKE) kill; \
+	rm -f ckpt_*.dmtcp; \
+	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval 5 --with-plugin $(PLUGIN) ./simple_init_test & \
+	PID=$$!; \
+	echo "Waiting 5s for checkpoint trigger..."; \
+	sleep 5; \
+	echo "Triggering checkpoint..."; \
+	$(DMTCP_CMD) --coord-port $(PORT) --checkpoint; \
+	sleep 10; \
+	wait $$PID; \
+	if [ $$? -eq 0 ]; then \
+		echo -e "${GREEN}PASS: Initial run successful${NC}"; \
+		latest=$$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1); \
+		if [ -n "$$latest" ]; then \
+			echo -e "${GREEN}--- Restarting from checkpoint: $$latest ---${NC}"; \
+			$(DMTCP_RESTART) --coord-port $(PORT) $$latest; \
+			if [ $$? -eq 0 ]; then \
+				echo -e "${GREEN}PASS: Restart verified${NC}"; \
+			else \
+				echo -e "${RED}FAIL: Restart failed${NC}"; exit 1; \
+			fi; \
+		fi; \
+	else \
+		echo -e "${RED}FAIL: Initial run failed${NC}"; exit 1; \
+	fi
+
 # --- Helper Macros ---
 
 define run_test
@@ -98,7 +129,7 @@ kill:
 	-killall -9 $(DRIVER) 2>/dev/null || true
 
 clean:
-	rm -f $(DRIVER) single_gpu_test multiproc send_recv drain_send drain_recv cc_simple cc_complex
+	rm -f $(DRIVER) single_gpu_test multiproc send_recv drain_send drain_recv cc_simple cc_complex simple_init_test
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 	$(MAKE) -C nas-benchmarks/IS clean
 
