@@ -55,7 +55,7 @@ or:
 make
 ```
 
-Both produce `src/libncclplugin.so`.
+Both produce `bin/libncclplugin.so`.
 
 Run the root single-GPU check:
 
@@ -64,13 +64,13 @@ make nccl_check
 ```
 
 `nccl_check` builds `tests/single_gpu_test` and launches it under DMTCP with
-`src/libncclplugin.so`.
+`bin/libncclplugin.so`.
 
 ## Plugin Loading
 
 CUDA/NCCL checkpoint and restart flows normally require both plugins:
 
-1. `src/libncclplugin.so`: this repository's NCCL checkpoint plugin.
+1. `bin/libncclplugin.so`: this repository's NCCL checkpoint plugin.
 2. `mana/dmtcp/plugin/cuda/libdmtcp_cuda.so`: The CUDA plugin for GPU memory
    checkpoint/restore.
 
@@ -78,7 +78,7 @@ DMTCP accepts multiple plugins as a colon-separated list:
 
 ```bash
 ${DMTCP_ROOT}/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
+  --with-plugin $PWD/bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./your_test
 ```
 
@@ -117,7 +117,7 @@ nvcc -O3 -g -lnccl -L/path/to/nccl/lib -I../include \
   -o single_gpu_test single_gpu_test.c
 
 ${DMTCP_ROOT}/bin/dmtcp_launch --coord-port 7781 --interval 10 \
-  --with-plugin $PWD/../src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
+  --with-plugin $PWD/../bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./single_gpu_test
 ```
 
@@ -230,7 +230,7 @@ try to checkpoint GPU-mapped memory directly.
 
 ```bash
 ${DMTCP_ROOT}/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
+  --with-plugin $PWD/bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./your_test
 ```
 

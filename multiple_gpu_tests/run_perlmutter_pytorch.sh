@@ -17,7 +17,7 @@ module load pytorch
 MANA_ROOT=${SLURM_SUBMIT_DIR}/../mana
 MANA_LAUNCH=${MANA_ROOT}/bin/mana_launch
 MANA_CMD=${MANA_ROOT}/bin/dmtcp_command
-PLUGIN=${SLURM_SUBMIT_DIR}/../src/libncclplugin.so
+PLUGIN=${SLURM_SUBMIT_DIR}/../bin/libncclplugin.so
 
 # NCCL / MANA Environment
 export NCCL_P2P_DISABLE=0

@@ -8,7 +8,7 @@ ifndef DMTCP_ROOT
   DMTCP_ROOT=${CURDIR}/mana/dmtcp
 endif
 
-LIBNAME = src/libncclplugin
+LIBNAME = bin/libncclplugin
 NCCL_INCLUDE = ./include
 DMTCP_INCLUDE = ${DMTCP_ROOT}/include
 JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
@@ -27,7 +27,7 @@ ifneq ($(NCCL_HOME),)
 endif
 override CFLAGS += -lnccl -lmpi
 
-plugin: src/libncclplugin.so
+plugin: ${LIBNAME}.so
 
 check: ${LIBNAME}.so ${DMTCP_ROOT}/test/dmtcp1
 	# Kill an old coordinator on this port if present, just in case.
@@ -92,21 +92,20 @@ ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 ${DMTCP_ROOT}/bin:
 	cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
 
-${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o inflight.o
+OBJS = obj/libncclplugin.o obj/dmtcp_kvdb_c.o obj/nccl_wrappers.o obj/inflight.o
+
+${LIBNAME}.so: $(OBJS)
+	@mkdir -p bin
 	${CXX} -shared -o $@ $^
 
-${LIBNAME}.o: ${LIBNAME}.c
+obj/%.o: src/%.c
+	@mkdir -p obj
 	${CC} ${CFLAGS} -c -o $@ $<
 
-nccl_wrappers.o: src/nccl_wrappers.c
-	${CC} ${CFLAGS} -c -o $@ $<
-
-inflight.o: src/inflight.c
-	${CC} ${CFLAGS} -c -o $@ $<
-
-dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
+obj/dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
+	@mkdir -p obj
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
 clean:
 	cd tests && make clean
-	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers
+	rm -rf bin/ obj/ *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers

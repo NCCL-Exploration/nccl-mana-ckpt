@@ -7,7 +7,7 @@ DMTCP_LAUNCH = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
 
-NCCL_PLUGIN = ../src/libncclplugin.so
+NCCL_PLUGIN = ../bin/libncclplugin.so
 CUDA_PLUGIN = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
 PLUGIN = $(NCCL_PLUGIN):$(CUDA_PLUGIN)
 

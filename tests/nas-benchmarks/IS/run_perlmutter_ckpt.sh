@@ -46,7 +46,7 @@ MANA_LAUNCH=$MANA_ROOT/bin/mana_launch
 MANA_CMD=$MANA_ROOT/bin/dmtcp_command
 MANA_RESTART=$MANA_ROOT/bin/mana_restart
 
-NCCL_PLUGIN=$ROOT_DIR/src/libncclplugin.so
+NCCL_PLUGIN=$ROOT_DIR/bin/libncclplugin.so
 CUDA_PLUGIN=$ROOT_DIR/mana/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 

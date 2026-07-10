@@ -32,7 +32,7 @@ CUDA_HOME     ?= $(CUDA_HOME)
 
 # DMTCP (for checkpoint tests)
 DMTCP_ROOT    ?= ../../../mana/dmtcp
-NCCL_PLUGIN    = ../../../src/libncclplugin.so
+NCCL_PLUGIN    = ../../../bin/libncclplugin.so
 CUDA_PLUGIN    = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
 DMTCP_LAUNCH   = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD      = $(DMTCP_ROOT)/bin/dmtcp_command
