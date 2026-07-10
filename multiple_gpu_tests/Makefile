@@ -8,7 +8,6 @@ else
 endif
 
 DMTCP_ROOT ?= ../dmtcp
-CRAC_ROOT   ?= ../crac
 DMTCP_LAUNCH  = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD     = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart

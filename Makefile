@@ -8,11 +8,6 @@ ifndef DMTCP_ROOT
   DMTCP_ROOT=${CURDIR}/dmtcp
 endif
 
-# Set CRAC_ROOT to your CRAC installation.
-ifndef CRAC_ROOT
-  CRAC_ROOT=${CURDIR}/crac
-endif
-
 LIBNAME = src/libncclplugin
 NCCL_INCLUDE = ./include
 DMTCP_INCLUDE = ${DMTCP_ROOT}/include
@@ -97,9 +92,6 @@ ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 ${DMTCP_ROOT}/bin:
 	cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
 
-${CRAC_ROOT}/libdmtcp_crac.so:
-	cd ${CRAC_ROOT} && make -j DMTCP_ROOT=${DMTCP_ROOT}
-
 ${LIBNAME}.so: ${LIBNAME}.o dmtcp_kvdb_c.o nccl_wrappers.o inflight.o
 	${CXX} -shared -o $@ $^
 
@@ -116,6 +108,5 @@ dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
 clean:
-	cd ${CRAC_ROOT} && make clean
 	cd tests && make clean
 	rm -rf ${LIBNAME}.o ${LIBNAME}.so *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers

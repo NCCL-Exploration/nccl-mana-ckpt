@@ -1,7 +1,6 @@
 # nccl-mana-ckpt
 
-An NCCL checkpointing plugin for [DMTCP](https://github.com/dmtcp/dmtcp) +
-[CRAC](https://github.com/xuyao0127/crac).
+An NCCL checkpointing plugin for [DMTCP](https://github.com/dmtcp/dmtcp).
 
 The plugin interposes NCCL calls, tracks communicators, CUDA streams, sequence
 progress, and in-flight point-to-point messages, then drains or synchronizes
@@ -15,7 +14,6 @@ that state before DMTCP checkpoints the process.
 | CUDA Toolkit (`nvcc`) | Used as `CC` and `CXX` in the Makefiles |
 | NCCL | Library paths are hardcoded in Makefiles; update them for your system |
 | DMTCP | Defaults to the `dmtcp/` submodule, or set `DMTCP_ROOT` |
-| CRAC | Defaults to the `crac/` submodule, or set `CRAC_ROOT` |
 | MPI | Needed for multi-process tests and examples |
 | Build tools | `make`, `gcc` / `g++`, `git` |
 
@@ -29,14 +27,12 @@ By default:
 
 ```bash
 DMTCP_ROOT=./dmtcp
-CRAC_ROOT=./crac
 ```
 
 For external installs, pass or export the roots:
 
 ```bash
 export DMTCP_ROOT=~/dmtcp
-export CRAC_ROOT=~/crac
 ```
 
 ## Quick Start
@@ -75,19 +71,19 @@ make nccl_check
 CUDA/NCCL checkpoint and restart flows normally require both plugins:
 
 1. `src/libncclplugin.so`: this repository's NCCL checkpoint plugin.
-2. `crac/libdmtcp_crac.so`: CRAC's split-CUDA plugin for GPU memory
+2. `dmtcp/plugin/cuda/libdmtcp_cuda.so`: The CUDA plugin for GPU memory
    checkpoint/restore.
 
 DMTCP accepts multiple plugins as a colon-separated list:
 
 ```bash
 ${DMTCP_ROOT}/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
+  --with-plugin $PWD/src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./your_test
 ```
 
 The focused test Makefiles under `tests/` and `single_gpu_tests/` use the
-NCCL+CRAC plugin pair. Some root `Makefile` check targets currently launch only
+NCCL+CUDA plugin pair. Some root `Makefile` check targets currently launch only
 the NCCL plugin; use the focused test Makefiles or adjust `--with-plugin` when
 you need full CUDA checkpoint/restart coverage.
 
@@ -97,17 +93,17 @@ you need full CUDA checkpoint/restart coverage.
 
 ```bash
 cd tests
-make DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
-make test_all DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
+make DMTCP_ROOT=../dmtcp
+make test_all DMTCP_ROOT=../dmtcp
 ```
 
 Runnable criteria in `tests/Makefile`:
 
 ```bash
-make test1 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Basic P2P, no checkpoint
-make test2 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Checkpoint after completion
-make test3 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # Checkpoint before NCCL init
-make test4 DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac  # In-transit message checkpoint
+make test1 DMTCP_ROOT=../dmtcp  # Basic P2P, no checkpoint
+make test2 DMTCP_ROOT=../dmtcp  # Checkpoint after completion
+make test3 DMTCP_ROOT=../dmtcp  # Checkpoint before NCCL init
+make test4 DMTCP_ROOT=../dmtcp  # In-transit message checkpoint
 ```
 
 `test_all` depends on the runnable criteria above and restarts from any
@@ -121,7 +117,7 @@ nvcc -O3 -g -lnccl -L/path/to/nccl/lib -I../include \
   -o single_gpu_test single_gpu_test.c
 
 ${DMTCP_ROOT}/bin/dmtcp_launch --coord-port 7781 --interval 10 \
-  --with-plugin $PWD/../src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
+  --with-plugin $PWD/../src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./single_gpu_test
 ```
 
@@ -136,7 +132,7 @@ ${DMTCP_ROOT}/bin/dmtcp_restart --coord-port 7781 "$CKPT"
 
 ```bash
 cd multiple_gpu_tests
-make test_all DMTCP_ROOT=../dmtcp CRAC_ROOT=../crac
+make test_all DMTCP_ROOT=../dmtcp
 ```
 
 Useful overrides:
@@ -195,7 +191,6 @@ nccl-mana-ckpt/
 |   `-- cc_complex.c
 |-- single_gpu_tests/
 |-- multiple_gpu_tests/
-|-- crac/
 |-- dmtcp/
 |-- Makefile
 |-- README.md
@@ -229,12 +224,12 @@ the local key-value interface used for checkpoint-time coordination.
 
 ### `mmap failed: Invalid argument` on Restart
 
-Load both the NCCL plugin and CRAC's split-CUDA plugin. Without CRAC, DMTCP may
+Load both the NCCL plugin and the split-CUDA plugin. Without the CUDA plugin, DMTCP may
 try to checkpoint GPU-mapped memory directly.
 
 ```bash
 ${DMTCP_ROOT}/bin/dmtcp_launch \
-  --with-plugin $PWD/src/libncclplugin.so:${CRAC_ROOT}/libdmtcp_crac.so \
+  --with-plugin $PWD/src/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so \
   ./your_test
 ```
 

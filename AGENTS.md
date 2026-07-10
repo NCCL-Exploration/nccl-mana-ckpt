@@ -13,7 +13,7 @@
 | extra single-GPU | `single_gpu_tests/Makefile`, `single_gpu_tests/` |
 | extra multi-GPU | `multiple_gpu_tests/Makefile`, `multiple_gpu_tests/` |
 | docs | `README.md`, `AGENTS.md` |
-| deps | `dmtcp/`, `crac/` |
+| deps | `dmtcp/` |
 
 ## entrypoints
 
@@ -23,7 +23,7 @@
 | `make nccl_check` | root single-GPU DMTCP launch, NCCL plugin only |
 | `make drain_recv_check` / `make drain_send_check` | root MPI drain checks |
 | `make cc_simple_check` / `make cc_complex_check` | root collective checks |
-| `cd tests && make test_all` | NCCL+CRAC single-GPU criteria |
+| `cd tests && make test_all` | NCCL+CUDA single-GPU criteria |
 | `cd tests && make test1`..`test4` | individual runnable criteria |
 | `cd multiple_gpu_tests && make test_all` | multi-GPU criteria |
 | `cd multiple_gpu_tests && make gather_p2p_test` | `ncclGather_p2p` correctness |
@@ -48,8 +48,8 @@
 ## gotchas
 
 - NCCL `-L` paths are hardcoded in Makefiles.
-- Defaults: root `Makefile` uses `${CURDIR}/dmtcp` and `${CURDIR}/crac`; test Makefiles use `../dmtcp` and `../crac`.
-- Full CUDA checkpoint/restart flows need both `src/libncclplugin.so` and `crac/libdmtcp_crac.so`.
+- Defaults: root `Makefile` uses `${CURDIR}/dmtcp`; test Makefiles use `../dmtcp`.
+- Full CUDA checkpoint/restart flows need both `src/libncclplugin.so` and the CUDA plugin (`libdmtcp_cuda.so`).
 - Some root check targets currently load only the NCCL plugin.
 - `multiple_gpu_tests/nccl_p2p_tests.cpp` compares `ncclGather_p2p` against real `ncclAllGather`; `ncclScatter_p2p` is checked against the deterministic rank-slot input pattern because this NCCL copy does not provide native `ncclScatter`.
 - `tests/Makefile` declares `test5` phony but has no `test5` recipe; document/run `test1`..`test4`.

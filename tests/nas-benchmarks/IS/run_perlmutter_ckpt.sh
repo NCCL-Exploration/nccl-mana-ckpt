@@ -14,7 +14,7 @@ export SLURM_CPU_BIND="cores"
 #  NAS IS Benchmark (NCCL port) — DMTCP Checkpoint test on Perlmutter
 #
 #  This script:
-#    1. Runs IS under DMTCP with both NCCL + CRAC plugins
+#    1. Runs IS under DMTCP with both NCCL + CUDA plugins
 #    2. Takes a checkpoint mid-run
 #    3. Restarts from that checkpoint and verifies completion
 # ─────────────────────────────────────────────────────────────────────
@@ -41,15 +41,14 @@ ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
 
 MANA_ROOT=$ROOT_DIR/mana
-CRAC_ROOT=$ROOT_DIR/crac
 
 MANA_LAUNCH=$MANA_ROOT/bin/mana_launch
 MANA_CMD=$MANA_ROOT/bin/dmtcp_command
 MANA_RESTART=$MANA_ROOT/bin/mana_restart
 
 NCCL_PLUGIN=$ROOT_DIR/src/libncclplugin.so
-CRAC_PLUGIN=$CRAC_ROOT/libdmtcp_crac.so
-PLUGIN="$NCCL_PLUGIN:$CRAC_PLUGIN"
+CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
+PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 
 PORT=7783
 CKPT_DELAY=6 # seconds before triggering checkpoint
@@ -113,7 +112,7 @@ export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
 srun -n 2 --unbuffered --export=ALL \
   $MANA_LAUNCH -j --coord-port $PORT --no-gzip \
-  --with-plugin $NCCL_PLUGIN:$CRAC_PLUGIN \
+  --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
   ./is_nccl_exe >srun_launch.log 2>&1 &
 PID=$!
 
