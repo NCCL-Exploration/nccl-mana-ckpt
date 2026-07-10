@@ -40,57 +40,70 @@ SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
 
-DMTCP_ROOT=$ROOT_DIR/dmtcp
+MANA_ROOT=$ROOT_DIR/mana
 CRAC_ROOT=$ROOT_DIR/crac
 
-DMTCP_LAUNCH=$DMTCP_ROOT/bin/dmtcp_launch
-DMTCP_CMD=$DMTCP_ROOT/bin/dmtcp_command
-DMTCP_RESTART=$DMTCP_ROOT/bin/dmtcp_restart
+MANA_LAUNCH=$MANA_ROOT/bin/mana_launch
+MANA_CMD=$MANA_ROOT/bin/dmtcp_command
+MANA_RESTART=$MANA_ROOT/bin/mana_restart
 
 NCCL_PLUGIN=$ROOT_DIR/src/libncclplugin.so
 CRAC_PLUGIN=$CRAC_ROOT/libdmtcp_crac.so
 PLUGIN="$NCCL_PLUGIN:$CRAC_PLUGIN"
 
 PORT=7783
-CKPT_DELAY=6   # seconds before triggering checkpoint
+CKPT_DELAY=6 # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
+export DMTCP_SLEEP_ON_FAILURE=1
 
 cd $SCRIPT_DIR
 
 JOB_START=$(date +%s%N)
 
 # Clean up any stale coordinator or processes
-$DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
-killall -9 dmtcp_coordinator 2>/dev/null || true
+$MANA_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
+killall -9 mana_coordinator dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
-rm -f ckpt_*.dmtcp
+rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
 rm -f srun_launch.log
+
+# ── Patch upstream MANA scripts for compatibility ──────────────────
+# Fix 1: Replace bash-only "&>/dev/null" with POSIX ">/dev/null 2>&1"
+#         (os.system passes to /bin/sh which may not support &>)
+# Fix 2: Change "break" to "continue" when parsing empty lines in .rc
+#         (blank lines before Host:/Port: would abort parsing early)
+for f in "$MANA_ROOT/bin/mana_launch" "$MANA_ROOT/bin/mana_restart"; do
+  if [ -f "$f" ]; then
+    sed -i 's|&>/dev/null|>/dev/null 2>\&1|g' "$f"
+    sed -i '/^  if not line:/{n;s/    break/    continue/;}' "$f"
+  fi
+done
 
 # Ensure the benchmark is compiled with CLASS=A for longer execution
 echo "Compiling benchmark (CLASS=A)..."
 make clean && make is_nccl CLASS=A
 
-# Phase 1: Launch under DMTCP
+# Phase 1: Launch under MANA
 echo ""
 echo "==> Phase 1: Initial run with checkpoint"
 PHASE1_START=$(date +%s%N)
 
-# Step 1: Start a standalone DMTCP coordinator
-echo "Starting DMTCP coordinator on port $PORT..."
-$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+# Step 1: Start a standalone MANA coordinator
+echo "Starting MANA coordinator on port $PORT..."
+$MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
 sleep 1
 
 # Verify coordinator is running
-if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
-    echo "ERROR: Failed to start DMTCP coordinator"
-    exit 1
+if ! $MANA_CMD --coord-port $PORT --status >/dev/null 2>&1; then
+  echo "ERROR: Failed to start MANA coordinator"
+  exit 1
 fi
 echo "Coordinator is running."
 
-# Step 2: Launch each task under dmtcp_launch via srun
-# Each is_nccl_exe task is individually DMTCP-managed
+# Step 2: Launch each task under mana_launch via srun
+# Each is_nccl_exe task is individually MANA-managed
 export NCCL_P2P_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_DMABUF_ENABLE=0
@@ -99,59 +112,59 @@ export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
 srun -n 2 --unbuffered --export=ALL \
-  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+  $MANA_LAUNCH -j --coord-port $PORT --no-gzip \
   --with-plugin $NCCL_PLUGIN:$CRAC_PLUGIN \
-  ./is_nccl_exe > srun_launch.log 2>&1 &
+  ./is_nccl_exe >srun_launch.log 2>&1 &
 PID=$!
 
 # Wait for both processes to connect to coordinator
 echo "Waiting for processes to connect to coordinator..."
 while true; do
-    PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
-    if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
-        echo "Found $PEERS connected processes."
-        break
-    fi
-    if ! kill -0 $PID 2>/dev/null; then
-        echo "ERROR: srun process died unexpectedly. Log output:"
-        cat srun_launch.log
-        exit 1
-    fi
-    sleep 0.5
+  PEERS=$($MANA_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
+  if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
+    echo "Found $PEERS connected processes."
+    break
+  fi
+  if ! kill -0 $PID 2>/dev/null; then
+    echo "ERROR: srun process died unexpectedly. Log output:"
+    cat srun_launch.log
+    exit 1
+  fi
+  sleep 0.5
 done
 
 # Wait for NCCL initialization and a few iterations to run
 echo "Waiting for NCCL to initialize and computation to start..."
 while true; do
-    if grep -q "iteration" srun_launch.log 2>/dev/null; then
-        echo "NCCL initialized, computation running."
-        break
-    fi
-    if ! kill -0 $PID 2>/dev/null; then
-        echo "ERROR: process exited before computation started. Log output:"
-        cat srun_launch.log
-        exit 1
-    fi
-    sleep 0.5
+  if grep -q "iteration" srun_launch.log 2>/dev/null; then
+    echo "NCCL initialized, computation running."
+    break
+  fi
+  if ! kill -0 $PID 2>/dev/null; then
+    echo "ERROR: process exited before computation started. Log output:"
+    cat srun_launch.log
+    exit 1
+  fi
+  sleep 0.5
 done
 sleep 2
 
 echo "Triggering checkpoint..."
 CKPT_START=$(date +%s%N)
-$DMTCP_CMD --coord-port $PORT --checkpoint
+$MANA_CMD --coord-port $PORT --checkpoint
 CKPT_TRIGGER=$(date +%s%N)
 echo "Checkpoint triggered. Waiting for process to complete..."
 wait $PID || true
 CKPT_DONE=$(date +%s%N)
 RESULT=${PIPESTATUS[0]:-$?}
 
-CKPT_TRIGGER_MS=$(( (CKPT_TRIGGER - CKPT_START) / 1000000 ))
-CKPT_TOTAL_MS=$(( (CKPT_DONE - CKPT_START) / 1000000 ))
+CKPT_TRIGGER_MS=$(((CKPT_TRIGGER - CKPT_START) / 1000000))
+CKPT_TOTAL_MS=$(((CKPT_DONE - CKPT_START) / 1000000))
 
 if [ $RESULT -eq 0 ]; then
-    echo "PASS: Initial run completed successfully"
+  echo "PASS: Initial run completed successfully"
 else
-    echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
+  echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────
@@ -163,44 +176,59 @@ set +eu
 CKPT_COUNT=0
 CKPT_SIZE_MB="N/A"
 CKPT_DIR_SIZE_MB="N/A"
-if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
-    CKPT_COUNT=$(ls -1 ckpt_*.dmtcp | wc -l)
-    CKPT_SIZE_BYTES=$(du -cb ckpt_*.dmtcp | tail -1 | awk '{print $1}')
-    if [ -n "$CKPT_SIZE_BYTES" ]; then
-        CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
-    fi
-fi
-if ls -d ckpt_*_files/ 1>/dev/null 2>&1; then
-    CKPT_DIR_SIZE_BYTES=$(du -csb ckpt_*_files/ | tail -1 | awk '{print $1}')
-    if [ -n "$CKPT_DIR_SIZE_BYTES" ]; then
-        CKPT_DIR_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_DIR_SIZE_BYTES / 1048576}")
-    fi
+if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
+  CKPT_COUNT=$(ls -1d ckpt_rank_* | wc -l)
+  CKPT_SIZE_BYTES=$(du -csb ckpt_rank_* | tail -1 | awk '{print $1}')
+  if [ -n "$CKPT_SIZE_BYTES" ]; then
+    CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
+  fi
 fi
 
-PHASE1_MS=$(( (CKPT_DONE - PHASE1_START) / 1000000 ))
+PHASE1_MS=$(((CKPT_DONE - PHASE1_START) / 1000000))
 
 # Phase 2: Restart from checkpoint
-CKPT=$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1)
+# MANA checkpoints live in ckpt_rank_* directories.  Restarts MUST go
+# through "srun mana_restart" so that the lower-half / upper-half split
+# is re-established.  Running the raw dmtcp_restart_script.sh bypasses
+# MANA's MPI reconstruction and segfaults.
 RESTART_MS="N/A"
-if [ -n "$CKPT" ]; then
-    echo ""
-    echo "==> Phase 2: Restarting from checkpoint: $CKPT"
-    RESTART_START=$(date +%s%N)
-    $DMTCP_RESTART --coord-port $PORT $CKPT
-    RESTART_DONE=$(date +%s%N)
-    RESTART_RC=$?
-    RESTART_MS=$(( (RESTART_DONE - RESTART_START) / 1000000 ))
-    if [ $RESTART_RC -eq 0 ]; then
-        echo "PASS: Restart completed successfully"
-    else
-        echo "FAIL: Restart failed (exit code $RESTART_RC)"
-    fi
+if ls -d ckpt_rank_* 1>/dev/null 2>&1; then
+  echo ""
+  echo "==> Phase 2: Restarting from checkpoint via mana_restart"
+
+  # The coordinator was started with --exit-on-last, so it dies when
+  # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
+  echo "Re-launching coordinator for restart phase..."
+  $MANA_ROOT/bin/mana_coordinator --daemon --coord-port $PORT
+  sleep 1
+
+  RESTART_START=$(date +%s%N)
+
+  # Launch mana_restart under srun, mirroring Phase 1's topology
+  srun -n 2 --unbuffered --export=ALL \
+    $MANA_RESTART --coord-port $PORT --restartdir ./ \
+    >restart_launch.log 2>&1 &
+  REST_PID=$!
+
+  echo "Waiting for restarted process to complete..."
+  wait $REST_PID
+  RESTART_RC=$?
+
+  RESTART_DONE=$(date +%s%N)
+  RESTART_MS=$(((RESTART_DONE - RESTART_START) / 1000000))
+  if [ $RESTART_RC -eq 0 ]; then
+    echo "PASS: Restart completed successfully"
+  else
+    echo "FAIL: Restart failed (exit code $RESTART_RC)"
+    echo "--- restart_launch.log ---"
+    cat restart_launch.log
+  fi
 else
-    echo "No checkpoint file found — skipping restart phase"
+  echo "No checkpoint directories found — skipping restart phase"
 fi
 
 JOB_DONE=$(date +%s%N)
-TOTAL_MS=$(( (JOB_DONE - JOB_START) / 1000000 ))
+TOTAL_MS=$(((JOB_DONE - JOB_START) / 1000000))
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -220,5 +248,3 @@ printf "║  %-40s %15s  ║\n" "Total wall time:" "${TOTAL_MS} ms"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Job completed at $(date)"
-
-

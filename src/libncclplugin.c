@@ -314,6 +314,7 @@ restart()
   g_my_rank = -1;
   g_nranks = 0;
   g_comm = NULL;
+  clear_wrapper_pointers();
   reset_groups();
   inflight_init();
   // NOTE: drain_queues are NOT reset — they survive restart for ncclRecv replay
@@ -338,6 +339,8 @@ static void pre_init_cuda() {
           strcmp(basename, "orted") == 0 ||
           strcmp(basename, "slurmd") == 0 ||
           strcmp(basename, "slurmstepd") == 0 ||
+          strcmp(basename, "lower-half") == 0 ||
+          strncmp(basename, "mana_", 5) == 0 ||
           strncmp(basename, "dmtcp_", 6) == 0) {
           printf("[NCCL Plugin] pre_init_cuda: skipping CUDA init for %s\n", basename);
           fflush(stdout);

@@ -8,3 +8,6 @@
 	url = https://github.com/xuyao0127/crac
 	ignore = dirty
 
+[submodule "mana"]
+	path = mana
+	url = git@github.com:mpickpt/mana.git

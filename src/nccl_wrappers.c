@@ -61,7 +61,7 @@ group_entry_t* get_or_create_group(ncclComm_t comm) {
         if (groups[i].comm == NULL) {
             groups[i].comm = comm;
             groups[i].seq = 0;
-            groups[i].target = 0;
+            groups[i].target = -1;
             return &groups[i];
         }
     }
@@ -392,4 +392,18 @@ ncclResult_t ncclReduceScatter(
 
 void reset_groups() {
     memset(groups, 0, sizeof(groups));
+}
+
+void clear_wrapper_pointers() {
+    real_ncclSend = NULL;
+    real_ncclRecv = NULL;
+    real_ncclAllReduce = NULL;
+    real_ncclBroadcast = NULL;
+    real_ncclReduce = NULL;
+    real_ncclAllGather = NULL;
+    real_ncclGather = NULL;
+    real_ncclReduceScatter = NULL;
+    real_ncclCommInitRank = NULL;
+    real_ncclCommInitAll = NULL;
+    real_ncclScatter = NULL;
 }
