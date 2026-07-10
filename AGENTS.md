@@ -13,7 +13,7 @@
 | extra single-GPU | `single_gpu_tests/Makefile`, `single_gpu_tests/` |
 | extra multi-GPU | `multiple_gpu_tests/Makefile`, `multiple_gpu_tests/` |
 | docs | `README.md`, `AGENTS.md` |
-| deps | `dmtcp/` |
+| deps | `mana/dmtcp/` |
 
 ## entrypoints
 
@@ -48,7 +48,7 @@
 ## gotchas
 
 - NCCL `-L` paths are hardcoded in Makefiles.
-- Defaults: root `Makefile` uses `${CURDIR}/dmtcp`; test Makefiles use `../dmtcp`.
+- Defaults: root `Makefile` uses `${CURDIR}/mana/dmtcp`; test Makefiles use `../mana/dmtcp`.
 - Full CUDA checkpoint/restart flows need both `src/libncclplugin.so` and the CUDA plugin (`libdmtcp_cuda.so`).
 - Some root check targets currently load only the NCCL plugin.
 - `multiple_gpu_tests/nccl_p2p_tests.cpp` compares `ncclGather_p2p` against real `ncclAllGather`; `ncclScatter_p2p` is checked against the deterministic rank-slot input pattern because this NCCL copy does not provide native `ncclScatter`.

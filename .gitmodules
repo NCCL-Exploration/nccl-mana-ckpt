@@ -1,7 +1,3 @@
-[submodule "dmtcp"]
-	path = dmtcp
-	url = https://github.com/dmtcp/dmtcp
-	ignore = dirty
 
 [submodule "mana"]
 	path = mana

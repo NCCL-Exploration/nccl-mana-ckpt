@@ -5,7 +5,7 @@ ifneq ($(NCCL_HOME),)
   CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
 endif
 
-DMTCP_ROOT ?= ../dmtcp
+DMTCP_ROOT ?= ../mana/dmtcp
 
 DMTCP_LAUNCH = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD = $(DMTCP_ROOT)/bin/dmtcp_command

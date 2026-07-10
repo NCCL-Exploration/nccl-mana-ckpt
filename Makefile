@@ -5,7 +5,7 @@ CXXFLAGS = -O0 -g -Xcompiler -fPIC
 
 # Set DMTCP_ROOT to your DMTCP installation.
 ifndef DMTCP_ROOT
-  DMTCP_ROOT=${CURDIR}/dmtcp
+  DMTCP_ROOT=${CURDIR}/mana/dmtcp
 endif
 
 LIBNAME = src/libncclplugin

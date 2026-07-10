@@ -7,7 +7,7 @@ else
   CFLAGS += -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
 endif
 
-DMTCP_ROOT ?= ../dmtcp
+DMTCP_ROOT ?= ../mana/dmtcp
 DMTCP_LAUNCH  = $(DMTCP_ROOT)/bin/dmtcp_launch
 DMTCP_CMD     = $(DMTCP_ROOT)/bin/dmtcp_command
 DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart

@@ -13,7 +13,7 @@ that state before DMTCP checkpoints the process.
 | NVIDIA GPU + drivers | Required for CUDA and NCCL |
 | CUDA Toolkit (`nvcc`) | Used as `CC` and `CXX` in the Makefiles |
 | NCCL | Library paths are hardcoded in Makefiles; update them for your system |
-| DMTCP | Defaults to the `dmtcp/` submodule, or set `DMTCP_ROOT` |
+| DMTCP | Defaults to the `mana/dmtcp/` submodule, or set `DMTCP_ROOT` |
 | MPI | Needed for multi-process tests and examples |
 | Build tools | `make`, `gcc` / `g++`, `git` |
 
@@ -26,13 +26,13 @@ paths before building if NCCL is installed somewhere else.
 By default:
 
 ```bash
-DMTCP_ROOT=./dmtcp
+DMTCP_ROOT=./mana/dmtcp
 ```
 
 For external installs, pass or export the roots:
 
 ```bash
-export DMTCP_ROOT=~/dmtcp
+export DMTCP_ROOT=~/mana/dmtcp
 ```
 
 ## Quick Start
@@ -71,7 +71,7 @@ make nccl_check
 CUDA/NCCL checkpoint and restart flows normally require both plugins:
 
 1. `src/libncclplugin.so`: this repository's NCCL checkpoint plugin.
-2. `dmtcp/plugin/cuda/libdmtcp_cuda.so`: The CUDA plugin for GPU memory
+2. `mana/dmtcp/plugin/cuda/libdmtcp_cuda.so`: The CUDA plugin for GPU memory
    checkpoint/restore.
 
 DMTCP accepts multiple plugins as a colon-separated list:
@@ -93,17 +93,17 @@ you need full CUDA checkpoint/restart coverage.
 
 ```bash
 cd tests
-make DMTCP_ROOT=../dmtcp
-make test_all DMTCP_ROOT=../dmtcp
+make DMTCP_ROOT=../mana/dmtcp
+make test_all DMTCP_ROOT=../mana/dmtcp
 ```
 
 Runnable criteria in `tests/Makefile`:
 
 ```bash
-make test1 DMTCP_ROOT=../dmtcp  # Basic P2P, no checkpoint
-make test2 DMTCP_ROOT=../dmtcp  # Checkpoint after completion
-make test3 DMTCP_ROOT=../dmtcp  # Checkpoint before NCCL init
-make test4 DMTCP_ROOT=../dmtcp  # In-transit message checkpoint
+make test1 DMTCP_ROOT=../mana/dmtcp  # Basic P2P, no checkpoint
+make test2 DMTCP_ROOT=../mana/dmtcp  # Checkpoint after completion
+make test3 DMTCP_ROOT=../mana/dmtcp  # Checkpoint before NCCL init
+make test4 DMTCP_ROOT=../mana/dmtcp  # In-transit message checkpoint
 ```
 
 `test_all` depends on the runnable criteria above and restarts from any
@@ -132,7 +132,7 @@ ${DMTCP_ROOT}/bin/dmtcp_restart --coord-port 7781 "$CKPT"
 
 ```bash
 cd multiple_gpu_tests
-make test_all DMTCP_ROOT=../dmtcp
+make test_all DMTCP_ROOT=../mana/dmtcp
 ```
 
 Useful overrides:
@@ -191,7 +191,8 @@ nccl-mana-ckpt/
 |   `-- cc_complex.c
 |-- single_gpu_tests/
 |-- multiple_gpu_tests/
-|-- dmtcp/
+|-- mana/
+|   `-- dmtcp/
 |-- Makefile
 |-- README.md
 `-- AGENTS.md
