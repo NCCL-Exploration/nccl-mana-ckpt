@@ -16,9 +16,10 @@ JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
 DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
-MPICH_BIN = /usr/bin
+MPICH_BIN = /shared/EL9/explorer/MPICH/4.3.0b1/bin
 
 DEMO_PORT=7781
+DRAIN_NO_MSGS_TIMEOUT ?= 45
 
 NCCL_HOME ?= $(NCCL_DIR)
 
@@ -63,6 +64,16 @@ drain_send_check: ${LIBNAME}.so tests/multi/drain_send
 	${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
 	 	--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/drain_send
 
+drain_no_msgs_check: ${LIBNAME}.so tests/multi/drain_no_msgs
+	# Kill an old coordinator on this port if present, just in case.
+	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
+	  --coord-port ${DEMO_PORT} 2>/dev/null || true
+	# Launch DMTCP coordinator
+	@${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p ${DEMO_PORT}
+	# Run the no-message NCCL drain test; timeout turns a hang into a failure.
+	timeout ${DRAIN_NO_MSGS_TIMEOUT}s ${MPICH_BIN}/mpirun -np 2 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
+	 	--with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/drain_no_msgs
+
 cc_simple_check: ${LIBNAME}.so tests/multi/cc_simple
 	@${DMTCP_ROOT}/bin/dmtcp_command --quit --quiet \
 	  --coord-port ${DEMO_PORT} 2>/dev/null || true
@@ -89,6 +100,9 @@ tests/multi/drain_recv:
 
 tests/multi/drain_send:
 	$(MAKE) -C tests/multi drain_send
+
+tests/multi/drain_no_msgs:
+	$(MAKE) -C tests/multi drain_no_msgs
 
 tests/multi/cc_simple:
 	$(MAKE) -C tests/multi cc_simple
