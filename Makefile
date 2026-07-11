@@ -16,7 +16,7 @@ JALIB_INCLUDE = ${DMTCP_ROOT}/jalib
 DMTCP_SRC = ${DMTCP_ROOT}/src
 LINK = ${CC}
 
-MPICH_BIN = /usr/bin
+MPICH_BIN = /shared/EL9/explorer/MPICH/4.3.0b1/bin
 
 DEMO_PORT=7781
 DRAIN_NO_MSGS_TIMEOUT ?= 45
