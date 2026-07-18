@@ -32,6 +32,7 @@ void add_stream(cudaStream_t stream);
 void init_rank_info(ncclComm_t comm);
 
 ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
+ncclResult_t ncclCommDestroy(ncclComm_t comm);
 ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, const int* devList);
 ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int* flag, int64_t* pending);
 

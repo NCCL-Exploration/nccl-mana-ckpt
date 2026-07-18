@@ -300,12 +300,141 @@ static void drain_nccl() {
 
 // ncclSend and ncclRecv are now in nccl_wrappers.c
 
+/*
+ * Destroy the live NCCL communicator so the CUDA driver holds no CUDA
+ * IPC / P2P handles (or GDR mappings established during connection setup)
+ * when cuCheckpointProcessCheckpoint runs. This must run AFTER drain_nccl()
+ * has finished draining in-flight messages and reaching sequence consensus —
+ * destroying mid-collective would corrupt the drain accounting.
+ *
+ * ncclCommDestroy() (in nccl_wrappers.c) resolves g_comm to the real,
+ * currently-live communicator and clears g_comm to NULL on success, so the
+ * checkpoint image is written with g_comm == NULL and reinit_nccl() (called
+ * from resume()/restart()) knows a fresh communicator must be created.
+ */
+static void teardown_nccl_for_checkpoint() {
+    if (g_comm == NULL) {
+        printf("[NCCL Plugin] teardown: no active comm, nothing to destroy\n");
+        return;
+    }
+    printf("[rank %d] teardown: destroying NCCL comm %p before checkpoint\n",
+           g_my_rank, (void*)g_comm);
+    fflush(stdout);
+
+    ncclResult_t r = ncclCommDestroy(g_comm);
+    if (r != ncclSuccess) {
+        fprintf(stderr, "[rank %d] teardown: ncclCommDestroy failed: %s\n",
+                g_my_rank, ncclGetErrorString(r));
+    }
+    // Defensive: make sure g_comm is NULL even if destroy reported an error,
+    // so we never try to checkpoint or reuse a half-torn-down handle.
+    g_comm = NULL;
+}
+
+
 static void
 checkpoint()
 {
   printf("\n*** The plugin is being called before checkpointing. ***\n");
   drain_nccl();
+  teardown_nccl_for_checkpoint();
 }
+
+/*
+ * ncclUniqueId is a fixed-size opaque byte blob (128 bytes as of current
+ * NCCL versions). dmtcp_kvdb only stores int64_t, so we move the id through
+ * the coordinator's KVDB in 8-byte chunks — the same "publish, barrier,
+ * read" pattern sequence_number_consensus() already uses for seq numbers.
+ */
+#define NCCL_ID_NCHUNKS (sizeof(ncclUniqueId) / sizeof(int64_t))
+
+static void publish_nccl_id(const ncclUniqueId *id) {
+    const int64_t *chunks = (const int64_t *)id;
+    for (size_t i = 0; i < NCCL_ID_NCHUNKS; i++) {
+        char key[64];
+        snprintf(key, sizeof(key), "nccl-reinit-id-%zu", i);
+        dmtcp_kvdb_set(key, chunks[i]);
+    }
+}
+
+static void fetch_nccl_id(ncclUniqueId *id) {
+    int64_t *chunks = (int64_t *)id;
+    for (size_t i = 0; i < NCCL_ID_NCHUNKS; i++) {
+        char key[64];
+        snprintf(key, sizeof(key), "nccl-reinit-id-%zu", i);
+        chunks[i] = dmtcp_kvdb_get(key);
+    }
+}
+
+/*
+ * Recreate the NCCL communicator after a checkpoint/restart cycle.
+ *
+ * g_my_rank / g_nranks are ordinary process globals: DMTCP restores them as
+ * part of normal memory, so they still hold their pre-checkpoint values here
+ * — they are NOT reset in restart() (see below). g_comm, on the other hand,
+ * was explicitly nulled by teardown_nccl_for_checkpoint() before the
+ * checkpoint was taken, which is exactly the signal we use to know a fresh
+ * communicator is needed.
+ *
+ * Rank 0 generates a new ncclUniqueId (the old one is meaningless — it was
+ * tied to bootstrap state that no longer exists) and publishes it through
+ * the KVDB; every rank reads it back after a barrier, then all ranks call
+ * ncclCommInitRank together, exactly like the very first init.
+ *
+ * NOTE (PoC-scope limitation): this assumes one NCCL rank per OS process,
+ * i.e. programs using ncclGetUniqueId + ncclCommInitRank, matching both
+ * nccl_test.cu and tests/multi/cc_simple.c. It does not handle a single
+ * process driving multiple communicators via ncclCommInitAll.
+ *
+ * NOTE (needs verification on your setup): this must run AFTER the CUDA
+ * plugin has finished restoring CUDA driver/context state for this process.
+ * Confirm the event ordering between libncclplugin.so and libdmtcp_cuda.so
+ * empirically (e.g. add prints on both sides) before relying on this.
+ */
+static void reinit_nccl() {
+    if (g_comm != NULL) {
+        printf("[rank %d] reinit_nccl: comm already present, skipping\n", g_my_rank);
+        return;
+    }
+
+    printf("[rank %d] reinit_nccl: recreating comm (%d ranks)\n", g_my_rank, g_nranks);
+    fflush(stdout);
+
+    pre_init_cuda();
+    CUDA_CHECK(cudaSetDevice(g_my_rank));
+
+    ncclUniqueId id;
+    if (g_my_rank == 0) {
+        ncclResult_t idr = ncclGetUniqueId(&id);
+        if (idr != ncclSuccess) {
+            fprintf(stderr, "[NCCL Plugin] reinit_nccl: ncclGetUniqueId failed: %s\n",
+                    ncclGetErrorString(idr));
+            exit(1);
+        }
+        publish_nccl_id(&id);
+    }
+
+    // Every rank waits here so rank 0's id is visible before anyone reads it.
+    dmtcp_global_barrier("nccl-reinit-id-published");
+
+    if (g_my_rank != 0) {
+        fetch_nccl_id(&id);
+    }
+
+    ncclComm_t new_comm = NULL;
+    ncclResult_t r = ncclCommInitRank(&new_comm, g_nranks, id, g_my_rank);
+    if (r != ncclSuccess) {
+        fprintf(stderr, "[rank %d] reinit_nccl: ncclCommInitRank failed: %s\n",
+                g_my_rank, ncclGetErrorString(r));
+        exit(1);
+    }
+
+    // init_rank_info() no-ops here since g_my_rank != -1, so set g_comm ourselves.
+    g_comm = new_comm;
+    printf("[rank %d] reinit_nccl: comm recreated at %p\n", g_my_rank, (void*)g_comm);
+    fflush(stdout);
+}
+
 
 static void
 resume()
@@ -324,8 +453,6 @@ restart()
   printf("The application is now restarting from a checkpoint.\n");
   ckpt_pending = 0;
   g_num_streams = 0;
-  g_my_rank = -1;
-  g_nranks = 0;
   g_comm = NULL;
   clear_wrapper_pointers();
   reset_groups();
@@ -384,14 +511,26 @@ static void pre_init_cuda() {
 static void
 example_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data)
 {
-  /* NOTE:  See warning in plugin/README about calls to printf here. */
+  static int first_time = 1;
   switch (event) {
   case DMTCP_EVENT_INIT:
-    printf("The plugin containing %s has been initialized.\n", __FILE__);
+    printf("NCCL PLUGIN\n");
+    break;
+
+  case DMTCP_EVENT_RUNNING_AFTER:
+    if (first_time) {
+      first_time = 0;
+      break;
+    }
+    printf("[NCCL PLUGIN] Start reinialization\n");
+    fflush(stdout);
+    reinit_nccl();
+    printf("[NCCL PLUGIN] Finished reinitialization\n");
+    fflush(stdout);
+    dmtcp_global_barrier("");
     break;
 
   case DMTCP_EVENT_EXIT:
-    printf("The plugin is being called before exiting.\n");
     break;
 
   case DMTCP_EVENT_PRESUSPEND:
@@ -403,7 +542,11 @@ example_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data)
     break;
 
   case DMTCP_EVENT_RESTART:
+    printf("[NCCL PLUGIN] Restart event begin\n");
+    fflush(stdout);
     restart();
+    printf("[NCCL PLUGIN] Restart event finished\n");
+    fflush(stdout);
     break;
 
   default:
