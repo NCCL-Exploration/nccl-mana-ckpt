@@ -307,8 +307,11 @@ double	randlc( double *X, double *A );
 
 void full_verify( void );
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void c_print_results( char   *name,
-                      char   class,
+                      char   cl,
                       int    n1, 
                       int    n2,
                       int    n3,
@@ -327,6 +330,9 @@ void c_print_results( char   *name,
                       char   *cmpi_inc,
                       char   *cflags,
                       char   *clinkflags );
+#ifdef __cplusplus
+}
+#endif
 
 #include "c_timers.h"
 
