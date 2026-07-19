@@ -993,6 +993,9 @@ int main( int argc, char **argv )
     double          timecounter, maxtime;
 
 
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
 /* Initialize ranks from SLURM or args */
     char* slurm_id = getenv("SLURM_PROCID");
     char* slurm_tasks = getenv("SLURM_NTASKS");
@@ -1007,9 +1010,29 @@ int main( int argc, char **argv )
         np_total = 1;
     }
 
+    printf("Rank %d/%d starting (SLURM_PROCID=%s, SLURM_NTASKS=%s, argc=%d)\n",
+           my_rank, np_total,
+           slurm_id ? slurm_id : "NULL",
+           slurm_tasks ? slurm_tasks : "NULL",
+           argc);
+
+    if (np_total <= 0) {
+        printf("ERROR: np_total is %d (must be > 0). Exiting.\n", np_total);
+        exit(1);
+    }
+
     /* Initialize CUDA device */
-    int deviceCount;
-    cudaGetDeviceCount(&deviceCount);
+    int deviceCount = 0;
+    cudaError_t cuda_err = cudaGetDeviceCount(&deviceCount);
+    if (cuda_err != cudaSuccess) {
+        printf("WARNING: cudaGetDeviceCount failed: %s. Assuming 1 device.\n", cudaGetErrorString(cuda_err));
+        deviceCount = 1;
+    } else if (deviceCount <= 0) {
+        printf("WARNING: No CUDA devices reported by driver. Assuming 1 device.\n");
+        deviceCount = 1;
+    }
+    
+    printf("Rank %d using device %d of %d available devices\n", my_rank, my_rank % deviceCount, deviceCount);
     cudaSetDevice(my_rank % deviceCount);
     cudaStreamCreate(&cuda_stream);
 
