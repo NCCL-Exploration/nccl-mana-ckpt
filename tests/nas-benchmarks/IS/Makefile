@@ -51,17 +51,13 @@ ifneq ($(NCCL_HOME),)
   NCCL_CFLAGS  += -I$(NCCL_HOME)/include
   NCCL_LDFLAGS += -L$(NCCL_HOME)/lib
 endif
-ifneq ($(CUDA_HOME),)
-  NCCL_CFLAGS  += -I$(CUDA_HOME)/include
-  NCCL_LDFLAGS += -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib
-endif
 
 # MPI build
 MPI_CFLAGS   = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
 MPI_LDFLAGS  =
 
 # ── Sources ──────────────────────────────────────────────────────────
-NCCL_SRCS = is_nccl.c c_timers.c c_print_results.c
+NCCL_SRCS = is_nccl.cu c_timers.c c_print_results.c
 MPI_SRCS  = is.c c_timers.c c_print_results.c
 
 NCCL_EXE  = is_nccl_exe

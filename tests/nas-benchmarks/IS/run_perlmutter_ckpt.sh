@@ -32,7 +32,7 @@ module load cudatoolkit 2>/dev/null || true
 module load nccl 2>/dev/null || true
 
 # Ensure NCCL and CUDA libs are on LD_LIBRARY_PATH for srun-launched processes
-export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+# export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # Paths — adjust if your layout differs
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
