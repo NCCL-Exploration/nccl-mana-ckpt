@@ -100,10 +100,15 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
-srun -n 2 --unbuffered --export=ALL \
+(
   $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-  --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-  ./is_nccl_exe >srun_launch.log 2>&1 &
+    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+    ./is_nccl_exe 0 2 &
+  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+    ./is_nccl_exe 1 2 &
+  wait
+) >srun_launch.log 2>&1 &
 PID=$!
 
 # Wait for both processes to connect to coordinator
@@ -190,11 +195,14 @@ if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
 
   RESTART_START=$(date +%s%N)
 
-  # Launch dmtcp_restart under srun, mirroring Phase 1's topology
-  srun -n 2 --unbuffered --export=ALL \
-    $DMTCP_RESTART --coord-port $PORT ckpt_*.dmtcp \
-    >restart_launch.log 2>&1 &
-  REST_PID=$!
+  RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -n 1)
+  if [ -n "$RESTART_SCRIPT" ]; then
+    ./$RESTART_SCRIPT --coord-port $PORT >restart_launch.log 2>&1 &
+    REST_PID=$!
+  else
+    echo "No restart script found!"
+    exit 1
+  fi
 
   echo "Waiting for restarted process to complete..."
   wait $REST_PID

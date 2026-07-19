@@ -44,7 +44,7 @@ OPTFLAGS  = -O3 -g
 
 # NCCL build: compile .c through MPICC (which natively has MPI paths)
 NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
-NCCL_LDFLAGS = -lnccl -lmpi -lcudart
+NCCL_LDFLAGS = -lnccl -lcudart
 
 # Add include/lib paths only if set
 ifneq ($(NCCL_HOME),)
@@ -76,9 +76,9 @@ is_nccl: $(NCCL_EXE)
 is_mpi: $(MPI_EXE)
 
 # --- NCCL version ---------------------------------------------------
-# MPICC automatically handles mpi.h, and we link cudart/nccl manually
+# We link cudart/nccl manually; no MPI needed now
 $(NCCL_EXE): $(NCCL_SRCS) npbparams.h c_timers.h
-	$(MPICC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
+	$(NVCC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
 
 # --- MPI version (reference) ----------------------------------------
 $(MPI_EXE): $(MPI_SRCS) npbparams.h c_timers.h
