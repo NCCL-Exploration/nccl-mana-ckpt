@@ -43,7 +43,7 @@ PORT           = 7783
 OPTFLAGS  = -O3 -g
 
 # NCCL build: compile .c through MPICC (which natively has MPI paths)
-NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
+NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Xcompiler -Wall
 NCCL_LDFLAGS = -lnccl -lcudart
 
 # Add include/lib paths only if set
