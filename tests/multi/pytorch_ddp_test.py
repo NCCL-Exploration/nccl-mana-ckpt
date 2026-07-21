@@ -50,6 +50,9 @@ def set_seed(seed, rank):
 def main():
     args = parse_args()
     
+    # Disable cuDNN to avoid dynamic library lookup conflicts/corruption under DMTCP
+    torch.backends.cudnn.enabled = False
+
     rank, local_rank, world_size = setup_distributed()
     set_seed(args.seed, rank)
     
