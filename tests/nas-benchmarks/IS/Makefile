@@ -98,4 +98,4 @@ run_nccl_ckpt: $(NCCL_EXE)
 clean:
 	rm -f $(NCCL_EXE) $(MPI_EXE)
 	rm -f *.o *.btr
-	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
+	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh core*

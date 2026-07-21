@@ -51,7 +51,7 @@ CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 
 PORT=7783
-CKPT_DELAY=6 # seconds before triggering checkpoint
+CKPT_DELAY=8 # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
@@ -81,7 +81,7 @@ PHASE1_START=$(date +%s%N)
 
 # Step 1: Start a standalone DMTCP coordinator
 echo "Starting DMTCP coordinator on port $PORT..."
-$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
 sleep 1
 
 # Verify coordinator is running
@@ -157,6 +157,7 @@ CKPT_TOTAL_MS=$(((CKPT_DONE - CKPT_START) / 1000000))
 
 if [ $RESULT -eq 0 ]; then
   echo "PASS: Initial run completed successfully"
+
 else
   echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
 fi
@@ -190,7 +191,7 @@ if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
   # The coordinator was started with --exit-on-last, so it dies when
   # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
   echo "Re-launching coordinator for restart phase..."
-  $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+  $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
   sleep 1
 
   RESTART_START=$(date +%s%N)
