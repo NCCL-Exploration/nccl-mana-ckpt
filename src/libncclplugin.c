@@ -8,6 +8,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include "inflight.h"
 
 #define CUDA_CHECK(cmd)                                                        \
@@ -336,8 +337,16 @@ static void
 checkpoint()
 {
   printf("\n*** The plugin is being called before checkpointing. ***\n");
+  struct timeval start, end;
+  gettimeofday(&start, NULL);
+
   drain_nccl();
   teardown_nccl_for_checkpoint();
+
+  gettimeofday(&end, NULL);
+  double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+  printf("[NCCL PLUGIN] Checkpoint overhead: %.6f seconds\n", elapsed);
+  fflush(stdout);
 }
 
 /*

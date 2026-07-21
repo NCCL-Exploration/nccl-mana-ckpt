@@ -181,6 +181,18 @@ fi
 
 PHASE1_MS=$(((CKPT_DONE - PHASE1_START) / 1000000))
 
+# Extract plugin checkpoint overheads from log
+NCCL_TIME_S=$(grep "\[NCCL PLUGIN\] Checkpoint overhead:" srun_launch.log | awk '{print $5}' | sort -n | tail -1 || echo "0")
+CUDA_TIME_S=$(grep "\[CUDA PLUGIN\] Checkpoint overhead:" srun_launch.log | awk '{print $5}' | sort -n | tail -1 || echo "0")
+
+if [ -z "$NCCL_TIME_S" ]; then NCCL_TIME_S=0; fi
+if [ -z "$CUDA_TIME_S" ]; then CUDA_TIME_S=0; fi
+
+CKPT_TOTAL_S=$(awk "BEGIN {print $CKPT_TOTAL_MS / 1000.0}")
+DISK_TIME_S=$(awk "BEGIN {print $CKPT_TOTAL_S - $NCCL_TIME_S - $CUDA_TIME_S}")
+DISK_TIME_S=$(awk "BEGIN {if ($DISK_TIME_S < 0) print 0; else printf \"%.3f\", $DISK_TIME_S}")
+
+
 # Phase 2: Restart from checkpoint
 # Restarts MUST go through "srun dmtcp_restart".
 RESTART_MS="N/A"
@@ -230,8 +242,11 @@ echo "╔═══════════════════════�
 echo "║              CHECKPOINT PROFILING SUMMARY                   ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 printf "║  %-40s %15s  ║\n" "Phase 1 (run + checkpoint):" "${PHASE1_MS} ms"
-printf "║  %-40s %15s  ║\n" "  └─ Checkpoint trigger (cmd):" "${CKPT_TRIGGER_MS} ms"
+printf "║  %-40s %15s  ║\n" "  ├─ Checkpoint trigger (cmd):" "${CKPT_TRIGGER_MS} ms"
 printf "║  %-40s %15s  ║\n" "  └─ Checkpoint completion (drain+write):" "${CKPT_TOTAL_MS} ms"
+printf "║  %-40s %15s  ║\n" "      ├─ CUDA Overhead:" "${CUDA_TIME_S} s"
+printf "║  %-40s %15s  ║\n" "      ├─ NCCL Overhead:" "${NCCL_TIME_S} s"
+printf "║  %-40s %15s  ║\n" "      └─ Disk Write (approx):" "${DISK_TIME_S} s"
 echo "║──────────────────────────────────────────────────────────────║"
 printf "║  %-40s %15s  ║\n" "Checkpoint files:" "${CKPT_COUNT} file(s)"
 printf "║  %-40s %15s  ║\n" "Checkpoint .dmtcp size:" "${CKPT_SIZE_MB} MB"
