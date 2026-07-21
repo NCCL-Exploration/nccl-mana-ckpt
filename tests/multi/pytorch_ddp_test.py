@@ -103,6 +103,17 @@ def main():
         epoch_duration = time.time() - epoch_start_time
         if rank == 0:
             print(f"[Epoch {epoch} Completed] Duration: {epoch_duration:.4f}s | Average Step Time: {epoch_duration / args.steps_per_epoch:.4f}s", flush=True)
+            total_images = args.steps_per_epoch * args.batch_size * world_size
+            mops_per_image = 3600.0 # ~3.6 GFLOPs for ResNet18 fwd+bwd
+            total_mops = total_images * mops_per_image
+            mops_per_sec = total_mops / epoch_duration
+            print("\n PyTorch Benchmark Epoch Completed")
+            print(f" Size            =             {total_images:12d}")
+            print(f" Iterations      =             {args.steps_per_epoch:12d}")
+            print(f" Time in seconds =             {epoch_duration:12.2f}")
+            print(f" Total processes =             {world_size:12d}")
+            print(f" Mop/s total     =             {mops_per_sec:12.2f}")
+            print(f" Mop/s/process   =             {mops_per_sec/world_size:12.2f}\n", flush=True)
             
         epoch += 1
 

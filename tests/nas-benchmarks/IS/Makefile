@@ -43,17 +43,13 @@ PORT           = 7783
 OPTFLAGS  = -O3 -g
 
 # NCCL build: compile .c through MPICC (which natively has MPI paths)
-NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
-NCCL_LDFLAGS = -lnccl -lmpi -lcudart
+NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Xcompiler -Wall
+NCCL_LDFLAGS = -lnccl -lcudart
 
 # Add include/lib paths only if set
 ifneq ($(NCCL_HOME),)
   NCCL_CFLAGS  += -I$(NCCL_HOME)/include
   NCCL_LDFLAGS += -L$(NCCL_HOME)/lib
-endif
-ifneq ($(CUDA_HOME),)
-  NCCL_CFLAGS  += -I$(CUDA_HOME)/include
-  NCCL_LDFLAGS += -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib
 endif
 
 # MPI build
@@ -61,7 +57,7 @@ MPI_CFLAGS   = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Wall
 MPI_LDFLAGS  =
 
 # ── Sources ──────────────────────────────────────────────────────────
-NCCL_SRCS = is_nccl.c c_timers.c c_print_results.c
+NCCL_SRCS = is_nccl.cu c_timers.c c_print_results.c
 MPI_SRCS  = is.c c_timers.c c_print_results.c
 
 NCCL_EXE  = is_nccl_exe
@@ -76,9 +72,9 @@ is_nccl: $(NCCL_EXE)
 is_mpi: $(MPI_EXE)
 
 # --- NCCL version ---------------------------------------------------
-# MPICC automatically handles mpi.h, and we link cudart/nccl manually
+# We link cudart/nccl manually; no MPI needed now
 $(NCCL_EXE): $(NCCL_SRCS) npbparams.h c_timers.h
-	$(MPICC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
+	$(NVCC) $(NCCL_CFLAGS) -o $@ $(NCCL_SRCS) $(NCCL_LDFLAGS)
 
 # --- MPI version (reference) ----------------------------------------
 $(MPI_EXE): $(MPI_SRCS) npbparams.h c_timers.h
@@ -102,4 +98,4 @@ run_nccl_ckpt: $(NCCL_EXE)
 clean:
 	rm -f $(NCCL_EXE) $(MPI_EXE)
 	rm -f *.o *.btr
-	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
+	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh core*

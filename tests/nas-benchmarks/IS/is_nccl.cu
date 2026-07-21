@@ -34,7 +34,6 @@
  *                                                                       * 
  *************************************************************************/
 
-#include "mpi.h"
 #include "nccl.h"
 #include <cuda_runtime.h>
 #include "npbparams.h"
@@ -213,7 +212,7 @@ typedef  long KEY_TYPE;
 #else
 typedef  int  KEY_TYPE;
 #endif
-#define MP_KEY_TYPE MPI_INT
+/* #define MP_KEY_TYPE MPI_INT */
 
 
 
@@ -226,7 +225,7 @@ int      my_rank, np_total,
 ncclComm_t      nccl_comm;
 ncclUniqueId    nccl_id;
 cudaStream_t    cuda_stream;
-MPI_Comm comm_work;
+/* MPI_Comm comm_work; */
 
 
 /********************/
@@ -308,8 +307,11 @@ double	randlc( double *X, double *A );
 
 void full_verify( void );
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void c_print_results( char   *name,
-                      char   class,
+                      char   cl,
                       int    n1, 
                       int    n2,
                       int    n3,
@@ -328,6 +330,9 @@ void c_print_results( char   *name,
                       char   *cmpi_inc,
                       char   *cflags,
                       char   *clinkflags );
+#ifdef __cplusplus
+}
+#endif
 
 #include "c_timers.h"
 
@@ -381,7 +386,7 @@ void alloc_space(void)
        !bucket_size || !bucket_size_totals || !bucket_ptrs ||
        !process_bucket_distrib_ptr1 || !process_bucket_distrib_ptr2) {
       printf("ERROR: memory allocation failed\n");
-      MPI_Abort(MPI_COMM_WORLD, 1);
+      /* MPI_Abort(MPI_COMM_WORLD, 1); */
       exit(1);
    }
 
@@ -616,8 +621,8 @@ void	create_seq( double seed, double a )
 
 void full_verify( void )
 {
-    MPI_Status  status;
-    MPI_Request request;
+    /* MPI_Status  status; */
+    /* MPI_Request request; */
     
     INT_TYPE    i, j;
     INT_TYPE    *k_ptr, last_local_key;
@@ -994,14 +999,46 @@ int main( int argc, char **argv )
     double          timecounter, maxtime;
 
 
-/*  Initialize MPI */
-    MPI_Init( &argc, &argv );
-    MPI_Comm_rank( MPI_COMM_WORLD, &my_rank );
-    MPI_Comm_size( MPI_COMM_WORLD, &np_total );
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
+/* Initialize ranks from SLURM or args */
+    char* slurm_id = getenv("SLURM_PROCID");
+    char* slurm_tasks = getenv("SLURM_NTASKS");
+    if (slurm_id && slurm_tasks) {
+        my_rank = atoi(slurm_id);
+        np_total = atoi(slurm_tasks);
+    } else if (argc >= 3) {
+        my_rank = atoi(argv[1]);
+        np_total = atoi(argv[2]);
+    } else {
+        my_rank = 0;
+        np_total = 1;
+    }
+
+    printf("Rank %d/%d starting (SLURM_PROCID=%s, SLURM_NTASKS=%s, argc=%d)\n",
+           my_rank, np_total,
+           slurm_id ? slurm_id : "NULL",
+           slurm_tasks ? slurm_tasks : "NULL",
+           argc);
+
+    if (np_total <= 0) {
+        printf("ERROR: np_total is %d (must be > 0). Exiting.\n", np_total);
+        exit(1);
+    }
 
     /* Initialize CUDA device */
-    int deviceCount;
-    cudaGetDeviceCount(&deviceCount);
+    int deviceCount = 0;
+    cudaError_t cuda_err = cudaGetDeviceCount(&deviceCount);
+    if (cuda_err != cudaSuccess) {
+        printf("WARNING: cudaGetDeviceCount failed: %s. Assuming 1 device.\n", cudaGetErrorString(cuda_err));
+        deviceCount = 1;
+    } else if (deviceCount <= 0) {
+        printf("WARNING: No CUDA devices reported by driver. Assuming 1 device.\n");
+        deviceCount = 1;
+    }
+    
+    printf("Rank %d using device %d of %d available devices\n", my_rank, my_rank % deviceCount, deviceCount);
     cudaSetDevice(my_rank % deviceCount);
     cudaStreamCreate(&cuda_stream);
 
@@ -1013,7 +1050,6 @@ int main( int argc, char **argv )
        if( my_rank == 0 )
            printf( "\n ERROR: number of processes %d not within range %d-%d"
                    "\n Exiting program!\n\n", np_total, MIN_PROCS, MAX_PROCS);
-       MPI_Finalize();
        exit( 1 );
     }
 
@@ -1037,7 +1073,7 @@ int main( int argc, char **argv )
                   active = 0;
             }
         }
-        MPI_Bcast(&active, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        /* MPI_Bcast(&active, 1, MPI_INT, 0, MPI_COMM_WORLD); */
 
         /* abort if a strict NPROCS enforcement is required */
         if (active) {
@@ -1045,25 +1081,29 @@ int main( int argc, char **argv )
                printf( "\n ERROR: Number of processes (%d)"
                        " is not a power of two (%d?)\n"
                        " Exiting program!\n\n", np_total, comm_size );
-            MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
             exit( 1 );
         }
 
         /* mark excess ranks as inactive */
         active = ( my_rank >= comm_size )? 0 : 1;
-        MPI_Comm_split(MPI_COMM_WORLD, active, my_rank, &comm_work);
     }
-    else
-        MPI_Comm_dup(MPI_COMM_WORLD, &comm_work);
 
     if (!active) {
-        MPI_Finalize();
         exit( 0 );
     }
 
     /* Initialize NCCL for active ranks only */
-    if (my_rank == 0) ncclGetUniqueId(&nccl_id);
-    MPI_Bcast(&nccl_id, sizeof(nccl_id), MPI_BYTE, 0, comm_work);
+    if (my_rank == 0) {
+        ncclGetUniqueId(&nccl_id);
+        FILE* f = fopen("/tmp/is_nccl_id.bin", "wb");
+        if (f) { fwrite(&nccl_id, sizeof(nccl_id), 1, f); fclose(f); }
+    } else {
+        FILE* f = NULL;
+        while ((f = fopen("/tmp/is_nccl_id.bin", "rb")) == NULL) { usleep(100000); }
+        usleep(200000);
+        fread(&nccl_id, sizeof(nccl_id), 1, f);
+        fclose(f);
+    }
     ncclCommInitRank(&nccl_comm, comm_size, nccl_id, my_rank);
 
 
@@ -1116,7 +1156,7 @@ int main( int argc, char **argv )
         timeron = check_timer_flag();
     }
 
-    MPI_Bcast(&timeron, 1, MPI_INT, 0, comm_work);
+    /* MPI_Bcast(&timeron, 1, MPI_INT, 0, comm_work); */
 
 #ifdef  TIMING_ENABLED 
     for( i=1; i<=T_LAST; i++ ) timer_clear( i );
@@ -1170,13 +1210,16 @@ int main( int argc, char **argv )
     timecounter = timer_read( 0 );
 
 /*  End of timing, obtain maximum time of all processors */
-    MPI_Reduce( &timecounter,
-                &maxtime,
-                1,
-                MPI_DOUBLE,
-                MPI_MAX,
-                0,
-                comm_work );
+    double* d_timecounter;
+    double* d_maxtime;
+    cudaMalloc((void**)&d_timecounter, sizeof(double));
+    cudaMalloc((void**)&d_maxtime, sizeof(double));
+    cudaMemcpy(d_timecounter, &timecounter, sizeof(double), cudaMemcpyHostToDevice);
+    ncclReduce(d_timecounter, d_maxtime, 1, ncclFloat64, ncclMax, 0, nccl_comm, cuda_stream);
+    cudaStreamSynchronize(cuda_stream);
+    cudaMemcpy(&maxtime, d_maxtime, sizeof(double), cudaMemcpyDeviceToHost);
+    cudaFree(d_timecounter);
+    cudaFree(d_maxtime);
 
 
 /*  This tests that keys are in sequence: sorting of last ranked key seq
@@ -1186,13 +1229,16 @@ int main( int argc, char **argv )
 
 /*  Obtain verification counter sum */
     itemp = passed_verification;
-    MPI_Reduce( &itemp,
-                &passed_verification,
-                1,
-                MPI_INT,
-                MPI_SUM,
-                0,
-                comm_work );
+    int* d_itemp;
+    int* d_passed_verification;
+    cudaMalloc((void**)&d_itemp, sizeof(int));
+    cudaMalloc((void**)&d_passed_verification, sizeof(int));
+    cudaMemcpy(d_itemp, &itemp, sizeof(int), cudaMemcpyHostToDevice);
+    ncclReduce(d_itemp, d_passed_verification, 1, ncclInt32, ncclSum, 0, nccl_comm, cuda_stream);
+    cudaStreamSynchronize(cuda_stream);
+    cudaMemcpy(&passed_verification, d_passed_verification, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_itemp);
+    cudaFree(d_passed_verification);
 
     free_space();
 
@@ -1235,27 +1281,20 @@ int main( int argc, char **argv )
         for( i=0; i<=T_LAST; i++ )
             t1[i] = timer_read( i );
 
-        MPI_Reduce( t1,
-                    tmin,
-                    T_LAST+1,
-                    MPI_DOUBLE,
-                    MPI_MIN,
-                    0,
-                    comm_work );
-        MPI_Reduce( t1,
-                    tsum,
-                    T_LAST+1,
-                    MPI_DOUBLE,
-                    MPI_SUM,
-                    0,
-                    comm_work );
-        MPI_Reduce( t1,
-                    tmax,
-                    T_LAST+1,
-                    MPI_DOUBLE,
-                    MPI_MAX,
-                    0,
-                    comm_work );
+        double *d_t1, *d_tmin, *d_tsum, *d_tmax;
+        cudaMalloc((void**)&d_t1, (T_LAST+1)*sizeof(double));
+        cudaMalloc((void**)&d_tmin, (T_LAST+1)*sizeof(double));
+        cudaMalloc((void**)&d_tsum, (T_LAST+1)*sizeof(double));
+        cudaMalloc((void**)&d_tmax, (T_LAST+1)*sizeof(double));
+        cudaMemcpy(d_t1, t1, (T_LAST+1)*sizeof(double), cudaMemcpyHostToDevice);
+        ncclReduce(d_t1, d_tmin, T_LAST+1, ncclFloat64, ncclMin, 0, nccl_comm, cuda_stream);
+        ncclReduce(d_t1, d_tsum, T_LAST+1, ncclFloat64, ncclSum, 0, nccl_comm, cuda_stream);
+        ncclReduce(d_t1, d_tmax, T_LAST+1, ncclFloat64, ncclMax, 0, nccl_comm, cuda_stream);
+        cudaStreamSynchronize(cuda_stream);
+        cudaMemcpy(tmin, d_tmin, (T_LAST+1)*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(tsum, d_tsum, (T_LAST+1)*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(tmax, d_tmax, (T_LAST+1)*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaFree(d_t1); cudaFree(d_tmin); cudaFree(d_tsum); cudaFree(d_tmax);
 
         if( my_rank == 0 )
         {
@@ -1280,7 +1319,7 @@ int main( int argc, char **argv )
     ncclCommDestroy(nccl_comm);
     cudaStreamDestroy(cuda_stream);
 
-    MPI_Finalize();
+    if (my_rank == 0) remove("/tmp/is_nccl_id.bin");
     return 0;
 }
 /**************************/

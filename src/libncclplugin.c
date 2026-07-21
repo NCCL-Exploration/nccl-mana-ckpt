@@ -534,11 +534,19 @@ example_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data)
     break;
 
   case DMTCP_EVENT_PRESUSPEND:
+    printf("[NCCL PLUGIN] Presuspend event begin\n");
+    fflush(stdout);
     checkpoint();
+    printf("[NCCL PLUGIN] Presuspend event finished\n");
+    fflush(stdout);
     break;
 
   case DMTCP_EVENT_RESUME:
+    printf("[NCCL PLUGIN] Resume event begin\n");
+    fflush(stdout);
     resume();
+    printf("[NCCL PLUGIN] Resume event finished\n");
+    fflush(stdout);
     break;
 
   case DMTCP_EVENT_RESTART:

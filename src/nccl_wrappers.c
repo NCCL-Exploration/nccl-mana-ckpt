@@ -102,7 +102,7 @@ void increment_seq_and_wait(ncclComm_t comm) {
     }
     for (;;) {
       DMTCP_PLUGIN_DISABLE_CKPT();
-      if (!(ckpt_pending && g->target != 0 && g->seq >= g->target)) {
+      if (!(ckpt_pending && g->seq >= g->target)) {
         DMTCP_PLUGIN_ENABLE_CKPT();
         break;                       // re-checked under protection; restart sees ckpt_pending==0 and exits
       }

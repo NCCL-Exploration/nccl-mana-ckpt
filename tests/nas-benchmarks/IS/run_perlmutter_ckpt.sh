@@ -32,7 +32,7 @@ module load cudatoolkit 2>/dev/null || true
 module load nccl 2>/dev/null || true
 
 # Ensure NCCL and CUDA libs are on LD_LIBRARY_PATH for srun-launched processes
-export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+# export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # Paths — adjust if your layout differs
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -51,7 +51,7 @@ CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 
 PORT=7783
-CKPT_DELAY=6 # seconds before triggering checkpoint
+CKPT_DELAY=8 # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
 export NCCL_NET_GDR_LEVEL=PHB
@@ -81,7 +81,7 @@ PHASE1_START=$(date +%s%N)
 
 # Step 1: Start a standalone DMTCP coordinator
 echo "Starting DMTCP coordinator on port $PORT..."
-$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+$DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
 sleep 1
 
 # Verify coordinator is running
@@ -100,10 +100,15 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
-srun -n 2 --unbuffered --export=ALL \
+(
   $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-  --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-  ./is_nccl_exe >srun_launch.log 2>&1 &
+    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+    ./is_nccl_exe 0 2 &
+  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+    ./is_nccl_exe 1 2 &
+  wait
+) >srun_launch.log 2>&1 &
 PID=$!
 
 # Wait for both processes to connect to coordinator
@@ -152,6 +157,7 @@ CKPT_TOTAL_MS=$(((CKPT_DONE - CKPT_START) / 1000000))
 
 if [ $RESULT -eq 0 ]; then
   echo "PASS: Initial run completed successfully"
+
 else
   echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
 fi
@@ -185,16 +191,19 @@ if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
   # The coordinator was started with --exit-on-last, so it dies when
   # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
   echo "Re-launching coordinator for restart phase..."
-  $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT
+  $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
   sleep 1
 
   RESTART_START=$(date +%s%N)
 
-  # Launch dmtcp_restart under srun, mirroring Phase 1's topology
-  srun -n 2 --unbuffered --export=ALL \
-    $DMTCP_RESTART --coord-port $PORT ckpt_*.dmtcp \
-    >restart_launch.log 2>&1 &
-  REST_PID=$!
+  RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -n 1)
+  if [ -n "$RESTART_SCRIPT" ]; then
+    ./$RESTART_SCRIPT --coord-port $PORT >restart_launch.log 2>&1 &
+    REST_PID=$!
+  else
+    echo "No restart script found!"
+    exit 1
+  fi
 
   echo "Waiting for restarted process to complete..."
   wait $REST_PID

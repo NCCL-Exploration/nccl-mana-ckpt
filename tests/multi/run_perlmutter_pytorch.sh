@@ -34,8 +34,23 @@ ${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p $PORT
 
 echo "==> Phase 1: Initial PyTorch run with checkpoint"
 # Run infinite epochs (-1) so we have plenty of time to checkpoint
-$DMTCP_LAUNCH --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-    torchrun --nproc_per_node=2 pytorch_ddp_test.py --epochs -1 &
+export WORLD_SIZE=2
+export MASTER_ADDR="127.0.0.1"
+export MASTER_PORT=29500
+
+(
+  export RANK=0
+  export LOCAL_RANK=0
+  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
+      python3 pytorch_ddp_test.py --epochs -1 &
+      
+  export RANK=1
+  export LOCAL_RANK=1
+  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
+      python3 pytorch_ddp_test.py --epochs -1 &
+      
+  wait
+) &
 
 APP_PID=$!
 
@@ -67,7 +82,7 @@ if [ -n "$RESTART_SCRIPT" ]; then
     sleep 15
     
     echo "Killing restarted process..."
-    $MANA_CMD --coord-port $PORT --quit --quiet
+    $DMTCP_CMD --coord-port $PORT --quit --quiet
     kill -9 $REST_PID 2>/dev/null
 else
     echo "Error: No restart script found!"
