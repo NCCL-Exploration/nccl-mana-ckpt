@@ -170,6 +170,26 @@ make clean
 
 Run cleanup from the directory containing the Makefile whose tests you ran.
 
+### Running on NERSC Perlmutter
+
+We recommend configuring the following modules (note, other CUDA and NCCL versions may work):
+
+```bash
+module load nccl/2.29.2-cu13
+```
+
+This will also load in the ``cudatoolkit/13.0`` module. Additionally, unload Perlmutter specific modules:
+
+```bash
+module unload darshan
+```
+
+To ensure you have configured the environment correctly, you can run the following, which will checkpoint and resume, while providing a DMTCP restart script.
+
+```bash
+./tests/nas-benchmarks/IS/run_perlmutter_ckpt.sh
+```
+
 ## Project Structure
 
 ```text
