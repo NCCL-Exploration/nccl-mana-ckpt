@@ -49,16 +49,22 @@ static const char* (*real_ncclGetErrorString)(ncclResult_t) = NULL;
 static void* get_nccl_handle() {
     static void* handle = NULL;
     if (!handle) {
-        handle = RTLD_NEXT;
-        // Verify if RTLD_NEXT works by looking up a standard symbol
-        if (!dlsym(handle, "ncclCommDestroy")) {
-            // Fallback to loading the system libnccl.so dynamically
-            handle = dlopen("libnccl.so", RTLD_LAZY | RTLD_GLOBAL);
-            if (!handle) {
-                fprintf(stderr, "[WRAPPER] Warning: Failed to dlopen libnccl.so: %s\n", dlerror());
-                handle = RTLD_NEXT; // fallback to RTLD_NEXT anyway
-            } else {
-                fprintf(stderr, "[WRAPPER] Successfully loaded libnccl.so via dlopen\n");
+        // PyTorch DDP check: try to find already loaded libtorch_cuda.so (which embeds NCCL)
+        handle = dlopen("libtorch_cuda.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (handle) {
+            fprintf(stderr, "[WRAPPER] Successfully resolved NCCL symbols from loaded libtorch_cuda.so\n");
+        } else {
+            handle = RTLD_NEXT;
+            // Verify if RTLD_NEXT works by looking up a standard symbol
+            if (!dlsym(handle, "ncclCommDestroy")) {
+                // Fallback to loading the system libnccl.so dynamically
+                handle = dlopen("libnccl.so", RTLD_LAZY | RTLD_GLOBAL);
+                if (!handle) {
+                    fprintf(stderr, "[WRAPPER] Warning: Failed to dlopen libnccl.so: %s\n", dlerror());
+                    handle = RTLD_NEXT; // fallback to RTLD_NEXT anyway
+                } else {
+                    fprintf(stderr, "[WRAPPER] Successfully loaded libnccl.so via dlopen\n");
+                }
             }
         }
     }
