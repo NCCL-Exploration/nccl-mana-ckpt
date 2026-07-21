@@ -202,6 +202,9 @@ static void sequence_number_consensus() {
     }
 
     g->target = max_seq;
+    char target_key[64];
+    snprintf(target_key, sizeof(target_key), "target|%p|%d", (void*)g_comm, g_my_rank);
+    dmtcp_kvdb_set(target_key, (int64_t)g->target);
     printf("[NCCL Drain] Rank %d consensus target seq: %lu (current: %lu)\n", g_my_rank, g->target, g->seq);
 }
 
