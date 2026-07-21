@@ -45,6 +45,10 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recv
 
 ncclResult_t call_real_ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t call_real_ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t call_real_ncclCommUserRank(ncclComm_t comm, int* rank);
+ncclResult_t call_real_ncclCommCount(ncclComm_t comm, int* count);
+ncclResult_t call_real_ncclGetUniqueId(ncclUniqueId* out);
+const char* call_real_ncclGetErrorString(ncclResult_t result);
 
 #ifdef __cplusplus
 }

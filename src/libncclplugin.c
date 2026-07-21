@@ -48,8 +48,8 @@ void add_stream(cudaStream_t stream) {
 void init_rank_info(ncclComm_t comm) {
     if (g_my_rank == -1) {
         g_comm = comm;
-        ncclCommUserRank(comm, &g_my_rank);
-        ncclCommCount(comm, &g_nranks);
+        call_real_ncclCommUserRank(comm, &g_my_rank);
+        call_real_ncclCommCount(comm, &g_nranks);
         printf("[NCCL Drain] Rank %d of %d\n", g_my_rank, g_nranks);
     }
 }
@@ -325,7 +325,7 @@ static void teardown_nccl_for_checkpoint() {
     ncclResult_t r = ncclCommDestroy(g_comm);
     if (r != ncclSuccess) {
         fprintf(stderr, "[rank %d] teardown: ncclCommDestroy failed: %s\n",
-                g_my_rank, ncclGetErrorString(r));
+                g_my_rank, call_real_ncclGetErrorString(r));
     }
     // Defensive: make sure g_comm is NULL even if destroy reported an error,
     // so we never try to checkpoint or reuse a half-torn-down handle.
@@ -414,10 +414,10 @@ static void reinit_nccl() {
 
     ncclUniqueId id;
     if (g_my_rank == 0) {
-        ncclResult_t idr = ncclGetUniqueId(&id);
+        ncclResult_t idr = call_real_ncclGetUniqueId(&id);
         if (idr != ncclSuccess) {
             fprintf(stderr, "[NCCL Plugin] reinit_nccl: ncclGetUniqueId failed: %s\n",
-                    ncclGetErrorString(idr));
+                    call_real_ncclGetErrorString(idr));
             exit(1);
         }
         publish_nccl_id(&id);
@@ -434,7 +434,7 @@ static void reinit_nccl() {
     ncclResult_t r = ncclCommInitRank(&new_comm, g_nranks, id, g_my_rank);
     if (r != ncclSuccess) {
         fprintf(stderr, "[rank %d] reinit_nccl: ncclCommInitRank failed: %s\n",
-                g_my_rank, ncclGetErrorString(r));
+                g_my_rank, call_real_ncclGetErrorString(r));
         exit(1);
     }
 

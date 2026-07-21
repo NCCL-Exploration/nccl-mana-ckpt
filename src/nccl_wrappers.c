@@ -40,6 +40,10 @@ static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
 static ncclResult_t (*real_ncclCommDestroy)(ncclComm_t) = NULL;
 static ncclResult_t (*real_ncclScatter)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
+static ncclResult_t (*real_ncclCommUserRank)(ncclComm_t, int*) = NULL;
+static ncclResult_t (*real_ncclCommCount)(ncclComm_t, int*) = NULL;
+static ncclResult_t (*real_ncclGetUniqueId)(ncclUniqueId*) = NULL;
+static const char* (*real_ncclGetErrorString)(ncclResult_t) = NULL;
 
 #define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
@@ -53,6 +57,30 @@ ncclResult_t call_real_ncclSend(const void* sendbuff, size_t count, ncclDataType
 ncclResult_t call_real_ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
     LOAD_SYM(ncclRecv);
     return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
+}
+
+ncclResult_t call_real_ncclCommUserRank(ncclComm_t comm, int* rank) {
+    LOAD_SYM(ncclCommUserRank);
+    if (real_ncclCommUserRank) return real_ncclCommUserRank(comm, rank);
+    return ncclSuccess;
+}
+
+ncclResult_t call_real_ncclCommCount(ncclComm_t comm, int* count) {
+    LOAD_SYM(ncclCommCount);
+    if (real_ncclCommCount) return real_ncclCommCount(comm, count);
+    return ncclSuccess;
+}
+
+ncclResult_t call_real_ncclGetUniqueId(ncclUniqueId* out) {
+    LOAD_SYM(ncclGetUniqueId);
+    if (real_ncclGetUniqueId) return real_ncclGetUniqueId(out);
+    return ncclSuccess;
+}
+
+const char* call_real_ncclGetErrorString(ncclResult_t result) {
+    LOAD_SYM(ncclGetErrorString);
+    if (real_ncclGetErrorString) return real_ncclGetErrorString(result);
+    return "Unknown NCCL Error";
 }
 
 group_entry_t* get_or_create_group(ncclComm_t comm) {
@@ -209,7 +237,7 @@ ncclResult_t ncclRecv(
     add_stream(stream);
 
     int rank = g_my_rank;
-    ncclCommUserRank(g_comm, &rank);
+    call_real_ncclCommUserRank(g_comm, &rank);
     inflight_mark_recv(peer, rank, count * get_nccl_type_size(datatype));
 
     LOAD_SYM(ncclRecv);
@@ -334,8 +362,8 @@ ncclResult_t ncclGather_p2p(
   int rank, nranks;
   ncclResult_t ret;
 
-  if ((ret = ncclCommUserRank(g_comm, &rank))   != ncclSuccess) return ret;
-  if ((ret = ncclCommCount(g_comm, &nranks))    != ncclSuccess) return ret;
+  if ((ret = call_real_ncclCommUserRank(g_comm, &rank))   != ncclSuccess) return ret;
+  if ((ret = call_real_ncclCommCount(g_comm, &nranks))    != ncclSuccess) return ret;
 
   size_t elem_bytes = get_nccl_type_size(datatype);
   if (elem_bytes == 0) return ncclInvalidArgument;
@@ -376,8 +404,8 @@ ncclResult_t ncclScatter_p2p(
     int rank, nranks;
     ncclResult_t ret;
 
-    if ((ret = ncclCommUserRank(g_comm, &rank)) != ncclSuccess) return ret;
-    if ((ret = ncclCommCount(g_comm, &nranks))  != ncclSuccess) return ret;
+    if ((ret = call_real_ncclCommUserRank(g_comm, &rank)) != ncclSuccess) return ret;
+    if ((ret = call_real_ncclCommCount(g_comm, &nranks))  != ncclSuccess) return ret;
 
     size_t elem_bytes = get_nccl_type_size(datatype);
     if (elem_bytes == 0) return ncclInvalidArgument;
@@ -497,4 +525,8 @@ void clear_wrapper_pointers() {
     real_ncclCommInitAll = NULL;
     real_ncclScatter = NULL;
     real_ncclCommDestroy = NULL;
+    real_ncclCommUserRank = NULL;
+    real_ncclCommCount = NULL;
+    real_ncclGetUniqueId = NULL;
+    real_ncclGetErrorString = NULL;
 }

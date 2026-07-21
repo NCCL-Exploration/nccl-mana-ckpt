@@ -120,7 +120,7 @@ OBJS = obj/libncclplugin.o obj/dmtcp_kvdb_c.o obj/nccl_wrappers.o obj/inflight.o
 
 ${LIBNAME}.so: $(OBJS)
 	@mkdir -p bin
-	${CXX} -shared -o $@ $^
+	${CXX} -shared -o $@ $^ -ldl
 
 obj/%.o: src/%.c
 	@mkdir -p obj
