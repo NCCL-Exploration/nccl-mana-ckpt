@@ -506,12 +506,11 @@ static void pre_init_cuda() {
   printf("[NCCL Plugin] pre_init_cuda: cudaGetDeviceCount returned %d, device_count = %d\n", (int)err, device_count);
   fflush(stdout);
   if (err == cudaSuccess) {
-
-      printf("[NCCL Plugin] Pre-initializing CUDA on control thread for %d devices...\n", device_count);
-      for (int i = 0; i < device_count; i++) {
-          cudaSetDevice(i);
-          cudaFree(0);
-      }
+      int active_dev = (g_my_rank != -1) ? g_my_rank : 0;
+      if (active_dev >= device_count) active_dev = 0;
+      printf("[NCCL Plugin] Pre-initializing CUDA on control thread for device %d...\n", active_dev);
+      cudaSetDevice(active_dev);
+      cudaFree(0);
       printf("[NCCL Plugin] CUDA pre-initialization complete.\n");
   } else {
       printf("[NCCL Plugin] Failed to get device count during pre-init: %s\n", cudaGetErrorString(err));
