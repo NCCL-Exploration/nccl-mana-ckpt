@@ -46,7 +46,32 @@ static ncclResult_t (*real_ncclCommCount)(ncclComm_t, int*) = NULL;
 static ncclResult_t (*real_ncclGetUniqueId)(ncclUniqueId*) = NULL;
 static const char* (*real_ncclGetErrorString)(ncclResult_t) = NULL;
 
-#define LOAD_SYM(name) if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
+static void* get_nccl_handle() {
+    static void* handle = NULL;
+    if (!handle) {
+        handle = RTLD_NEXT;
+        // Verify if RTLD_NEXT works by looking up a standard symbol
+        if (!dlsym(handle, "ncclCommDestroy")) {
+            // Fallback to loading the system libnccl.so dynamically
+            handle = dlopen("libnccl.so", RTLD_LAZY | RTLD_GLOBAL);
+            if (!handle) {
+                fprintf(stderr, "[WRAPPER] Warning: Failed to dlopen libnccl.so: %s\n", dlerror());
+                handle = RTLD_NEXT; // fallback to RTLD_NEXT anyway
+            } else {
+                fprintf(stderr, "[WRAPPER] Successfully loaded libnccl.so via dlopen\n");
+            }
+        }
+    }
+    return handle;
+}
+
+#define LOAD_SYM(name) \
+    if (!real_##name) { \
+        real_##name = dlsym(get_nccl_handle(), #name); \
+        if (!real_##name) { \
+            fprintf(stderr, "[WRAPPER] Error: Failed to resolve symbol %s: %s\n", #name, dlerror()); \
+        } \
+    }
 
 static void prepare_collective(ncclComm_t comm, cudaStream_t stream);
 
@@ -164,6 +189,11 @@ ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId,
     fprintf(stderr, "[WRAPPER] ncclCommInitRank called with rank %d, nranks %d\n", rank, nranks);
     DMTCP_PLUGIN_DISABLE_CKPT();
     LOAD_SYM(ncclCommInitRank);
+    if (!real_ncclCommInitRank) {
+        fprintf(stderr, "[WRAPPER] Error: real_ncclCommInitRank is NULL!\n");
+        DMTCP_PLUGIN_ENABLE_CKPT();
+        return ncclUnhandledCudaError;
+    }
     ncclResult_t res = real_ncclCommInitRank(comm, nranks, commId, rank);
     fprintf(stderr, "[WRAPPER] real_ncclCommInitRank returned %d\n", res);
     if (res == ncclSuccess) {
@@ -177,6 +207,11 @@ ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId c
     fprintf(stderr, "[WRAPPER] ncclCommInitRankConfig called with rank %d, nranks %d\n", rank, nranks);
     DMTCP_PLUGIN_DISABLE_CKPT();
     LOAD_SYM(ncclCommInitRankConfig);
+    if (!real_ncclCommInitRankConfig) {
+        fprintf(stderr, "[WRAPPER] Error: real_ncclCommInitRankConfig is NULL!\n");
+        DMTCP_PLUGIN_ENABLE_CKPT();
+        return ncclUnhandledCudaError;
+    }
     ncclResult_t res = real_ncclCommInitRankConfig(comm, nranks, commId, rank, config);
     if (res == ncclSuccess) {
         init_rank_info(*comm);
@@ -188,6 +223,11 @@ ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId c
 ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, const int* devList) {
     DMTCP_PLUGIN_DISABLE_CKPT();
     LOAD_SYM(ncclCommInitAll);
+    if (!real_ncclCommInitAll) {
+        fprintf(stderr, "[WRAPPER] Error: real_ncclCommInitAll is NULL!\n");
+        DMTCP_PLUGIN_ENABLE_CKPT();
+        return ncclUnhandledCudaError;
+    }
     ncclResult_t res = real_ncclCommInitAll(&g_comm, nGpus, devList);
     if (res == ncclSuccess) {
         init_rank_info(g_comm);
@@ -474,6 +514,10 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
         return ncclSuccess;
     }
     LOAD_SYM(ncclCommDestroy);
+    if (!real_ncclCommDestroy) {
+        fprintf(stderr, "[WRAPPER] Error: real_ncclCommDestroy is NULL!\n");
+        return ncclUnhandledCudaError;
+    }
     ncclResult_t r = real_ncclCommDestroy(live);
     if (live == g_comm) {
         g_comm = NULL;
