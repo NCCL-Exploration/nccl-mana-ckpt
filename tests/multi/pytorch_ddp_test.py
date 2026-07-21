@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import os
 import sys
+import ctypes
+# Set RTLD_GLOBAL so that the preloaded MANA/NCCL wrapper plugin can resolve PyTorch's internal NCCL symbols
+sys.setdlopenflags(sys.getdlopenflags() | ctypes.RTLD_GLOBAL)
+
 import time
 import argparse
 import torch
