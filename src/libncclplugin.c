@@ -46,11 +46,12 @@ void add_stream(cudaStream_t stream) {
 }
 
 void init_rank_info(ncclComm_t comm) {
-    if (g_my_rank == -1) {
+    if (comm != NULL && (g_my_rank == -1 || g_comm == NULL)) {
         g_comm = comm;
         call_real_ncclCommUserRank(comm, &g_my_rank);
         call_real_ncclCommCount(comm, &g_nranks);
-        printf("[NCCL Drain] Rank %d of %d\n", g_my_rank, g_nranks);
+        printf("[NCCL Drain] Rank %d of %d (comm=%p)\n", g_my_rank, g_nranks, (void*)comm);
+        fflush(stdout);
     }
 }
 
