@@ -37,7 +37,7 @@ static ncclResult_t (*real_ncclAllGather)(const void*, void*, size_t, ncclDataTy
 static ncclResult_t (*real_ncclGather)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclReduceScatter)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t) = NULL;
 static ncclResult_t (*real_ncclCommInitRank)(ncclComm_t*, int, ncclUniqueId, int) = NULL;
-static ncclResult_t (*real_ncclCommInitRankConfig)(ncclComm_t*, int, ncclUniqueId, int, void*) = NULL;
+static ncclResult_t (*real_ncclCommInitRankConfig)(ncclComm_t*, int, ncclUniqueId, int, ncclConfig_t*) = NULL;
 static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t*, int, const int*) = NULL;
 static ncclResult_t (*real_ncclCommDestroy)(ncclComm_t) = NULL;
 static ncclResult_t (*real_ncclScatter)(const void*, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t) = NULL;
@@ -173,7 +173,7 @@ ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId,
     return res;
 }
 
-ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, void* config) {
+ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t* config) {
     fprintf(stderr, "[WRAPPER] ncclCommInitRankConfig called with rank %d, nranks %d\n", rank, nranks);
     DMTCP_PLUGIN_DISABLE_CKPT();
     LOAD_SYM(ncclCommInitRankConfig);
