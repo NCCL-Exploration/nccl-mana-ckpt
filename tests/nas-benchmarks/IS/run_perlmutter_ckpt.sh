@@ -63,20 +63,23 @@ export DMTCP_SLEEP_ON_FAILURE=1
 
 cd $SCRIPT_DIR
 
-JOB_START=$(date +%s%N)
-
 # Clean up any stale coordinator or processes
 $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
 killall -9 dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
-rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
-rm -f srun_launch.log
 
-
-
-# Ensure the benchmark is compiled with CLASS=A for longer execution
+# Ensure the benchmark is compiled with CLASS=A for longer execution in the source dir
 echo "Compiling benchmark (CLASS=A)..."
 make clean && make is_nccl CLASS=A
+
+# Create and switch to node-local NVMe /tmp directory to eliminate I/O bottleneck
+TMP_RUN_DIR="/tmp/dmtcp_job_${SLURM_JOB_ID:-local}"
+rm -rf "$TMP_RUN_DIR"
+mkdir -p "$TMP_RUN_DIR"
+cp is_nccl_exe "$TMP_RUN_DIR/"
+cd "$TMP_RUN_DIR"
+
+JOB_START=$(date +%s%N)
 
 # Phase 1: Launch under DMTCP
 echo ""
