@@ -25,6 +25,36 @@ ulimit -c unlimited
 # Darshan (Perlmutter I/O profiler) wraps dup2/open/close via LD_PRELOAD.
 # DMTCP also wraps these calls. The two conflict, causing infinite recursion
 # in dup2 → stack overflow → SIGSEGV. Disable Darshan when using DMTCP.
+# Parse command line flags
+NUM_GPUS=${SLURM_NTASKS:-${SLURM_GPUS_ON_NODE:-2}}
+CLASS="A"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --num-gpus|-n|-g)
+      NUM_GPUS="$2"
+      shift 2
+      ;;
+    --num-gpus=*)
+      NUM_GPUS="${1#*=}"
+      shift 1
+      ;;
+    --class|-c)
+      CLASS="$2"
+      shift 2
+      ;;
+    --class=*)
+      CLASS="${1#*=}"
+      shift 1
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      exit 1
+      ;;
+  esac
+done
+CLASS=$(echo "$CLASS" | tr 'a-z' 'A-Z')
+
 export DARSHAN_DISABLE=1
 module unload darshan 2>/dev/null || true
 
@@ -68,9 +98,9 @@ $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
 killall -9 dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
 
-# Ensure the benchmark is compiled with CLASS=A for longer execution in the source dir
-echo "Compiling benchmark (CLASS=A)..."
-make clean && make is_nccl CLASS=A
+# Ensure the benchmark is compiled with requested CLASS for longer execution in the source dir
+echo "Compiling benchmark (CLASS=$CLASS)..."
+make clean && make is_nccl CLASS="$CLASS"
 
 # Create and switch to node-local NVMe /tmp directory to eliminate I/O bottleneck
 TMP_RUN_DIR="/tmp/dmtcp_job_${SLURM_JOB_ID:-local}"
@@ -98,8 +128,7 @@ if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
 fi
 echo "Coordinator is running."
 
-# Step 2: Launch each task under dmtcp_launch via srun
-# Each is_nccl_exe task is individually DMTCP-managed
+# Step 2: Launch each task under dmtcp_launch via srun or background processes
 export NCCL_P2P_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_DMABUF_ENABLE=0
@@ -107,22 +136,29 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
+export NCCL_ID_FILE="${TMP_RUN_DIR}/.is_nccl_id.bin"
+
 (
-  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-    ./is_nccl_exe 0 2 &
-  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-    ./is_nccl_exe 1 2 &
-  wait
+  if [ -n "${SLURM_JOB_ID:-}" ] && command -v srun >/dev/null 2>&1; then
+    srun -n "$NUM_GPUS" $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+      --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+      ./is_nccl_exe --num-gpus "$NUM_GPUS" --class "$CLASS"
+  else
+    for (( rank=0; rank<NUM_GPUS; rank++ )); do
+      $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+        --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+        ./is_nccl_exe "$rank" "$NUM_GPUS" --num-gpus "$NUM_GPUS" --class "$CLASS" &
+    done
+    wait
+  fi
 ) >srun_launch.log 2>&1 &
 PID=$!
 
-# Wait for both processes to connect to coordinator
+# Wait for processes to connect to coordinator
 echo "Waiting for processes to connect to coordinator..."
 while true; do
   PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
-  if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
+  if [ "$PEERS" != "" ] && [ "$PEERS" -ge "$NUM_GPUS" ]; then
     echo "Found $PEERS connected processes."
     break
   fi

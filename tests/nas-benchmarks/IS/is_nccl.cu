@@ -1002,18 +1002,55 @@ int main( int argc, char **argv )
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-/* Initialize ranks from SLURM or args */
+/* Initialize ranks from SLURM or args/flags */
+    int rank_set = 0;
+    int ntasks_set = 0;
+    char runtime_class = CLASS;
+
     char* slurm_id = getenv("SLURM_PROCID");
     char* slurm_tasks = getenv("SLURM_NTASKS");
     if (slurm_id && slurm_tasks) {
         my_rank = atoi(slurm_id);
         np_total = atoi(slurm_tasks);
-    } else if (argc >= 3) {
-        my_rank = atoi(argv[1]);
-        np_total = atoi(argv[2]);
+        rank_set = 1;
+        ntasks_set = 1;
     } else {
         my_rank = 0;
         np_total = 1;
+    }
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--num-gpus") == 0 || strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "-g") == 0) {
+            if (i + 1 < argc) {
+                np_total = atoi(argv[++i]);
+                ntasks_set = 1;
+            }
+        } else if (strncmp(argv[i], "--num-gpus=", 11) == 0) {
+            np_total = atoi(argv[i] + 11);
+            ntasks_set = 1;
+        } else if (strcmp(argv[i], "--class") == 0 || strcmp(argv[i], "-c") == 0) {
+            if (i + 1 < argc) {
+                runtime_class = argv[++i][0];
+            }
+        } else if (strncmp(argv[i], "--class=", 8) == 0) {
+            runtime_class = argv[i][8];
+        } else if (strcmp(argv[i], "--rank") == 0 || strcmp(argv[i], "-r") == 0) {
+            if (i + 1 < argc) {
+                my_rank = atoi(argv[++i]);
+                rank_set = 1;
+            }
+        } else if (!rank_set && i == 1 && argv[i][0] >= '0' && argv[i][0] <= '9') {
+            my_rank = atoi(argv[i]);
+            rank_set = 1;
+        } else if (!ntasks_set && (i == 2 || (i == 1 && rank_set)) && argv[i][0] >= '0' && argv[i][0] <= '9') {
+            np_total = atoi(argv[i]);
+            ntasks_set = 1;
+        }
+    }
+
+    if (runtime_class != CLASS && my_rank == 0) {
+        printf("WARNING: Specified --class %c does not match compiled CLASS %c. Benchmark running with compiled CLASS %c.\n",
+               runtime_class, CLASS, CLASS);
     }
 
     printf("Rank %d/%d starting (SLURM_PROCID=%s, SLURM_NTASKS=%s, argc=%d)\n",
@@ -1093,13 +1130,18 @@ int main( int argc, char **argv )
     }
 
     /* Initialize NCCL for active ranks only */
+    char* nccl_id_path = getenv("NCCL_ID_FILE");
+    if (!nccl_id_path || strlen(nccl_id_path) == 0) {
+        nccl_id_path = (char*)"/tmp/is_nccl_id.bin";
+    }
+
     if (my_rank == 0) {
         ncclGetUniqueId(&nccl_id);
-        FILE* f = fopen("/tmp/is_nccl_id.bin", "wb");
+        FILE* f = fopen(nccl_id_path, "wb");
         if (f) { fwrite(&nccl_id, sizeof(nccl_id), 1, f); fclose(f); }
     } else {
         FILE* f = NULL;
-        while ((f = fopen("/tmp/is_nccl_id.bin", "rb")) == NULL) { usleep(100000); }
+        while ((f = fopen(nccl_id_path, "rb")) == NULL) { usleep(100000); }
         usleep(200000);
         fread(&nccl_id, sizeof(nccl_id), 1, f);
         fclose(f);
@@ -1319,7 +1361,7 @@ int main( int argc, char **argv )
     ncclCommDestroy(nccl_comm);
     cudaStreamDestroy(cuda_stream);
 
-    if (my_rank == 0) remove("/tmp/is_nccl_id.bin");
+    if (my_rank == 0) remove(nccl_id_path);
     return 0;
 }
 /**************************/
