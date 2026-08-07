@@ -13,33 +13,35 @@
  *   Run `make drain_send_check` in parent directory
  */
 
+#include <assert.h>
+#include <cuda_runtime.h>
+#include <mpi.h>
+#include <nccl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <assert.h>
-#include <mpi.h>
-#include <nccl.h>
-#include <cuda_runtime.h>
 
 #define NELEMS 1024
 
-#define CUDACHECK(cmd) do {                                 \
-    cudaError_t e = cmd;                                    \
-    if (e != cudaSuccess) {                                 \
-        fprintf(stderr, "CUDA error %d: %s (%s:%d)\n",     \
-                e, cudaGetErrorString(e),__FILE__,__LINE__);\
-        exit(1);                                            \
-    }                                                       \
-} while(0)
+#define CUDACHECK(cmd)                                                                             \
+    do {                                                                                           \
+        cudaError_t e = cmd;                                                                       \
+        if (e != cudaSuccess) {                                                                    \
+            fprintf(stderr, "CUDA error %d: %s (%s:%d)\n", e, cudaGetErrorString(e), __FILE__,     \
+                    __LINE__);                                                                     \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
-#define NCCLCHECK(cmd) do {                                 \
-    ncclResult_t r = cmd;                                   \
-    if (r != ncclSuccess) {                                 \
-        fprintf(stderr, "NCCL error %d: %s (%s:%d)\n",     \
-                r, ncclGetErrorString(r),__FILE__,__LINE__);\
-        exit(1);                                            \
-    }                                                       \
-} while(0)
+#define NCCLCHECK(cmd)                                                                             \
+    do {                                                                                           \
+        ncclResult_t r = cmd;                                                                      \
+        if (r != ncclSuccess) {                                                                    \
+            fprintf(stderr, "NCCL error %d: %s (%s:%d)\n", r, ncclGetErrorString(r), __FILE__,     \
+                    __LINE__);                                                                     \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
@@ -55,7 +57,8 @@ int main(int argc, char **argv) {
     CUDACHECK(cudaSetDevice(rank));
 
     ncclUniqueId id;
-    if (rank == 0) NCCLCHECK(ncclGetUniqueId(&id));
+    if (rank == 0)
+        NCCLCHECK(ncclGetUniqueId(&id));
     MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     ncclComm_t comm;
@@ -69,9 +72,9 @@ int main(int argc, char **argv) {
 
     if (rank == 0) {
         float *h_buf = (float *)malloc(NELEMS * sizeof(float));
-        for (int i = 0; i < NELEMS; i++) h_buf[i] = 42.0f;
-        CUDACHECK(cudaMemcpy(d_buf, h_buf, NELEMS * sizeof(float),
-                  cudaMemcpyHostToDevice));
+        for (int i = 0; i < NELEMS; i++)
+            h_buf[i] = 42.0f;
+        CUDACHECK(cudaMemcpy(d_buf, h_buf, NELEMS * sizeof(float), cudaMemcpyHostToDevice));
         free(h_buf);
 
         printf("[rank 0] Sleeping 10s... [CHECKPOINT WINDOW]\n");
@@ -91,18 +94,17 @@ int main(int argc, char **argv) {
         CUDACHECK(cudaStreamSynchronize(stream));
 
         float *h_buf = (float *)malloc(NELEMS * sizeof(float));
-        CUDACHECK(cudaMemcpy(h_buf, d_buf, NELEMS * sizeof(float),
-                  cudaMemcpyDeviceToHost));
+        CUDACHECK(cudaMemcpy(h_buf, d_buf, NELEMS * sizeof(float), cudaMemcpyDeviceToHost));
         int ok = 1;
         for (int i = 0; i < NELEMS; i++) {
             if (h_buf[i] != 42.0f) {
-                fprintf(stderr, "[rank 1] MISMATCH [%d]: %.0f != 42\n",
-                        i, h_buf[i]);
+                fprintf(stderr, "[rank 1] MISMATCH [%d]: %.0f != 42\n", i, h_buf[i]);
                 ok = 0;
                 break;
             }
         }
-        if (ok) printf("[rank 1] PASS — all elements == 42\n");
+        if (ok)
+            printf("[rank 1] PASS — all elements == 42\n");
         free(h_buf);
     }
 

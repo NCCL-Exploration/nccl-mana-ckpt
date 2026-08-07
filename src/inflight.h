@@ -8,30 +8,31 @@
 extern "C" {
 #endif
 
-#define MAX_RANKS       64
+#define MAX_RANKS 64
 #define MAX_DRAIN_QUEUE 16
 
 /* ── Local in-flight tracking ────────────────────────────────────── */
 
 typedef struct {
-    int64_t bytes;  /* >0 = send posted but recv not yet matched; 0 = idle; <0 = recv posted before send */
+    int64_t bytes; /* >0 = send posted but recv not yet matched; 0 = idle; <0 = recv posted before
+                      send */
 } pending_entry_t;
 
 /* Process-local table: local_pending[src][dst].bytes */
 extern pending_entry_t local_pending[MAX_RANKS][MAX_RANKS];
 
-void    inflight_init(void);
-void    inflight_mark_send(int src, int dst, size_t bytes);
-void    inflight_mark_recv(int src, int dst, size_t bytes);
-int     inflight_has_pending(int src, int dst);
+void inflight_init(void);
+void inflight_mark_send(int src, int dst, size_t bytes);
+void inflight_mark_recv(int src, int dst, size_t bytes);
+int inflight_has_pending(int src, int dst);
 int64_t inflight_pending_bytes(int src, int dst);
 
 /* ── Per-source drain queue ──────────────────────────────────────── */
 
 typedef struct {
-    void  *data;   /* host-side copy of the drained message */
+    void *data; /* host-side copy of the drained message */
     size_t bytes;
-    int    source;
+    int source;
 } drain_msg_t;
 
 typedef struct {
@@ -44,11 +45,11 @@ typedef struct {
 /* One queue per possible source rank */
 extern drain_queue_t drain_queues[MAX_RANKS];
 
-int         drain_queue_push(int source, void *data, size_t bytes);
+int drain_queue_push(int source, void *data, size_t bytes);
 drain_msg_t *drain_queue_peek(int source);
-void        drain_queue_pop(int source);
-int         drain_queue_empty(int source);
-void        drain_queues_reset(void);
+void drain_queue_pop(int source);
+int drain_queue_empty(int source);
+void drain_queues_reset(void);
 
 #ifdef __cplusplus
 }

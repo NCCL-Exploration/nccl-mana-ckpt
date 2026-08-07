@@ -1,14 +1,14 @@
-#include <stdio.h>
+#include "nccl_wrappers.h"
 #include <assert.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <unistd.h>
-#include "nccl_wrappers.h"
 
-
-// gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I include -lpthread 
+// gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I
+// include -lpthread
 //./test_nccl_wrappers
 extern volatile int ckpt_pending;
- 
+
 #define TEST_COMM ((ncclComm_t)0x1)
 #define TEST_COMM_2 ((ncclComm_t)0x2)
 
@@ -21,7 +21,7 @@ void get_or_create_group_test(ncclComm_t comm) {
     printf("get_or_create_group: PASS\n");
 }
 
-void reset_groups_test(ncclComm_t comm){
+void reset_groups_test(ncclComm_t comm) {
     reset_groups();
     group_entry_t *g = get_or_create_group(comm);
     g->seq = 10;
@@ -63,7 +63,7 @@ void increment_seq_and_wait_ckpt_test(ncclComm_t comm) {
     printf("increment_seq_and_wait (blocks at target): PASS\n");
 }
 
-void multi_group_test(ncclComm_t comm1, ncclComm_t comm2){
+void multi_group_test(ncclComm_t comm1, ncclComm_t comm2) {
     reset_groups();
     ckpt_pending = 1;
 
@@ -100,7 +100,7 @@ void multi_group_test(ncclComm_t comm1, ncclComm_t comm2){
 }
 
 int main() {
-    
+
     get_or_create_group_test(TEST_COMM);
     reset_groups_test(TEST_COMM);
     increment_seq_and_wait_nockpt_test(TEST_COMM);
@@ -108,5 +108,4 @@ int main() {
     multi_group_test(TEST_COMM, TEST_COMM_2);
     printf("\nAll tests passed.\n");
     return 0;
-
 }

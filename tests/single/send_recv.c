@@ -5,31 +5,32 @@
  * Compile: nvcc -o send_recv_test send_recv_test.c -lnccl
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-#define CUDA_CHECK(cmd) do { \
-    cudaError_t e = cmd; \
-    if (e != cudaSuccess) { \
-        printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-        exit(1); \
-    } \
-} while(0)
+#define CUDA_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        cudaError_t e = cmd;                                                                       \
+        if (e != cudaSuccess) {                                                                    \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
-#define NCCL_CHECK(cmd) do { \
-    ncclResult_t r = cmd; \
-    if (r != ncclSuccess) { \
-        printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r)); \
-        exit(1); \
-    } \
-} while(0)
+#define NCCL_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        ncclResult_t r = cmd;                                                                      \
+        if (r != ncclSuccess) {                                                                    \
+            printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
 #define COUNT 1024
 
-int main(void)
-{
+int main(void) {
     CUDA_CHECK(cudaSetDevice(0));
 
     int rank = 0;
@@ -44,7 +45,8 @@ int main(void)
     CUDA_CHECK(cudaMalloc((void **)&recv_buf, COUNT * sizeof(float)));
 
     float *h_send = (float *)malloc(COUNT * sizeof(float));
-    for (int i = 0; i < COUNT; i++) h_send[i] = (float)i;
+    for (int i = 0; i < COUNT; i++)
+        h_send[i] = (float)i;
     CUDA_CHECK(cudaMemcpy(send_buf, h_send, COUNT * sizeof(float), cudaMemcpyHostToDevice));
 
     NCCL_CHECK(ncclGroupStart());

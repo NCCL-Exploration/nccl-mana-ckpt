@@ -11,28 +11,30 @@
  *           Use msg_count=1 for single message, msg_count>1 for multi.
  */
 
-#include <stdio.h>
-#include <unistd.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-#define CUDA_CHECK(cmd) do { \
-    cudaError_t e = cmd; \
-    if (e != cudaSuccess) { \
-        printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-        exit(1); \
-    } \
-} while(0)
+#define CUDA_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        cudaError_t e = cmd;                                                                       \
+        if (e != cudaSuccess) {                                                                    \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
-#define NCCL_CHECK(cmd) do { \
-    ncclResult_t r = cmd; \
-    if (r != ncclSuccess) { \
-        printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r)); \
-        exit(1); \
-    } \
-} while(0)
+#define NCCL_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        ncclResult_t r = cmd;                                                                      \
+        if (r != ncclSuccess) {                                                                    \
+            printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
 int test_id, num_msgs;
 size_t count;
@@ -45,8 +47,7 @@ float *h_send;
  * Initialize NCCL communicator, CUDA stream, device buffers,
  * and populate send data.
  */
-void setup(void)
-{
+void setup(void) {
     int rank = 0;
     CUDA_CHECK(cudaSetDevice(0));
     NCCL_CHECK(ncclCommInitAll(&comm, 1, &rank));
@@ -60,16 +61,15 @@ void setup(void)
         h_send[i] = (float)(test_id + i);
     CUDA_CHECK(cudaMemcpy(send_buff, h_send, count * sizeof(float), cudaMemcpyHostToDevice));
 
-    printf("[TEST] Test %d starting. Msg Count: %d, Size: %zu KB\n",
-           test_id, num_msgs, (count * sizeof(float)) / 1024);
+    printf("[TEST] Test %d starting. Msg Count: %d, Size: %zu KB\n", test_id, num_msgs,
+           (count * sizeof(float)) / 1024);
 }
 
 /**
  * Copy recv buffer back to host and compare against sent data.
  * Returns the number of mismatches (0 on success).
  */
-int verify(void)
-{
+int verify(void) {
     float *h_recv = (float *)malloc(count * sizeof(float));
     CUDA_CHECK(cudaMemcpy(h_recv, recv_buff, count * sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -92,8 +92,7 @@ int verify(void)
 }
 
 /** Free device buffers, host buffer, and destroy NCCL communicator. */
-void teardown(void)
-{
+void teardown(void) {
     CUDA_CHECK(cudaFree(send_buff));
     CUDA_CHECK(cudaFree(recv_buff));
     free(h_send);
@@ -101,8 +100,7 @@ void teardown(void)
 }
 
 /** Issue one grouped send/recv pair to avoid deadlock. */
-void send_recv_grouped(void)
-{
+void send_recv_grouped(void) {
     NCCL_CHECK(ncclGroupStart());
     NCCL_CHECK(ncclSend(send_buff, count, ncclFloat, 0, comm, stream));
     NCCL_CHECK(ncclRecv(recv_buff, count, ncclFloat, 0, comm, stream));
@@ -110,16 +108,14 @@ void send_recv_grouped(void)
 }
 
 /** Send/recv all messages and synchronize. */
-void send_recv_all(void)
-{
+void send_recv_all(void) {
     for (int i = 0; i < num_msgs; i++)
         send_recv_grouped();
     CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 /** Test 1: Baseline — send/recv all messages and verify. */
-int basic_p2p(void)
-{
+int basic_p2p(void) {
     setup();
     send_recv_all();
     printf("[TEST] Test 1: Communication complete.\n");
@@ -129,8 +125,7 @@ int basic_p2p(void)
 }
 
 /** Test 2: Complete all comms, then sleep to allow post-completion checkpoint. */
-int post_ckpt_p2p(void)
-{
+int post_ckpt_p2p(void) {
     setup();
     send_recv_all();
     printf("[TEST] Test 2: Messaging finished. Sleeping 20s for post-ckpt...\n");
@@ -141,8 +136,7 @@ int post_ckpt_p2p(void)
 }
 
 /** Test 3: Sleep before NCCL init to allow pre-init checkpoint, then run comms. */
-int pre_init_ckpt_p2p(void)
-{
+int pre_init_ckpt_p2p(void) {
     printf("[TEST] Test 3: Sleeping 10s before NCCL init...\n");
     sleep(10);
     setup();
@@ -157,8 +151,7 @@ int pre_init_ckpt_p2p(void)
  * Test 4: Send all messages, sleep to allow in-transit checkpoint,
  * then post matching receives. Use msg_count arg for single vs multi.
  */
-int in_transit_p2p(void)
-{
+int in_transit_p2p(void) {
     setup();
 
     printf("[TEST] Test %d: Sending %d messages...\n", test_id, num_msgs);
@@ -180,8 +173,7 @@ int in_transit_p2p(void)
     return errors;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_id> [msg_count] [size_kb]\n", argv[0]);
         printf("Tests:\n");
@@ -198,12 +190,16 @@ int main(int argc, char *argv[])
     count = (size_kb * 1024) / sizeof(float);
 
     switch (test_id) {
-        case 1: return basic_p2p();
-        case 2: return post_ckpt_p2p();
-        case 3: return pre_init_ckpt_p2p();
-        case 4: return in_transit_p2p();
-        default:
-            fprintf(stderr, "Unknown test_id: %d\n", test_id);
-            return 1;
+    case 1:
+        return basic_p2p();
+    case 2:
+        return post_ckpt_p2p();
+    case 3:
+        return pre_init_ckpt_p2p();
+    case 4:
+        return in_transit_p2p();
+    default:
+        fprintf(stderr, "Unknown test_id: %d\n", test_id);
+        return 1;
     }
 }

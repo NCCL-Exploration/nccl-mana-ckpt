@@ -130,6 +130,21 @@ obj/dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	@mkdir -p obj
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
+CLANG_FORMAT ?= clang-format
+CLANG_FORMAT_BIN := $(shell command -v $(CLANG_FORMAT) 2>/dev/null || echo "npx -y clang-format")
+FORMAT_FILES := $(shell find src include tests \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.cu" \) -not -path "*/dmtcp/*")
+
+.PHONY: format lint clean
+
+format:
+	@echo "Formatting codebase (ignoring submodules)..."
+	$(CLANG_FORMAT_BIN) -i $(FORMAT_FILES)
+
+lint:
+	@echo "Checking code format (ignoring submodules)..."
+	@$(CLANG_FORMAT_BIN) --dry-run --Werror $(FORMAT_FILES)
+
 clean:
 	cd tests && make clean
 	rm -rf bin/ obj/ *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers
+
