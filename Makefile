@@ -130,6 +130,19 @@ obj/dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	@mkdir -p obj
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
+.PHONY: format-python lint-python clean
+
+format-python:
+	@echo "Formatting Python files with uv, ruff, and black..."
+	uv run ruff check --fix .
+	uv run black .
+
+lint-python:
+	@echo "Checking Python formatting with uv, ruff, and black..."
+	uv run ruff check .
+	uv run black --check .
+
 clean:
 	cd tests && make clean
 	rm -rf bin/ obj/ *.dmtcp *.temp dmtcp_coordinator*.json dmtcp_restart_script*.sh *.o ckpt_*_files src/*.o src/*.so test_nccl_wrappers
+
