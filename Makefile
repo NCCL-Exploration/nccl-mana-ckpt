@@ -134,15 +134,25 @@ CLANG_FORMAT ?= clang-format
 CLANG_FORMAT_BIN := $(shell command -v $(CLANG_FORMAT) 2>/dev/null || echo "npx -y clang-format")
 FORMAT_FILES := $(shell find src include tests \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.cu" \) -not -path "*/dmtcp/*")
 
-.PHONY: format lint clean
+.PHONY format-clang lint-clang format-python lint-python clean
 
-format:
+format-clang:
 	@echo "Formatting codebase (ignoring submodules)..."
 	$(CLANG_FORMAT_BIN) -i $(FORMAT_FILES)
 
-lint:
+lint-clang:
 	@echo "Checking code format (ignoring submodules)..."
 	@$(CLANG_FORMAT_BIN) --dry-run --Werror $(FORMAT_FILES)
+  
+ format-python:
+	@echo "Formatting Python files with uv, ruff, and black..."
+	uv run ruff check --fix .
+	uv run black .
+
+lint-python:
+	@echo "Checking Python formatting with uv, ruff, and black..."
+	uv run ruff check .
+	uv run black --check .
 
 clean:
 	cd tests && make clean
