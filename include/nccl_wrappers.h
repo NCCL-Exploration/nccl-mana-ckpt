@@ -34,6 +34,9 @@ void init_rank_info(ncclComm_t comm);
 ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank);
 ncclResult_t ncclCommDestroy(ncclComm_t comm);
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int nGpus, const int *devList);
+ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank);
+ncclResult_t ncclCommCount(const ncclComm_t comm, int *count);
+ncclResult_t ncclGetUniqueId(ncclUniqueId *uniqueId);
 ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int *flag, int64_t *pending);
 
 ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,

@@ -47,6 +47,9 @@ static ncclResult_t (*real_ncclCommInitAll)(ncclComm_t *, int, const int *) = NU
 static ncclResult_t (*real_ncclCommDestroy)(ncclComm_t) = NULL;
 static ncclResult_t (*real_ncclScatter)(const void *, void *, size_t, ncclDataType_t, int,
                                         ncclComm_t, cudaStream_t) = NULL;
+static ncclResult_t (*real_ncclCommUserRank)(const ncclComm_t, int *) = NULL;
+static ncclResult_t (*real_ncclCommCount)(const ncclComm_t, int *) = NULL;
+static ncclResult_t (*real_ncclGetUniqueId)(ncclUniqueId *) = NULL;
 
 #define LOAD_SYM(name)                                                                             \
     if (!real_##name)                                                                              \
@@ -440,6 +443,30 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     return r;
 }
 
+ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
+    LOAD_SYM(ncclCommUserRank);
+    if (real_ncclCommUserRank) {
+        return real_ncclCommUserRank(comm, rank);
+    }
+    return ncclInvalidUsage;
+}
+
+ncclResult_t ncclCommCount(const ncclComm_t comm, int *count) {
+    LOAD_SYM(ncclCommCount);
+    if (real_ncclCommCount) {
+        return real_ncclCommCount(comm, count);
+    }
+    return ncclInvalidUsage;
+}
+
+ncclResult_t ncclGetUniqueId(ncclUniqueId *uniqueId) {
+    LOAD_SYM(ncclGetUniqueId);
+    if (real_ncclGetUniqueId) {
+        return real_ncclGetUniqueId(uniqueId);
+    }
+    return ncclInvalidUsage;
+}
+
 void clear_wrapper_pointers() {
     real_ncclSend = NULL;
     real_ncclRecv = NULL;
@@ -453,4 +480,7 @@ void clear_wrapper_pointers() {
     real_ncclCommInitAll = NULL;
     real_ncclScatter = NULL;
     real_ncclCommDestroy = NULL;
+    real_ncclCommUserRank = NULL;
+    real_ncclCommCount = NULL;
+    real_ncclGetUniqueId = NULL;
 }
