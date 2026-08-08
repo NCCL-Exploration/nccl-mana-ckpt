@@ -13,44 +13,46 @@
  *   Test 4: In-transit — send all, sleep for ckpt, then recv all.
  */
 
-#include <stdio.h>
-#include <unistd.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-#define CUDA_CHECK(cmd) do { \
-    cudaError_t e = cmd; \
-    if (e != cudaSuccess) { \
-        printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-        exit(1); \
-    } \
-} while(0)
+#define CUDA_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        cudaError_t e = cmd;                                                                       \
+        if (e != cudaSuccess) {                                                                    \
+            printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
-#define NCCL_CHECK(cmd) do { \
-    ncclResult_t r = cmd; \
-    if (r != ncclSuccess) { \
-        printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r)); \
-        exit(1); \
-    } \
-} while(0)
+#define NCCL_CHECK(cmd)                                                                            \
+    do {                                                                                           \
+        ncclResult_t r = cmd;                                                                      \
+        if (r != ncclSuccess) {                                                                    \
+            printf("NCCL error %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(r));           \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
 /* ── Per-GPU state ────────────────────────────────────────────────── */
 struct GpuCtx {
-    ncclComm_t   comm;
+    ncclComm_t comm;
     cudaStream_t stream;
-    float       *send_buf;    /* device */
-    float       *recv_buf;    /* device */
-    float       *h_send;      /* host mirror of send_buf */
+    float *send_buf; /* device */
+    float *recv_buf; /* device */
+    float *h_send;   /* host mirror of send_buf */
 };
 
 /* ── Globals ──────────────────────────────────────────────────────── */
-static int       test_id;
-static int       num_msgs;
-static size_t    count;       /* number of floats per message */
-static int       num_gpus;
-static GpuCtx   *gpu;        /* array[num_gpus] */
+static int test_id;
+static int num_msgs;
+static size_t count; /* number of floats per message */
+static int num_gpus;
+static GpuCtx *gpu; /* array[num_gpus] */
 
 /* ── Setup / Teardown ─────────────────────────────────────────────── */
 
@@ -58,8 +60,7 @@ static GpuCtx   *gpu;        /* array[num_gpus] */
  * Initialize N communicators with ncclCommInitAll, then create per-GPU
  * streams, device buffers, and host send mirrors.
  */
-void setup(void)
-{
+void setup(void) {
     /* --- communicators ------------------------------------------------ */
     ncclComm_t *comms = new ncclComm_t[num_gpus];
 
@@ -94,15 +95,15 @@ void setup(void)
         for (size_t j = 0; j < count; j++)
             gpu[i].h_send[j] = (float)(i * 1000 + j);
 
-        CUDA_CHECK(cudaMemcpy(gpu[i].send_buf, gpu[i].h_send,
-                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(gpu[i].send_buf, gpu[i].h_send, count * sizeof(float),
+                              cudaMemcpyHostToDevice));
     }
 
     delete[] comms;
     delete[] dev_list;
 
-    printf("[SETUP] Test %d starting. GPUs: %d, Msgs: %d, Size: %zu KB each\n",
-           test_id, num_gpus, num_msgs, (count * sizeof(float)) / 1024);
+    printf("[SETUP] Test %d starting. GPUs: %d, Msgs: %d, Size: %zu KB each\n", test_id, num_gpus,
+           num_msgs, (count * sizeof(float)) / 1024);
 }
 
 /**
@@ -111,16 +112,15 @@ void setup(void)
  *   so gpu[i] should have received from gpu[(i - 1 + N) % N].
  * Returns total number of mismatches across all GPUs.
  */
-int verify(void)
-{
+int verify(void) {
     int total_errors = 0;
 
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
 
         float *h_recv = (float *)malloc(count * sizeof(float));
-        CUDA_CHECK(cudaMemcpy(h_recv, gpu[i].recv_buf,
-                              count * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(
+            cudaMemcpy(h_recv, gpu[i].recv_buf, count * sizeof(float), cudaMemcpyDeviceToHost));
 
         int sender = (i - 1 + num_gpus) % num_gpus;
         int errors = 0;
@@ -128,8 +128,8 @@ int verify(void)
             float expected = (float)(sender * 1000 + j);
             if (h_recv[j] != expected) {
                 if (errors < 5)
-                    printf("[GPU %d] Error at %zu: expected %f (from GPU %d), got %f\n",
-                           i, j, expected, sender, h_recv[j]);
+                    printf("[GPU %d] Error at %zu: expected %f (from GPU %d), got %f\n", i, j,
+                           expected, sender, h_recv[j]);
                 errors++;
             }
         }
@@ -147,8 +147,7 @@ int verify(void)
 }
 
 /** Free all per-GPU resources and destroy communicators. */
-void teardown(void)
-{
+void teardown(void) {
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
         CUDA_CHECK(cudaFree(gpu[i].send_buf));
@@ -167,8 +166,7 @@ void teardown(void)
  * Issue one grouped ring send/recv across all GPUs.
  * gpu[i] sends to gpu[(i+1) % N] and receives from gpu[(i-1+N) % N].
  */
-void send_recv_ring(void)
-{
+void send_recv_ring(void) {
     NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < num_gpus; i++) {
         int dst = (i + 1) % num_gpus;
@@ -180,8 +178,7 @@ void send_recv_ring(void)
 }
 
 /** Synchronize all GPU streams. */
-void sync_all(void)
-{
+void sync_all(void) {
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
         CUDA_CHECK(cudaStreamSynchronize(gpu[i].stream));
@@ -189,8 +186,7 @@ void sync_all(void)
 }
 
 /** Send/recv all messages (ring) and synchronize. */
-void send_recv_all(void)
-{
+void send_recv_all(void) {
     for (int m = 0; m < num_msgs; m++)
         send_recv_ring();
     sync_all();
@@ -199,8 +195,7 @@ void send_recv_all(void)
 /* ── Test Cases ───────────────────────────────────────────────────── */
 
 /** Test 1: Baseline — ring send/recv all messages and verify. */
-int basic_p2p(void)
-{
+int basic_p2p(void) {
     setup();
     send_recv_all();
     printf("[TEST 1] Ring communication complete.\n");
@@ -210,8 +205,7 @@ int basic_p2p(void)
 }
 
 /** Test 2: Complete all comms, then sleep to allow post-completion checkpoint. */
-int post_ckpt_p2p(void)
-{
+int post_ckpt_p2p(void) {
     setup();
     send_recv_all();
     printf("[TEST 2] Messaging finished. Sleeping 20s for post-ckpt...\n");
@@ -222,8 +216,7 @@ int post_ckpt_p2p(void)
 }
 
 /** Test 3: Sleep before NCCL init to allow pre-init checkpoint, then run comms. */
-int pre_init_ckpt_p2p(void)
-{
+int pre_init_ckpt_p2p(void) {
     printf("[TEST 3] Sleeping 10s before NCCL init...\n");
     sleep(10);
     setup();
@@ -244,8 +237,7 @@ int pre_init_ckpt_p2p(void)
  * ncclGroup call, which deadlocks — NCCL requires paired send/recv
  * within the same group to make progress.
  */
-int in_transit_p2p(void)
-{
+int in_transit_p2p(void) {
     setup();
 
     /* Post all ring send+recv — these are non-blocking (async on streams) */
@@ -272,8 +264,7 @@ int in_transit_p2p(void)
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_id> [msg_count] [size_kb] [num_gpus]\n", argv[0]);
         printf("Tests:\n");
@@ -284,7 +275,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    test_id  = atoi(argv[1]);
+    test_id = atoi(argv[1]);
     num_msgs = (argc >= 3) ? atoi(argv[2]) : 1;
     int size_kb = (argc >= 4) ? atoi(argv[3]) : 4;
     count = (size_kb * 1024) / sizeof(float);
@@ -299,20 +290,24 @@ int main(int argc, char *argv[])
         return 1;
     }
     if (num_gpus > available_gpus) {
-        fprintf(stderr, "Error: requested %d GPUs but only %d available\n",
-                num_gpus, available_gpus);
+        fprintf(stderr, "Error: requested %d GPUs but only %d available\n", num_gpus,
+                available_gpus);
         return 1;
     }
 
     printf("[MAIN] Using %d GPUs (of %d available)\n", num_gpus, available_gpus);
 
     switch (test_id) {
-        case 1: return basic_p2p();
-        case 2: return post_ckpt_p2p();
-        case 3: return pre_init_ckpt_p2p();
-        case 4: return in_transit_p2p();
-        default:
-            fprintf(stderr, "Unknown test_id: %d\n", test_id);
-            return 1;
+    case 1:
+        return basic_p2p();
+    case 2:
+        return post_ckpt_p2p();
+    case 3:
+        return pre_init_ckpt_p2p();
+    case 4:
+        return in_transit_p2p();
+    default:
+        fprintf(stderr, "Unknown test_id: %d\n", test_id);
+        return 1;
     }
 }

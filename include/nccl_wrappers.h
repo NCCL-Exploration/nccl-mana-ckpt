@@ -1,9 +1,9 @@
 #ifndef NCCL_WRAPPERS_H
 #define NCCL_WRAPPERS_H
 
+#include "inflight.h"
 #include <nccl.h>
 #include <stdint.h>
-#include "inflight.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +22,7 @@ typedef struct {
     int64_t target;
 } group_entry_t;
 
-group_entry_t* get_or_create_group(ncclComm_t comm);
+group_entry_t *get_or_create_group(ncclComm_t comm);
 void increment_seq_and_wait(ncclComm_t comm);
 void reset_groups();
 void clear_wrapper_pointers();
@@ -31,20 +31,31 @@ void clear_wrapper_pointers();
 void add_stream(cudaStream_t stream);
 void init_rank_info(ncclComm_t comm);
 
-ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
+ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank);
 ncclResult_t ncclCommDestroy(ncclComm_t comm);
-ncclResult_t ncclCommInitAll(ncclComm_t* comm, int nGpus, const int* devList);
-ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int* flag, int64_t* pending);
+ncclResult_t ncclCommInitAll(ncclComm_t *comm, int nGpus, const int *devList);
+ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int *flag, int64_t *pending);
 
-ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclGather_p2p(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclScatter_p2p(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,
+                           ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype,
+                        ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount,
+                           ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclGather_p2p(const void *sendbuff, void *recvbuff, size_t sendcount,
+                            ncclDataType_t datatype, int root, ncclComm_t comm,
+                            cudaStream_t stream);
+ncclResult_t ncclScatter_p2p(const void *sendbuff, void *recvbuff, size_t sendcount,
+                             ncclDataType_t datatype, int root, ncclComm_t comm,
+                             cudaStream_t stream);
+ncclResult_t ncclReduceScatter(const void *sendbuff, void *recvbuff, size_t recvcount,
+                               ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
+                               cudaStream_t stream);
 
-ncclResult_t call_real_ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t call_real_ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t call_real_ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype,
+                                int peer, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t call_real_ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int peer,
+                                ncclComm_t comm, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

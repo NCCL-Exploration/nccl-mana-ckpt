@@ -130,7 +130,19 @@ obj/dmtcp_kvdb_c.o: src/dmtcp_kvdb_c.cpp
 	@mkdir -p obj
 	${CXX} ${CXXFLAGS} -I${DMTCP_INCLUDE} -I${JALIB_INCLUDE} -I${DMTCP_SRC} -c -o $@ $<
 
-.PHONY: format-python lint-python clean
+CLANG_FORMAT ?= clang-format
+CLANG_FORMAT_BIN := $(shell command -v $(CLANG_FORMAT) 2>/dev/null || echo "npx -y clang-format")
+FORMAT_FILES := $(shell find src include tests \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.cu" \) -not -path "*/dmtcp/*")
+
+.PHONY format-clang lint-clang format-python lint-python clean
+
+format-clang:
+	@echo "Formatting codebase (ignoring submodules)..."
+	$(CLANG_FORMAT_BIN) -i $(FORMAT_FILES)
+
+lint-clang:
+	@echo "Checking code format (ignoring submodules)..."
+	@$(CLANG_FORMAT_BIN) --dry-run --Werror $(FORMAT_FILES)
 
 format-python:
 	@echo "Formatting Python files with uv, ruff, and black..."

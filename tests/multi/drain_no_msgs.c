@@ -10,31 +10,33 @@
  *   Run `make drain_no_msgs_check` in parent directory
  */
 
+#include <assert.h>
+#include <cuda_runtime.h>
+#include <mpi.h>
+#include <nccl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <assert.h>
-#include <mpi.h>
-#include <nccl.h>
-#include <cuda_runtime.h>
 
-#define CUDACHECK(cmd) do {                                 \
-    cudaError_t e = cmd;                                    \
-    if (e != cudaSuccess) {                                 \
-        fprintf(stderr, "CUDA error %d: %s (%s:%d)\n",     \
-                e, cudaGetErrorString(e),__FILE__,__LINE__);\
-        exit(1);                                            \
-    }                                                       \
-} while(0)
+#define CUDACHECK(cmd)                                                                             \
+    do {                                                                                           \
+        cudaError_t e = cmd;                                                                       \
+        if (e != cudaSuccess) {                                                                    \
+            fprintf(stderr, "CUDA error %d: %s (%s:%d)\n", e, cudaGetErrorString(e), __FILE__,     \
+                    __LINE__);                                                                     \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
-#define NCCLCHECK(cmd) do {                                 \
-    ncclResult_t r = cmd;                                   \
-    if (r != ncclSuccess) {                                 \
-        fprintf(stderr, "NCCL error %d: %s (%s:%d)\n",     \
-                r, ncclGetErrorString(r),__FILE__,__LINE__);\
-        exit(1);                                            \
-    }                                                       \
-} while(0)
+#define NCCLCHECK(cmd)                                                                             \
+    do {                                                                                           \
+        ncclResult_t r = cmd;                                                                      \
+        if (r != ncclSuccess) {                                                                    \
+            fprintf(stderr, "NCCL error %d: %s (%s:%d)\n", r, ncclGetErrorString(r), __FILE__,     \
+                    __LINE__);                                                                     \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
@@ -50,7 +52,8 @@ int main(int argc, char **argv) {
     CUDACHECK(cudaSetDevice(rank));
 
     ncclUniqueId id;
-    if (rank == 0) NCCLCHECK(ncclGetUniqueId(&id));
+    if (rank == 0)
+        NCCLCHECK(ncclGetUniqueId(&id));
     MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     ncclComm_t comm;
@@ -59,8 +62,7 @@ int main(int argc, char **argv) {
     cudaStream_t stream;
     CUDACHECK(cudaStreamCreate(&stream));
 
-    printf("[rank %d] NCCL initialized; posting no messages. [CHECKPOINT WINDOW]\n",
-           rank);
+    printf("[rank %d] NCCL initialized; posting no messages. [CHECKPOINT WINDOW]\n", rank);
     sleep(12);
 
     MPI_Barrier(MPI_COMM_WORLD);

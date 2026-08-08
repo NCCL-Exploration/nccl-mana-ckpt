@@ -1,7 +1,7 @@
 #include "inflight.h"
-#include <string.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* ── Local pending table ─────────────────────────────────────────── */
 
@@ -38,8 +38,8 @@ int drain_queue_push(int source, void *data, size_t bytes) {
         return 0;
     }
     drain_msg_t *slot = &q->msgs[q->tail];
-    slot->data   = data;
-    slot->bytes  = bytes;
+    slot->data = data;
+    slot->bytes = bytes;
     slot->source = source;
     q->tail = (q->tail + 1) % MAX_DRAIN_QUEUE;
     q->count++;
@@ -48,13 +48,15 @@ int drain_queue_push(int source, void *data, size_t bytes) {
 
 drain_msg_t *drain_queue_peek(int source) {
     drain_queue_t *q = &drain_queues[source];
-    if (q->count == 0) return NULL;
+    if (q->count == 0)
+        return NULL;
     return &q->msgs[q->head];
 }
 
 void drain_queue_pop(int source) {
     drain_queue_t *q = &drain_queues[source];
-    if (q->count == 0) return;
+    if (q->count == 0)
+        return;
     /* Free the host-side data buffer */
     if (q->msgs[q->head].data) {
         free(q->msgs[q->head].data);
