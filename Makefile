@@ -143,8 +143,8 @@ format-clang:
 lint-clang:
 	@echo "Checking code format (ignoring submodules)..."
 	@$(CLANG_FORMAT_BIN) --dry-run --Werror $(FORMAT_FILES)
-  
- format-python:
+
+format-python:
 	@echo "Formatting Python files with uv, ruff, and black..."
 	uv run ruff check --fix .
 	uv run black .
