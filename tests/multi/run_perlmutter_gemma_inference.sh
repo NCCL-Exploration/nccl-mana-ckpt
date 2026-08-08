@@ -15,6 +15,7 @@ cd $SLURM_SUBMIT_DIR
 
 set -euo pipefail
 
+module load pytorch 2>/dev/null || true
 module load cudatoolkit 2>/dev/null || true
 module load nccl 2>/dev/null || true
 
@@ -29,12 +30,14 @@ export NCCL_P2P_DISABLE=0
 export NCCL_NET_GDR_LEVEL=PHB
 export NCCL_DEBUG=WARN
 export DMTCP_COORD_HOST=$(hostname)
+export UV_CACHE_DIR="${TMPDIR:-/tmp}/${USER:-mason}/uv_cache"
 PORT=7790
 
 echo "=============================================================="
-echo "==> Phase 0: Cleaning old checkpoint artifacts"
+echo "==> Phase 0: Cleaning old checkpoint artifacts and coordinator"
 echo "=============================================================="
 rm -rf ckpt_*.dmtcp ckpt_rank_* ckpt_*_files/ dmtcp_restart_script*.sh
+${DMTCP_CMD} --quit --quiet --coord-port $PORT 2>/dev/null || true
 
 echo "==> Launching DMTCP Coordinator on port $PORT"
 ${DMTCP_ROOT}/bin/dmtcp_coordinator --daemon -p $PORT
@@ -47,17 +50,18 @@ export MASTER_ADDR="127.0.0.1"
 export MASTER_PORT=29511
 
 PHASE1_START=$(date +%s%N)
+PYTHON_EXEC="python3"
 
 (
   export RANK=0
   export LOCAL_RANK=0
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      uv run python3 gemma_inference_test.py --num-prompts -1 &
+      $PYTHON_EXEC gemma_inference_test.py --num-prompts -1 &
       
   export RANK=1
   export LOCAL_RANK=1
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      uv run python3 gemma_inference_test.py --num-prompts -1 &
+      $PYTHON_EXEC gemma_inference_test.py --num-prompts -1 &
       
   wait
 ) &

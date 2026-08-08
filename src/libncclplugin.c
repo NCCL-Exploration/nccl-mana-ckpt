@@ -473,10 +473,10 @@ static void pre_init_cuda() {
         basename = basename ? basename + 1 : exec_path;
         if (strcmp(basename, "srun") == 0 || strcmp(basename, "mpirun") == 0 ||
             strcmp(basename, "mpiexec") == 0 || strcmp(basename, "bash") == 0 ||
-            strcmp(basename, "sh") == 0 || strcmp(basename, "orted") == 0 ||
-            strcmp(basename, "slurmd") == 0 || strcmp(basename, "slurmstepd") == 0 ||
-            strcmp(basename, "lower-half") == 0 || strncmp(basename, "mana_", 5) == 0 ||
-            strncmp(basename, "dmtcp_", 6) == 0) {
+            strcmp(basename, "sh") == 0 || strcmp(basename, "uv") == 0 ||
+            strcmp(basename, "orted") == 0 || strcmp(basename, "slurmd") == 0 ||
+            strcmp(basename, "slurmstepd") == 0 || strcmp(basename, "lower-half") == 0 ||
+            strncmp(basename, "mana_", 5) == 0 || strncmp(basename, "dmtcp_", 6) == 0) {
             printf("[NCCL Plugin] pre_init_cuda: skipping CUDA init for %s\n", basename);
             fflush(stdout);
             return;
