@@ -23,8 +23,8 @@ extern volatile int ckpt_pending;
 
 /* group_entry_t is defined in nccl_wrappers.h */
 // Might have to make it dynamically allocated at some point
-#define NUM_GROUPS 5
-static group_entry_t groups[NUM_GROUPS]; // We need to change it to a Set at some point
+#define NUM_GROUPS 64
+static group_entry_t groups[NUM_GROUPS];
 
 static ncclResult_t (*real_ncclSend)(const void *, size_t, ncclDataType_t, int, ncclComm_t,
                                      cudaStream_t) = NULL;
@@ -442,13 +442,21 @@ void reset_groups() {
  * libncclplugin.c to tear down the communicator before checkpoint.
  */
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
-    ncclComm_t live = g_comm;
-    if (live == NULL) {
+    ncclComm_t target = comm ? comm : g_comm;
+    if (target == NULL) {
         return ncclSuccess;
     }
+    for (int i = 0; i < NUM_GROUPS; i++) {
+        if (groups[i].comm == target) {
+            groups[i].comm = NULL;
+            groups[i].seq = 0;
+            groups[i].target = -1;
+            break;
+        }
+    }
     LOAD_SYM(ncclCommDestroy);
-    ncclResult_t r = real_ncclCommDestroy(live);
-    if (live == g_comm) {
+    ncclResult_t r = real_ncclCommDestroy(target);
+    if (target == g_comm) {
         g_comm = NULL;
     }
     return r;
