@@ -233,7 +233,7 @@ static void prepare_collective(ncclComm_t comm, cudaStream_t stream) {
 ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count,
                            ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
                            cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    prepare_collective(comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
     while (g_comm == NULL) {
         usleep(100);
@@ -247,7 +247,7 @@ ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count,
 ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,
                            ncclDataType_t datatype, int root, ncclComm_t comm,
                            cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    prepare_collective(comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
     while (g_comm == NULL) {
         usleep(100);
@@ -260,25 +260,27 @@ ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,
 
 ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype,
                         ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    prepare_collective(comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
     while (g_comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclReduce);
     int ret = real_ncclReduce(sendbuff, recvbuff, count, datatype, op, root, g_comm, stream);
+    DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
 
 ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount,
                            ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    prepare_collective(comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
     while (g_comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclAllGather);
     int ret = real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, g_comm, stream);
+    DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
 
@@ -406,7 +408,7 @@ ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t sendcount,
 ncclResult_t ncclReduceScatter(const void *sendbuff, void *recvbuff, size_t recvcount,
                                ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
                                cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    prepare_collective(comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
     while (g_comm == NULL) {
         usleep(100);
