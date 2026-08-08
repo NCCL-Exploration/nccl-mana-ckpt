@@ -179,8 +179,8 @@ ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatyp
     while (g_comm == NULL) {
         usleep(100);
     }
-    // Call plugin helpers to track state
-    init_rank_info(g_comm);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    init_rank_info(active_comm);
     add_stream(stream);
 
     // Local tracking — no coordinator I/O on the hot path
@@ -189,7 +189,7 @@ ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatyp
     inflight_mark_send(g_my_rank, peer, bytes);
 
     LOAD_SYM(ncclSend);
-    int ret = real_ncclSend(sendbuff, count, datatype, peer, g_comm, stream);
+    int ret = real_ncclSend(sendbuff, count, datatype, peer, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
@@ -210,16 +210,16 @@ ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int
         return ncclSuccess;
     }
 
-    // Normal path — local tracking, no coordinator I/O
-    init_rank_info(g_comm);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    init_rank_info(active_comm);
     add_stream(stream);
 
     int rank = g_my_rank;
-    ncclCommUserRank(g_comm, &rank);
+    ncclCommUserRank(active_comm, &rank);
     inflight_mark_recv(peer, rank, count * get_nccl_type_size(datatype));
 
     LOAD_SYM(ncclRecv);
-    int ret = real_ncclRecv(recvbuff, count, datatype, peer, g_comm, stream);
+    int ret = real_ncclRecv(recvbuff, count, datatype, peer, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
@@ -233,13 +233,15 @@ static void prepare_collective(ncclComm_t comm, cudaStream_t stream) {
 ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count,
                            ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
                            cudaStream_t stream) {
-    prepare_collective(comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclAllReduce);
-    ncclResult_t ret = real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, g_comm, stream);
+    ncclResult_t ret =
+        real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
@@ -247,52 +249,56 @@ ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count,
 ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,
                            ncclDataType_t datatype, int root, ncclComm_t comm,
                            cudaStream_t stream) {
-    prepare_collective(comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclBroadcast);
-    int ret = real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, g_comm, stream);
+    int ret = real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
 
 ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype,
                         ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclReduce);
-    int ret = real_ncclReduce(sendbuff, recvbuff, count, datatype, op, root, g_comm, stream);
+    int ret = real_ncclReduce(sendbuff, recvbuff, count, datatype, op, root, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
 
 ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount,
                            ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclAllGather);
-    int ret = real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, g_comm, stream);
+    int ret = real_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
 
 ncclResult_t ncclGather(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype,
                         int root, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclGather);
-    int ret = real_ncclGather(sendbuff, recvbuff, count, datatype, root, g_comm, stream);
+    int ret = real_ncclGather(sendbuff, recvbuff, count, datatype, root, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
@@ -385,14 +391,15 @@ ncclResult_t ncclScatter_p2p(const void *sendbuff, void *recvbuff, size_t sendco
 
 ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t sendcount,
                          ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) {
-    prepare_collective(g_comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
-    init_rank_info(g_comm);
+    init_rank_info(active_comm);
     add_stream(stream);
-    increment_seq_and_wait(g_comm);
+    increment_seq_and_wait(active_comm);
 
     LOAD_SYM(ncclScatter);
     if (!real_ncclScatter) {
@@ -400,7 +407,7 @@ ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t sendcount,
         DMTCP_PLUGIN_ENABLE_CKPT();
         return ncclInvalidUsage;
     }
-    int ret = real_ncclScatter(sendbuff, recvbuff, sendcount, datatype, root, g_comm, stream);
+    int ret = real_ncclScatter(sendbuff, recvbuff, sendcount, datatype, root, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
@@ -408,13 +415,15 @@ ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t sendcount,
 ncclResult_t ncclReduceScatter(const void *sendbuff, void *recvbuff, size_t recvcount,
                                ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
                                cudaStream_t stream) {
-    prepare_collective(comm, stream);
+    ncclComm_t active_comm = comm ? comm : g_comm;
+    prepare_collective(active_comm, stream);
     DMTCP_PLUGIN_DISABLE_CKPT();
-    while (g_comm == NULL) {
+    while (g_comm == NULL && comm == NULL) {
         usleep(100);
     }
     LOAD_SYM(ncclReduceScatter);
-    int ret = real_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
+    int ret =
+        real_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, active_comm, stream);
     DMTCP_PLUGIN_ENABLE_CKPT();
     return ret;
 }
