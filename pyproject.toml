@@ -3,7 +3,16 @@ name = "nccl-mana-ckpt"
 version = "0.1.0"
 description = "Transparent GPU Checkpointing"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+]
+
+[project.optional-dependencies]
+transformers = [
+    "transformers>=4.38.0",
+]
 
 [tool.black]
 line-length = 100

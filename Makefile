@@ -134,7 +134,7 @@ CLANG_FORMAT ?= clang-format
 CLANG_FORMAT_BIN := $(shell command -v $(CLANG_FORMAT) 2>/dev/null || echo "npx -y clang-format")
 FORMAT_FILES := $(shell find src include tests \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.cu" \) -not -path "*/dmtcp/*")
 
-.PHONY format-clang lint-clang format-python lint-python clean
+.PHONY: format-clang lint-clang format-python lint-python clean
 
 format-clang:
 	@echo "Formatting codebase (ignoring submodules)..."
