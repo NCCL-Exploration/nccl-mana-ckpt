@@ -34,14 +34,18 @@ class RMSNorm(nn.Module):
 class RotaryEmbedding(nn.Module):
     """Rotary Position Embedding (RoPE) used in Gemma."""
 
-    def __init__(self, dim: int, max_position_embeddings: int = 2048, base: float = 10000.0):
+    def __init__(self, dim: int, base: float = 10000.0):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.dim = dim
+        self.base = base
 
     def forward(self, x: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        device = x.device
+        inv_freq = 1.0 / (
+            self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim)
+        )
+        t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb.cos(), emb.sin()
 
