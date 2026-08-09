@@ -16,13 +16,18 @@ extern ncclComm_t g_comm;
 extern volatile int ckpt_pending;
 
 // exposed types for group management in ncclwrappers
-typedef struct {
+typedef struct group_entry {
     ncclComm_t comm;
+    int rank;
+    int nranks;
     int64_t seq;
     int64_t target;
+    struct group_entry *next;
 } group_entry_t;
 
+group_entry_t *find_group(ncclComm_t comm);
 group_entry_t *get_or_create_group(ncclComm_t comm);
+void remove_group(ncclComm_t comm);
 void increment_seq_and_wait(ncclComm_t comm);
 void reset_groups();
 void clear_wrapper_pointers();
@@ -32,12 +37,21 @@ void add_stream(cudaStream_t stream);
 void init_rank_info(ncclComm_t comm);
 
 ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank);
+ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank,
+                                    ncclConfig_t *config);
+ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm,
+                           ncclConfig_t *config);
+ncclResult_t ncclCommFinalize(ncclComm_t comm);
+ncclResult_t ncclCommAbort(ncclComm_t comm);
 ncclResult_t ncclCommDestroy(ncclComm_t comm);
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int nGpus, const int *devList);
 ncclResult_t ncclIprobe(int source, int dest, ncclComm_t comm, int *flag, int64_t *pending);
 
 ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count,
                            ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count,
+                           ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
+                           cudaStream_t stream);
 ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype,
                         ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount,
