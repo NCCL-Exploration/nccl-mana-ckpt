@@ -5,7 +5,7 @@
 #SBATCH --mem=16G
 #SBATCH --gpus=2
 #SBATCH --nodes=1
-#SBATCH --time=00:15:00
+#SBATCH --time=00:30:00
 #SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
@@ -31,10 +31,10 @@ ulimit -c unlimited
 export DARSHAN_DISABLE=1
 module unload darshan 2>/dev/null || true
 
+module load cuda/13.1.1 2>/dev/null || true
 module load yale/StdEnv 2>/dev/null || true
-module load CUDA/12.8.0 2>/dev/null || true
 module load OpenMPI/5.0.3-GCC-13.3.0 2>/dev/null || true
-export NCCL_HOME=$HOME/nccl/build
+export NCCL_HOME=$HOME/nccl-2.29.2/build
 export LD_LIBRARY_PATH=$NCCL_HOME/lib:$LD_LIBRARY_PATH
 export CPATH=$NCCL_HOME/include:$CPATH
 
@@ -110,7 +110,7 @@ export NCCL_P2P_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_DMABUF_ENABLE=0
 export NCCL_NVLS_ENABLE=0
-export NCCL_SHM_DISABLE=0
+export NCCL_SHM_DISABLE=1
 export NCCL_IB_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
@@ -155,7 +155,7 @@ while true; do
   fi
   sleep 0.5
 done
-sleep 2
+sleep $CKPT_DELAY
 
 echo "Triggering checkpoint..."
 CKPT_START=$(date +%s%N)
