@@ -2,9 +2,10 @@
 #SBATCH -A p2026_0048_neu  
 #SBATCH --partition=b200-batch
 #SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
 #SBATCH --gpus=2
 #SBATCH --nodes=1
-#SBATCH --time=01:00:00
+#SBATCH --time=00:15:00
 #SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
