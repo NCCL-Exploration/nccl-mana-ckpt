@@ -120,8 +120,14 @@ def run_benchmark(script_path : Path, cur_iter : int) -> Path:
     """
     output_path : Path = script_path.parent / f"trial_{cur_iter}.json"
     result : CompletedProcess = run(
-            ["sbatch", "--wait", f"--export=OUTPUT={output_path}", str(script_path)],
+            [
+                "sbatch",
+                "--wait",
+                f"--export=ALL,OUTFILE={output_path}",
+                str(script_path)
+            ],
             capture_output = True,
+            cwd = script_path.parent,
             check = True
     )
     if not output_path.exists():
