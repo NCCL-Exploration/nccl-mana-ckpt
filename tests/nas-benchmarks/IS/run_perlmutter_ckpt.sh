@@ -249,6 +249,24 @@ fi
 JOB_DONE=$(date +%s%N)
 TOTAL_MS=$(((JOB_DONE - JOB_START) / 1000000))
 
+# Write data to given outfile in json format.
+cat > "${OUTFILE}" << EOF
+{
+  "phase1_ms": ${PHASE1_MS},
+  "ckpt_trigger_ms": ${CKPT_TRIGGER_MS},
+  "ckpt_total_ms": ${CKPT_TOTAL_MS},
+  "cuda_overhead_s": ${CUDA_TIME_S},
+  "nccl_overhead_s": ${NCCL_TIME_S},
+  "disk_time_s": ${DISK_TIME_S},
+  "disk_speed_mb_s": "${DISK_SPEED_MB_S}",
+  "ckpt_count": ${CKPT_COUNT},
+  "ckpt_size_mb": "${CKPT_SIZE_MB}",
+  "restart_ms": "${RESTART_MS}",
+  "total_ms": ${TOTAL_MS},
+  "result": "${RESULT}"
+}
+EOF
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║              CHECKPOINT PROFILING SUMMARY                   ║"
