@@ -1,111 +1,245 @@
+/*
+ * Host-only test for the collective sequence gate.
+ *
+ *   make tests/cc
+ *
+ * The gate decides when an application thread may issue its next collective
+ * while a checkpoint is pending. It is CONJUNCTIVE across communicators, and
+ * that is the property worth pinning down: a per-communicator gate deadlocks a
+ * program whose per-comm collective counts differ, because a rank told to
+ * advance one communicator may have a different one next in program order.
+ *
+ * tests/multi/cc_complex.c is exactly that program -- 1 AllReduce on comm_world,
+ * 2 on comm_A, 1 on comm_B per iteration -- so these cases model it directly.
+ */
+
 #include "nccl_wrappers.h"
+#include "vcomm.h"
 #include <assert.h>
-#include <pthread.h>
 #include <stdio.h>
-#include <unistd.h>
+#include <string.h>
 
-// gcc -o test_nccl_wrappers tests/seq_algorithm_test.c src/nccl_wrappers.c tests/seq_stubs.c -I
-// include -lpthread
-//./test_nccl_wrappers
-extern volatile int ckpt_pending;
+static int g_checks;
 
-#define TEST_COMM ((ncclComm_t)0x1)
-#define TEST_COMM_2 ((ncclComm_t)0x2)
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        g_checks++;                                                                                \
+        if (!(cond)) {                                                                             \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                        \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
 
-void get_or_create_group_test(ncclComm_t comm) {
-    reset_groups();
-    group_entry_t *g = get_or_create_group(comm);
-    assert(g->seq == 0);
-    assert(g->target == 0);
-    assert(get_or_create_group(comm) == g);
-    printf("get_or_create_group: PASS\n");
+static void registry_clear(void) {
+    int i;
+    for (i = 0; i < MAX_VCOMMS; i++)
+        vcomm_free(&g_vcomms[i]);
 }
 
-void reset_groups_test(ncclComm_t comm) {
-    reset_groups();
-    group_entry_t *g = get_or_create_group(comm);
-    g->seq = 10;
-    g->target = 5;
-    reset_groups();
-    g = get_or_create_group(comm);
-    assert(g->seq == 0);
-    assert(g->target == 0);
-    printf("reset_groups: PASS\n");
+static vcomm_t *add_comm(int seed, int64_t seq, int64_t target) {
+    uint8_t ident[VCOMM_IDENT_LEN];
+    vcomm_t *v = NULL;
+    size_t i;
+    ncclUniqueId id;
+
+    memset(&id, 0, sizeof(id));
+    for (i = 0; i < sizeof(id); i++)
+        ((char *)&id)[i] = (char)(seed * 7 + (int)i);
+    vcomm_ident_from_id(&id, ident);
+
+    if (vcomm_new(VCOMM_REMOTE, ident, &v) != VCOMM_OK)
+        return NULL;
+    v->nranks = 2;
+    v->rank = 0;
+    v->seq = seq;
+    v->target = target;
+    return v;
 }
 
-void increment_seq_and_wait_nockpt_test(ncclComm_t comm) {
-    reset_groups();
+/* nccl_gate_closed_locked() expects the seq lock held. */
+static int gate_closed(void) {
+    int closed;
+    nccl_seq_lock();
+    closed = nccl_gate_closed_locked();
+    nccl_seq_unlock();
+    return closed;
+}
+
+static int test_no_checkpoint_pending(void) {
+    registry_clear();
     ckpt_pending = 0;
-    increment_seq_and_wait(comm);
-    increment_seq_and_wait(comm);
-    assert(get_or_create_group(comm)->seq == 2);
-    printf("increment_seq_and_wait (no checkpoint): PASS\n");
+
+    /* Nothing may be held when no checkpoint is in flight, whatever the
+     * sequence numbers say. */
+    CHECK(add_comm(1, 5, 5) != NULL);
+    CHECK(!gate_closed());
+    CHECK(add_comm(2, 0, 0) != NULL);
+    CHECK(!gate_closed());
+
+    printf("gate open with no checkpoint pending: PASS\n");
+    return 0;
 }
 
-static void *test_dmtcp_thread(void *arg) {
-    usleep(100 * 1000);
+static int test_single_comm(void) {
+    vcomm_t *v;
+
+    registry_clear();
+    ckpt_pending = 1;
+
+    /* target == -1 means consensus has not run yet. That must count as
+     * at-target, so the frontier freezes the instant a checkpoint is requested
+     * rather than letting one more collective slip through. */
+    v = add_comm(1, 3, -1);
+    CHECK(v != NULL);
+    CHECK(gate_closed());
+
+    /* Behind target: this rank still owes progress, so it must be let through. */
+    v->target = 5;
+    CHECK(!gate_closed());
+
+    v->seq = 4;
+    CHECK(!gate_closed());
+
+    /* At target: held. */
+    v->seq = 5;
+    CHECK(gate_closed());
+
+    /* Overshoot, which the chase deliberately tolerates and absorbs in a later
+     * round. Still held. */
+    v->seq = 6;
+    CHECK(gate_closed());
+
+    printf("gate on a single communicator: PASS\n");
+    return 0;
+}
+
+/*
+ * The case that motivates the whole design. Rank holds three communicators; one
+ * is behind. A per-comm gate would hold a thread at comm_A because comm_A is at
+ * its target -- but the thread's next collective in program order is on comm_B,
+ * which is behind, so holding it deadlocks. The conjunctive gate lets it
+ * through.
+ */
+static int test_conjunctive(void) {
+    vcomm_t *world, *a, *b;
+
+    registry_clear();
+    ckpt_pending = 1;
+
+    world = add_comm(1, 12, 12);
+    a = add_comm(2, 24, 24);
+    b = add_comm(3, 10, 11); /* behind */
+    CHECK(world != NULL && a != NULL && b != NULL);
+
+    /* Some comm owes progress -> the thread may issue on ANY comm. */
+    CHECK(!gate_closed());
+
+    /* Once the laggard catches up, everything is held. */
+    b->seq = 11;
+    CHECK(gate_closed());
+
+    /* Any single comm falling behind reopens the gate, regardless of which. */
+    world->target = 13;
+    CHECK(!gate_closed());
+    world->seq = 13;
+    CHECK(gate_closed());
+
+    a->target = 26;
+    CHECK(!gate_closed());
+    a->seq = 26;
+    CHECK(gate_closed());
+
+    /* Unequal per-comm counts are the point: these targets are all different
+     * and all satisfied simultaneously, which a single global counter cannot
+     * express. */
+    CHECK(world->seq == 13 && a->seq == 26 && b->seq == 11);
+
+    printf("gate is conjunctive across communicators: PASS\n");
+    return 0;
+}
+
+static int test_local_clique_is_local(void) {
+    vcomm_t *v;
+    uint8_t ident[VCOMM_IDENT_LEN];
+
+    registry_clear();
+    ckpt_pending = 1;
+
+    /* A process-local clique has all its ranks in this process, so its target is
+     * whatever it has already reached -- it can never hold the gate open waiting
+     * for an absent peer. */
+    vcomm_ident_local(0, 0, ident);
+    CHECK(vcomm_new(VCOMM_LOCAL_CLIQUE, ident, &v) == VCOMM_OK);
+    v->nranks = 1;
+    v->rank = 0;
+    v->seq = 4;
+    v->target = 4;
+    CHECK(gate_closed());
+
+    printf("local clique does not stall the gate: PASS\n");
+    return 0;
+}
+
+static int test_empty_registry(void) {
+    registry_clear();
+    ckpt_pending = 1;
+    /* A process that has not created a communicator yet has nothing to drive to
+     * a cut, so it is held immediately and its checkpoint phases are all
+     * vacuous. Critically it still reaches every barrier -- that is asserted by
+     * the end-to-end pre-init checkpoint test, not here. */
+    CHECK(gate_closed());
+
     ckpt_pending = 0;
-    printf("DMTCP checkpoint complete, ckpt_pending set to 0\n");
-    return NULL;
+    CHECK(!gate_closed());
+
+    printf("empty registry: PASS\n");
+    return 0;
 }
 
-void increment_seq_and_wait_ckpt_test(ncclComm_t comm) {
-    reset_groups();
+static int test_reset_reopens(void) {
+    vcomm_t *v;
+
+    registry_clear();
     ckpt_pending = 1;
-    group_entry_t *g = get_or_create_group(comm);
-    g->seq = 3;
-    g->target = 3;
-    pthread_t tid;
-    pthread_create(&tid, NULL, test_dmtcp_thread, NULL);
-    increment_seq_and_wait(comm); /* dmtcp goes and checkpoints */
-    pthread_join(tid, NULL);
-    assert(g->seq == 4);
-    printf("increment_seq_and_wait (blocks at target): PASS\n");
+    v = add_comm(1, 9, 9);
+    CHECK(v != NULL);
+    CHECK(gate_closed());
+
+    /* What resume()/restart() do. Sequence state is cleared but identity is
+     * kept, and clearing ckpt_pending is what actually reopens the gate. */
+    vcomm_reset_seq();
+    ckpt_pending = 0;
+    CHECK(v->seq == 0);
+    CHECK(v->target == -1);
+    CHECK(!gate_closed());
+
+    printf("reset reopens the gate: PASS\n");
+    return 0;
 }
 
-void multi_group_test(ncclComm_t comm1, ncclComm_t comm2) {
-    reset_groups();
-    ckpt_pending = 1;
-
-    group_entry_t *g1 = get_or_create_group(comm1);
-    group_entry_t *g2 = get_or_create_group(comm2);
-
-    /* group 1 is at target, group 2 is behind */
-    g1->seq = 5;
-    g1->target = 5;
-    g2->seq = 3;
-    g2->target = 5;
-
-    /* group 2 is behind so increment should not block */
-    increment_seq_and_wait(comm2);
-    assert(g2->seq == 4);
-
-    /* group 1 should be unaffected */
-    assert(g1->seq == 5);
-
-    /* now group 2 is still behind, increment again */
-    increment_seq_and_wait(comm2);
-    assert(g2->seq == 5);
-
-    /* now both groups are at target, group 1 should block */
-    pthread_t tid;
-    pthread_create(&tid, NULL, test_dmtcp_thread, NULL);
-    increment_seq_and_wait(comm1);
-    pthread_join(tid, NULL);
-
-    assert(g1->seq == 6);
-    assert(g2->seq == 5); /* group 2 unaffected by group 1 unblocking */
-
-    printf("two independent groups: PASS\n");
+static int test_activity_starts_idle(void) {
+    /* The quiesce waits on this before the drain posts anything. */
+    CHECK(nccl_activity() == 0);
+    printf("activity count starts idle: PASS\n");
+    return 0;
 }
 
-int main() {
+int main(void) {
+    if (test_no_checkpoint_pending())
+        return 1;
+    if (test_single_comm())
+        return 1;
+    if (test_conjunctive())
+        return 1;
+    if (test_local_clique_is_local())
+        return 1;
+    if (test_empty_registry())
+        return 1;
+    if (test_reset_reopens())
+        return 1;
+    if (test_activity_starts_idle())
+        return 1;
 
-    get_or_create_group_test(TEST_COMM);
-    reset_groups_test(TEST_COMM);
-    increment_seq_and_wait_nockpt_test(TEST_COMM);
-    increment_seq_and_wait_ckpt_test(TEST_COMM);
-    multi_group_test(TEST_COMM, TEST_COMM_2);
-    printf("\nAll tests passed.\n");
+    printf("\nAll sequence-gate tests passed (%d checks).\n", g_checks);
     return 0;
 }

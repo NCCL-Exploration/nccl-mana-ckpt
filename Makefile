@@ -23,6 +23,20 @@ DRAIN_NO_MSGS_TIMEOUT ?= 45
 
 NCCL_HOME ?= $(NCCL_DIR)
 
+# <nccl.h> includes <cuda_runtime.h>, so the host-only gcc test targets need the
+# CUDA include path too (nvcc supplies it implicitly, plain gcc does not).
+# Resolution order: CUDA_HOME from the environment, else derived from the real
+# location of nvcc on PATH, else the conventional install prefix.
+NVCC_PATH := $(shell command -v nvcc 2>/dev/null)
+ifeq ($(origin CUDA_HOME),undefined)
+  ifneq ($(NVCC_PATH),)
+    CUDA_HOME := $(realpath $(dir $(realpath $(NVCC_PATH)))..)
+  else
+    CUDA_HOME := /usr/local/cuda
+  endif
+endif
+HOST_TEST_FLAGS = -I src -I include -I${DMTCP_INCLUDE} -I$(CUDA_HOME)/include -lpthread
+
 override CFLAGS += -I${DMTCP_INCLUDE} -I${NCCL_INCLUDE} -I./src -I/usr/lib/x86_64-linux-gnu/openmpi/include
 ifneq ($(NCCL_HOME),)
   override CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
@@ -88,8 +102,13 @@ cc_complex_check: ${LIBNAME}.so tests/multi/cc_complex
 	${MPICH_BIN}/mpirun -np 3 ${DMTCP_ROOT}/bin/dmtcp_launch -j --coord-port ${DEMO_PORT} --interval 8\
                 --with-plugin $$PWD/${LIBNAME}.so:${CUDA_PLUGIN} ./tests/multi/cc_complex
 
-tests/cc:
-	gcc -o test_nccl_wrappers tests/single/seq_algorithm_test.c src/nccl_wrappers.c tests/single/seq_stubs.c -I include -lpthread
+# Host-only unit tests: no GPU, no DMTCP, no NCCL runtime. Fastest feedback loop.
+tests/vcomm:
+	gcc -Wall -Wextra -o test_vcomm tests/single/vcomm_test.c src/vcomm.c $(HOST_TEST_FLAGS)
+	./test_vcomm
+
+tests/cc: tests/vcomm
+	gcc -o test_nccl_wrappers tests/single/seq_algorithm_test.c src/nccl_wrappers.c src/vcomm.c src/inflight.c tests/single/seq_stubs.c $(HOST_TEST_FLAGS)
 	./test_nccl_wrappers
 
 tests/single/single_gpu_test:
@@ -116,7 +135,7 @@ ${DMTCP_ROOT}/test/dmtcp1: ${DMTCP_ROOT}/test
 ${DMTCP_ROOT}/bin:
 	cd ${DMTCP_ROOT} && ./configure --disable-prgname-prefix && make -j
 
-OBJS = obj/libncclplugin.o obj/dmtcp_kvdb_c.o obj/nccl_wrappers.o obj/inflight.o
+OBJS = obj/libncclplugin.o obj/dmtcp_kvdb_c.o obj/nccl_wrappers.o obj/inflight.o obj/vcomm.o
 
 ${LIBNAME}.so: $(OBJS)
 	@mkdir -p bin

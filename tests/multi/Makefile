@@ -53,19 +53,19 @@ test4: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
 
 drain_send: drain_send.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 drain_recv: drain_recv.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 drain_no_msgs: drain_no_msgs.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 cc_simple: cc_simple.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 cc_complex: cc_complex.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 # --- Helper Macro ---
 define run_test
