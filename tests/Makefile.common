@@ -1,10 +1,24 @@
 CC = nvcc
 NCCL_HOME ?= $(NCCL_DIR)
-CFLAGS = -O3 -g -lnccl -lmpi -I../../include
+CFLAGS = -O3 -g -lnccl -I../../include
 ifneq ($(NCCL_HOME),)
-  CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib
+  CFLAGS += -I$(NCCL_HOME)/include -L$(NCCL_HOME)/lib -Xlinker -rpath=$(NCCL_HOME)/lib
 else
   CFLAGS += -L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib
+endif
+
+# MPI is needed only by the multi-process tests. Resolve it from mpicc on PATH
+# when MPI_HOME is unset, so a per-user MPI install works without editing paths;
+# targets that need it add $(MPI_FLAGS) rather than every target paying for it.
+MPICC_PATH := $(shell command -v mpicc 2>/dev/null)
+ifeq ($(origin MPI_HOME),undefined)
+  ifneq ($(MPICC_PATH),)
+    MPI_HOME := $(realpath $(dir $(realpath $(MPICC_PATH)))..)
+  endif
+endif
+MPI_FLAGS = -lmpi
+ifneq ($(MPI_HOME),)
+  MPI_FLAGS += -I$(MPI_HOME)/include -L$(MPI_HOME)/lib -Xlinker -rpath=$(MPI_HOME)/lib
 endif
 
 DMTCP_ROOT ?= ../../dmtcp
@@ -15,7 +29,18 @@ DMTCP_RESTART = $(DMTCP_ROOT)/bin/dmtcp_restart
 
 NCCL_PLUGIN = ../../bin/libncclplugin.so
 CUDA_PLUGIN = $(DMTCP_ROOT)/plugin/cuda/libdmtcp_cuda.so
-PLUGIN = $(NCCL_PLUGIN):$(CUDA_PLUGIN)
+
+# dmtcp_launch requires ABSOLUTE plugin paths: it hands the list to LD_PRELOAD in
+# the target process, and a relative path there is not resolved against this
+# directory. Passing relative paths silently loads neither plugin, which shows up
+# much later as a restart that cannot mmap the GPU regions.
+#
+# Order matters and is load-bearing. Forward events (PRESUSPEND) run in
+# registration order, so the NCCL drain and comm teardown happen before the CUDA
+# plugin snapshots the GPU; reverse events (RUNNING_AFTER) run in the opposite
+# order, so CUDA restores the context before the NCCL plugin rebuilds
+# communicators on it. Swapping these two entries breaks both directions.
+PLUGIN = $(abspath $(NCCL_PLUGIN)):$(abspath $(CUDA_PLUGIN))
 
 export NCCL_DEBUG=WARN
 

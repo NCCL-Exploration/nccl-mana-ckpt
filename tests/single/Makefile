@@ -40,7 +40,49 @@ single_gpu_test: single_gpu_test.c
 	nvcc ${CFLAGS} -o $@ $<
 
 multiproc: multiproc.c
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
+
+multicomm_test: multicomm_test.c
 	nvcc ${CFLAGS} -o $@ $<
+
+# Multi-communicator checkpoint/restart on a single GPU: three independent
+# one-rank communicators with unequal per-comm collective counts. This is the
+# single-GPU stand-in for tests/multi/cc_complex.c, which needs three GPUs.
+MULTICOMM_ITERS ?= 12
+MULTICOMM_CKPT_DELAY ?= 5
+multicomm: multicomm_test $(NCCL_PLUGIN)
+	@echo -e "${GREEN}==> Multi-communicator checkpoint/restart <==${NC}"; \
+	$(MAKE) kill; \
+	rm -f ckpt_*.dmtcp; \
+	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval 0 --with-plugin $(PLUGIN) \
+	  ./multicomm_test $(MULTICOMM_ITERS) > multicomm_run1.log 2>&1 & \
+	PID=$$!; \
+	sleep $(MULTICOMM_CKPT_DELAY); \
+	echo "Triggering checkpoint mid-run..."; \
+	$(DMTCP_CMD) --coord-port $(PORT) --checkpoint; \
+	wait $$PID; RC=$$?; \
+	sed -n '1,200p' multicomm_run1.log; \
+	if [ $$RC -ne 0 ]; then \
+		echo -e "${RED}FAIL: initial run exited $$RC${NC}"; exit 1; fi; \
+	if ! grep -q "^PASS multicomm" multicomm_run1.log; then \
+		echo -e "${RED}FAIL: initial run did not report PASS${NC}"; exit 1; fi; \
+	latest=$$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1); \
+	if [ -z "$$latest" ]; then \
+		echo -e "${RED}FAIL: no checkpoint image was written${NC}"; exit 1; fi; \
+	echo -e "${GREEN}--- Restarting from $$latest ---${NC}"; \
+	$(DMTCP_RESTART) --coord-port $(PORT) $$latest > multicomm_run2.log 2>&1; \
+	RC=$$?; \
+	sed -n '1,200p' multicomm_run2.log; \
+	if [ $$RC -ne 0 ]; then \
+		echo -e "${RED}FAIL: restart exited $$RC${NC}"; exit 1; fi; \
+	if ! grep -q "^PASS multicomm" multicomm_run2.log; then \
+		echo -e "${RED}FAIL: restarted run did not report PASS${NC}"; exit 1; fi; \
+	if ! grep -q "rebuild: comm .* rank 0/1" multicomm_run2.log; then \
+		echo -e "${RED}FAIL: no per-communicator rebuild in the restart log${NC}"; exit 1; fi; \
+	nrebuilt=$$(grep -c "rebuild: comm .* rank 0/1" multicomm_run2.log); \
+	if [ "$$nrebuilt" -ne 3 ]; then \
+		echo -e "${RED}FAIL: rebuilt $$nrebuilt communicators, expected 3${NC}"; exit 1; fi; \
+	echo -e "${GREEN}PASS: 3 communicators rebuilt and verified after restart${NC}"
 
 simple_test: simple_init_test $(NCCL_PLUGIN)
 	@echo -e "${GREEN}==> Running Simple Init Test <==${NC}"; \
@@ -107,7 +149,8 @@ $(DRIVER): $(DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
-	rm -f $(DRIVER) single_gpu_test multiproc send_recv simple_init_test
+	rm -f $(DRIVER) single_gpu_test multiproc send_recv simple_init_test multicomm_test
+	rm -f multicomm_run1.log multicomm_run2.log
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 clean simple_test
+.PHONY: all test_all test1 test2 test3 test4 clean simple_test multicomm
