@@ -18,10 +18,22 @@ dmtcp_restart_script*.sh
 **/nccl_test_driver
 test_nccl
 test_nccl_wrappers
-tests/drain_recv
-tests/drain_send
-tests/cc_simple
-tests/cc_complex
-tests/single_gpu_test
+test_vcomm
 test_nccl.c
+**/multicomm_test
+**/drain_recv
+**/drain_send
+**/drain_no_msgs
+**/cc_simple
+**/cc_complex
+**/single_gpu_test
+**/multiproc
+**/send_recv
+**/simple_init_test
+**/nccl_p2p_tests
+**/nccl_test_driver_multiple
+multicomm_run*.log
 
+# Agent files
+AGENTS.md
+CLAUDE.md
