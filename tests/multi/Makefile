@@ -13,6 +13,9 @@ GATHER_COUNT ?= 16
 GATHER_ROOT  ?= 0
 SCATTER_COUNT ?= 16
 SCATTER_ROOT  ?= 0
+COLLECTIVE_SCRIPT := ./test_aicr_ckpt.sh
+COLLECTIVES := test_allreduce
+SCENARIOS := PRE_COLLECTIVE STRAGGLING_RANK INFLIGHT POST_COLLECTIVE
 
 # --- Primary Entry Points ---
 all: $(DRIVER)
@@ -51,6 +54,28 @@ test3: $(DRIVER) $(NCCL_PLUGIN)
 # Test 4: In-transit checkpoint — async send+recv posted, no sync yet
 test4: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
+
+# Test NCCL collective operations (defined under COLLECTIVES):
+# Set the flags up.
+TEST_CC := gcc
+TEST_CFLAGS := -O2 -g -Wall -I. -I$(NCCL_HOME)/include -I$(CUDA_HOME)/include
+TEST_LDFLAGS := -L$(NCCL_HOME)/lib -L$(CUDA_HOME)/lib64 -lnccl -lcudart
+test_%: test_%.c test_collective_common.h
+	$(TEST_CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+# Test the collectives.
+test_collectives: $(COLLECTIVES)
+	@for c in $(COLLECTIVES); do \
+		for s in $(SCENARIOS); do \
+			echo "==> Running collective $$c for scenario $$s <=="; \
+			sbatch --wait $(COLLECTIVE_SCRIPT) $$c $$s; \
+			rc=$$?; \
+			if [ $$rc -ne 0 ]; then \
+				echo "FAILED: $$c $$s with exit code $$rc"; \
+				exit 1; \
+			fi; \
+		done; \
+	done
+	@echo "All $(words $(COLLECTIVES)) collectives across $(words $(SCENARIOS)) passed!"
 
 drain_send: drain_send.c
 	nvcc ${CFLAGS} -o $@ $<
@@ -109,5 +134,6 @@ $(P2P_DRIVER): $(P2P_DRIVER).cpp
 clean:
 	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv drain_no_msgs cc_simple cc_complex
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
+	rm -f $(COLLECTIVES)
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test test_collectives clean

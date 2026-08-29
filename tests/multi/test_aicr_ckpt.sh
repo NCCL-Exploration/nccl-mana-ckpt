@@ -1,23 +1,21 @@
 #!/bin/bash
-#SBATCH -A p2026_0048_neu  
 #SBATCH --partition=b200-batch
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --gpus=3
+#SBATCH --gpus=2
 #SBATCH --nodes=1
 #SBATCH --time=00:30:00
-#SBATCH -J collective_nccl_ckpt
+#SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
-
 export SLURM_CPU_BIND="cores"
 export UCX_MEM_EVENTS=n
 
 # Usage: sbatch test_aicr_ckpt.sh <test_binary> <marker_type> <timout_s>
 TEST_BIN=$1
 MARKER_TYPE=$2
-TIMEOUT_S=${3:-60}
-NRANKS=3
+NRANKS=${3:-3}
+TIMEOUT_S=${4:-60}
 
 set -euo pipefail
 ulimit -c unlimited
@@ -44,8 +42,7 @@ echo "====================================="
 
 # Paths — adjust if your layout differs
 SCRIPT_DIR=$SLURM_SUBMIT_DIR
-ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
-
+ROOT_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 DMTCP_ROOT=$ROOT_DIR/dmtcp
 
 DMTCP_LAUNCH=$DMTCP_ROOT/bin/dmtcp_launch
@@ -70,13 +67,21 @@ $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
 killall -9 dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
 
-# Create and switch to node-local NVMe /tmp directory to eliminate I/O bottleneck
+# Create a temporary directory to store output, and copy back.
 TMP_RUN_DIR="/tmp/dmtcp_job_${SLURM_JOB_ID:-local}"
 rm -rf "$TMP_RUN_DIR"
 mkdir -p "$TMP_RUN_DIR"
 cd "$TMP_RUN_DIR"
 FLAG_FILE="$TMP_RUN_DIR/collective_ckpt_fired_${SLURM_JOB_ID}.flag"
-
+ID_FILE="$TMP_RUN_DIR/collective_id_${SLURM_JOB_ID}.bin"
+RESULTS_DIR="$SCRIPT_DIR/results_${SLURM_JOB_ID}"
+mkdir -p "$RESULTS_DIR"
+copy_logs_back() {
+	cp -v "$TMP_RUN_DIR"/*.log "$RESULTS_DIR/" 2>/dev/null || true
+	cp -v "$TMP_RUN_DIR"/dmtcp_restart_script*.sh "$RESULTS_DIR/" 2>/dev/null || true
+}
+trap copy_logs_back EXIT
+ 	
 # Phase 1: Launch under DMTCP
 echo ""
 echo "==> Phase 1: Initial run with checkpoint"
@@ -103,6 +108,7 @@ PIDS=()
 for ((i=0; i<NRANKS; i++)); do
 	COLLECTIVE_TEST_SCENARIO="$MARKER_TYPE" \
 	COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE="$FLAG_FILE" \
+	COLLECTIVE_TEST_ID_FILE="$ID_FILE" \
 	$DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
 	--with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
 	"$SCRIPT_DIR/$TEST_BIN" $i $NRANKS > "pre_ckpt_rank${i}.log" 2>&1 &
@@ -126,7 +132,7 @@ wait_with_timeout() {
 # Wait for both processes to connect to coordinator
 check_peers() {
   local PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
-  [ "$PEERS" != "" ] && [ "$PEERS" -ge 3 ]
+  [ "$PEERS" != "" ] && [ "$PEERS" -ge "$NRANKS" ]
 }
 wait_with_timeout "all ranks to connect to coordinator" check_peers
 
@@ -139,36 +145,41 @@ check_all_markers() {
 wait_with_timeout "marker:$MARKER_TYPE on all $NRANKS ranks" check_all_markers
 
 echo "Triggering checkpoint..."
-$DMTCP_CMD --coord-port $PORT --checkpoint
-echo "Checkpoint triggered. Waiting for process to complete..."
+$DMTCP_CMD --coord-port $PORT --bcheckpoint
+echo "Checkpoint triggered with exit code [$?]. Waiting for process to complete..."
 touch "$FLAG_FILE"
-for pid in "${PIDS[@]}"; do wait pid || true; done
+for pid in "${PIDS[@]}"; do wait "$pid" || true; done
 
 # Phase 2: Restart from checkpoint
 # Restarts MUST go through "srun dmtcp_restart".
 $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
 sleep 1
-RESTART_PIDS=()
-for ((i=0; i<NRANKS; i++)); do
-  RESTART_SCRIPT=$(ls -t dmtcp_restart_script_${i}*.sh 2>/dev/null | head -1)
-  [ -z "$RESTART_SCRIPT" ] && { echo "FAIL: no restart script for rank $i"; exit 1; }
-  ./"$RESTART_SCRIPT" --coord-port $PORT > "post_ckpt_rank${i}.log" 2>&1 &
-  RESTART_PIDS+=($!)
-done
-for pid in "${RESTART_PIDS[@]}"; do wait "$pid" || true; done
-
+RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -n 1)
+if [ -n "$RESTART_SCRIPT" ]; then
+	./$RESTART_SCRIPT --coord-port $PORT >post_ckpt_all_ranks.log 2>&1 &
+	REST_PID=$!
+else
+	echo "No restart script found!"
+	exit 1
+fi
+echo "Waiting for restarted process to complete..."
+wait $REST_PID
+RESTART_RC=$?
+if [ $RESTART_RC -eq 0 ]; then
+	echo "PASS: Restart completed successfully"
+else
+	echo "FAIL: Restart failed (exit code $RESTART_RC)"
+	echo "--- post_ckpt_all_ranks.log ---"
+	cat post_ckpt_all_ranks.log
+	exit 1
+fi
 # Phase 3: Verify that all of the tests passed for each rank
-ALL_PASS=1
-for ((i=0; i<NRANKS; i++)); do
-	grep -q "PASS" "post_ckpt_rank{$i}" || {
-		echo "TEST FAIL: rank {i} did not pass post-restart."
-		ALL_PASS=0
-	}
-done
-
-if ["$ALL_PASS" -eq 1]; then
-	echo "TEST PASSED: tested $TEST_BIN $MARKER_TYPE"
+PASS_COUNT=$(grep -c "TEST FILE PASS" "post_ckpt_all_ranks.log" 2>/dev/null || echo 0)
+if [ "$PASS_COUNT" -eq "$NRANKS" ]; then
+	echo "TEST PASSED: tested $TEST_BIN $MARKER_TYPE ($PASS_COUNT/$NRANKS ranks passed)"
 	exit 0
 else
+	echo "TEST FAILED: tested $TEST_BIN $MARKER_TYPE (only $PASS_COUNT/$NRANKS ranks passed)"
+	cat "post_ckpt_all_ranks.log"
 	exit 1
 fi

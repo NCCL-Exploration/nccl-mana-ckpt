@@ -9,22 +9,22 @@
 #include <nccl.h>
 
 
-#define CUDACHECK(cudacmd) do {
-	cudaError_t e = (cudacmd);
-	if (e != cudaSuccess) {
-		fprintf(stderr, "CUDA error in %s:%d, error %s\n",
-			       	__FILE__, __LINE__, cudaGetErrorString(e));
-		exit(EXIT_FAILURE);
-	}
+#define CUDACHECK(cudacmd) do { \
+	cudaError_t e = (cudacmd); \
+	if (e != cudaSuccess) { \
+		fprintf(stderr, "CUDA error in %s:%d, error %s\n", \
+			       	__FILE__, __LINE__, cudaGetErrorString(e)); \
+		exit(EXIT_FAILURE); \
+	} \
 } while (0)
 
-#define NCCLCHECK(ncclcmd) do {
-	ncclResult_t e = (ncclcmd);
-	if (e != ncclSuccess) {
-		fprintf(stderr, "NCCL error in %s:%d, error %s\n",
-				__FILE__, __LINE__, ncclGetErrorString(e));
-		exit(EXIT_FAILURE);
-	}
+#define NCCLCHECK(ncclcmd) do { \
+	ncclResult_t e = (ncclcmd); \
+	if (e != ncclSuccess) { \
+		fprintf(stderr, "NCCL error in %s:%d, error %s\n", \
+				__FILE__, __LINE__, ncclGetErrorString(e)); \
+		exit(EXIT_FAILURE); \
+	} \
 } while (0)
 
 /*
@@ -45,7 +45,7 @@ static inline void getUniqueIdHelp(ncclUniqueId* id, int rank) {
 		fclose(fd);
 	} else {
 		FILE* fd;
-		while (fd = fopen(filepath, "rb") == NULL) usleep(1000);
+		while ((fd = fopen(filepath, "rb")) == NULL) usleep(1000);
 		fread(id, sizeof(*id), 1, fd);
 		fclose(fd);
 	}

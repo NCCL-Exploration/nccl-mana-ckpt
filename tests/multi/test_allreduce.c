@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
 	const char* test_scenario = getenv("COLLECTIVE_TEST_SCENARIO");
 	if (!test_scenario) test_scenario = "POST_COLLECTIVE";
 	const char* ckpt_fired_flag_path = getenv("COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE");
-	if (!ckpt_fired_flag_path) ckpt_fired_flag_path = "/tpm/collective_test_ckpt_fired.flag";
+	if (!ckpt_fired_flag_path) ckpt_fired_flag_path = "/tmp/collective_test_ckpt_fired.flag";
 	// Initialize CUDA device, NCCL unique ID, and communicator.
 	CUDACHECK(cudaSetDevice(rank));
 	ncclUniqueId Id;
@@ -38,8 +38,8 @@ int main(int argc, char* argv[]) {
 		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
 		CUDACHECK(cudaStreamSynchronize(cuStream));
 	} else if (strcmp(test_scenario, "STRAGGLING_RANK") == 0) {
+		printf("MARKER:STRAGGLING_RANK\n"); fflush(stdout);
 		if (rank == (num_ranks - 1)) {
-			printf("MARKER:STRAGGLING_RANK\n"); fflush(stdout);
 			while (access(ckpt_fired_flag_path, F_OK) != 0) usleep(1000);
 		}
 		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
