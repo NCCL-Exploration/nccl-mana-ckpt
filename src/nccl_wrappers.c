@@ -114,10 +114,38 @@ static ncclResult_t (*real_ncclPutSignal)(const void *, size_t, ncclDataType_t, 
                                           cudaStream_t) = NULL;
 #endif
 
+static void *resolve_nccl_symbol(const char *name) {
+    void *sym = dlsym(RTLD_NEXT, name);
+    if (sym)
+        return sym;
+
+    sym = dlsym(RTLD_DEFAULT, name);
+    if (sym)
+        return sym;
+
+    /* PyTorch fallback: resolve from loaded libtorch_cuda.so, libc10d_cuda_nccl.so, or libnccl.so */
+    static void *g_torch_nccl_handle = NULL;
+    if (!g_torch_nccl_handle) {
+        g_torch_nccl_handle = dlopen("libtorch_cuda.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (!g_torch_nccl_handle)
+            g_torch_nccl_handle = dlopen("libc10d_cuda_nccl.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (!g_torch_nccl_handle)
+            g_torch_nccl_handle = dlopen("libnccl.so.2", RTLD_LAZY | RTLD_GLOBAL);
+        if (!g_torch_nccl_handle)
+            g_torch_nccl_handle = dlopen("libnccl.so", RTLD_LAZY | RTLD_GLOBAL);
+    }
+    if (g_torch_nccl_handle) {
+        sym = dlsym(g_torch_nccl_handle, name);
+        if (sym)
+            return sym;
+    }
+    return NULL;
+}
+
 #define LOAD_SYM(name)                                                                             \
     do {                                                                                           \
         if (!real_##name)                                                                          \
-            *(void **)(&real_##name) = dlsym(RTLD_NEXT, #name);                                     \
+            *(void **)(&real_##name) = resolve_nccl_symbol(#name);                                 \
     } while (0)
 
 /*
@@ -130,7 +158,7 @@ static ncclResult_t (*real_ncclPutSignal)(const void *, size_t, ncclDataType_t, 
     do {                                                                                           \
         LOAD_SYM(name);                                                                            \
         if (real_##name == NULL) {                                                                 \
-            fprintf(stderr, "[NCCL PLUGIN] dlsym(RTLD_NEXT, \"%s\") returned NULL;"                \
+            fprintf(stderr, "[NCCL PLUGIN] Failed to resolve symbol \"%s\";"                        \
                             " refusing to call through it\n",                                      \
                     #name);                                                                        \
             fflush(stderr);                                                                        \

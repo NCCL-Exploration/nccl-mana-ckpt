@@ -38,6 +38,7 @@ def setup_distributed():
         print(
             "Error: WORLD_SIZE and RANK environment variables not set.",
             file=sys.stderr,
+            flush=True,
         )
         sys.exit(1)
 
@@ -45,8 +46,13 @@ def setup_distributed():
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ.get("LOCAL_RANK", rank % max(1, torch.cuda.device_count())))
 
+    print(
+        f"[Rank {rank}] Setting device to GPU {local_rank} and initializing process group...",
+        flush=True,
+    )
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl", init_method="env://")
+    print(f"[Rank {rank}] Successfully initialized default process group.", flush=True)
 
     return rank, local_rank, world_size
 
@@ -55,31 +61,30 @@ def create_subgroups(rank, world_size):
     """Creates multiple sub-communicators across the ranks."""
     subgroups = {}
 
-    # Subgroup 1: Even ranks clique / Odd ranks clique
-    even_ranks = [r for r in range(world_size) if r % 2 == 0]
-    odd_ranks = [r for r in range(world_size) if r % 2 != 0]
+    if world_size > 1:
+        # Subgroup 1: Even ranks clique / Odd ranks clique (for >=4 ranks) or duplicate sub-group
+        even_ranks = [r for r in range(world_size) if r % 2 == 0]
+        odd_ranks = [r for r in range(world_size) if r % 2 != 0]
 
-    even_group = dist.new_group(ranks=even_ranks) if len(even_ranks) > 0 else None
-    odd_group = dist.new_group(ranks=odd_ranks) if len(odd_ranks) > 0 else None
+        even_group = dist.new_group(ranks=even_ranks) if len(even_ranks) > 1 else None
+        odd_group = dist.new_group(ranks=odd_ranks) if len(odd_ranks) > 1 else None
 
-    subgroups["parity_group"] = even_group if (rank % 2 == 0) else odd_group
-    subgroups["parity_ranks"] = even_ranks if (rank % 2 == 0) else odd_ranks
+        subgroups["parity_group"] = even_group if (rank % 2 == 0) else odd_group
+        subgroups["parity_ranks"] = even_ranks if (rank % 2 == 0) else odd_ranks
+    else:
+        subgroups["parity_group"] = None
+        subgroups["parity_ranks"] = [0]
 
-    # Subgroup 2: First half / Second half
-    mid = max(1, world_size // 2)
-    lower_ranks = list(range(0, mid))
-    upper_ranks = list(range(mid, world_size)) if world_size > 1 else [0]
-
-    lower_group = dist.new_group(ranks=lower_ranks)
-    upper_group = dist.new_group(ranks=upper_ranks)
-
-    subgroups["half_group"] = lower_group if rank < mid else upper_group
-    subgroups["half_ranks"] = lower_ranks if rank < mid else upper_ranks
+    # Subgroup 2: Additional sub-communicator across all ranks
+    all_group = dist.new_group(ranks=list(range(world_size)))
+    subgroups["sub_group"] = all_group
+    subgroups["sub_ranks"] = list(range(world_size))
 
     return subgroups
 
 
 def main():
+    print(f"[Process {os.getpid()}] Starting pytorch_multicomm_test.py...", flush=True)
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
 
@@ -87,7 +92,7 @@ def main():
     torch.cuda.manual_seed(args.seed + rank)
 
     if rank == 0:
-        print(f"==> Initialized PyTorch Distributed with {world_size} ranks.")
+        print(f"==> Initialized PyTorch Distributed with {world_size} ranks.", flush=True)
         print(f"==> Creating multiple NCCL sub-groups (communicators)...", flush=True)
 
     subgroups = create_subgroups(rank, world_size)
@@ -120,11 +125,11 @@ def main():
                 dist.broadcast(p_tensor, src=subgroups["parity_ranks"][0], group=parity_grp)
                 checksum[:512] += p_tensor * 0.005
 
-            # 3. Collective on SUB-COMMUNICATOR 2 (Half group, Ratio 3:1)
-            half_grp = subgroups["half_group"]
-            if half_grp is not None:
+            # 3. Collective on SUB-COMMUNICATOR 2 (Sub group, Ratio 3:1)
+            sub_grp = subgroups["sub_group"]
+            if sub_grp is not None:
                 h_tensor = torch.ones(256, dtype=torch.float32, device=local_rank) * (epoch + 1.0)
-                dist.all_reduce(h_tensor, op=dist.ReduceOp.SUM, group=half_grp)
+                dist.all_reduce(h_tensor, op=dist.ReduceOp.SUM, group=sub_grp)
                 checksum[:256] += h_tensor * 0.002
 
             # 4. Point-to-point communication between adjacent ranks

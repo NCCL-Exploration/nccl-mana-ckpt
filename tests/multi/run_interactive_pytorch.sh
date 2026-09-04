@@ -131,6 +131,16 @@ for i in {1..30}; do
     sleep 1
 done
 
+# Wait for PyTorch to initialize and start training
+echo -e "\n${BLUE}==> Waiting for PyTorch to initialize CUDA and sub-communicators...${NC}"
+for i in {1..45}; do
+    if grep -q "Starting multi-comm" rank_0.log 2>/dev/null || grep -q "Total" rank_0.log 2>/dev/null; then
+        echo -e "    PyTorch multi-communicator workload is actively running."
+        break
+    fi
+    sleep 1
+done
+
 echo -e "\n${BLUE}==> Training is running. Streaming Rank 0 log output for ${WAIT_BEFORE_CKPT}s...${NC}"
 tail -f rank_0.log &
 TAIL_PID=$!
