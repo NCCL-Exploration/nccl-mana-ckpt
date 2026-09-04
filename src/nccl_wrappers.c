@@ -402,7 +402,7 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
     DMTCP_PLUGIN_DISABLE_CKPT();
 
     res = call_real_ncclCommInitRankConfig(&real, nranks, commId, rank, config);
-    if (res != ncclSuccess || real == NULL) {
+    if ((res != ncclSuccess && res != ncclInProgress) || real == NULL) {
         DMTCP_PLUGIN_ENABLE_CKPT();
         return res;
     }
@@ -530,7 +530,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     pthread_mutex_unlock(&g_seq_lock);
 
     res = real_ncclCommSplit(parent_real, color, key, &real, config);
-    if (res != ncclSuccess) {
+    if (res != ncclSuccess && res != ncclInProgress) {
         leave_nccl();
         return res;
     }
@@ -672,17 +672,32 @@ ncclResult_t ncclCommCuDevice(const ncclComm_t comm, int *device) {
 
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
     vcomm_t *v = vcomm_lookup(comm);
+    ncclComm_t real;
     REQUIRE_SYM(ncclCommGetAsyncError, ncclInternalError);
     if (v == NULL) /* R2 */
         return real_ncclCommGetAsyncError(comm, asyncError);
-    /* Do not block: a watchdog thread polls this, and reporting success while
-     * the comm is torn down for a checkpoint is the honest answer. */
-    if (v->real == NULL) {
+
+    /* Watchdog thread safety: while checkpoint is pending or comm is torn down,
+     * report ncclSuccess safely without calling real NCCL on a destroyed comm. */
+    if (ckpt_pending || v->real == NULL) {
         if (asyncError != NULL)
             *asyncError = ncclSuccess;
         return ncclSuccess;
     }
-    return real_ncclCommGetAsyncError(v->real, asyncError);
+
+    pthread_mutex_lock(&g_seq_lock);
+    if (ckpt_pending || (real = v->real) == NULL) {
+        pthread_mutex_unlock(&g_seq_lock);
+        if (asyncError != NULL)
+            *asyncError = ncclSuccess;
+        return ncclSuccess;
+    }
+    __atomic_add_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+    pthread_mutex_unlock(&g_seq_lock);
+
+    ncclResult_t res = real_ncclCommGetAsyncError(real, asyncError);
+    __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+    return res;
 }
 
 ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {

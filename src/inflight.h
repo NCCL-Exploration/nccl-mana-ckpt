@@ -34,7 +34,7 @@ extern "C" {
  * where a per-comm array of per-rank rings would cost hundreds.
  */
 
-#define MAX_DRAIN_MSGS 64
+#define MAX_DRAIN_MSGS 256
 
 typedef struct {
     uint8_t ident[VCOMM_IDENT_LEN]; /* communicator identity */

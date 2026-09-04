@@ -38,16 +38,19 @@ export WORLD_SIZE=2
 export MASTER_ADDR="127.0.0.1"
 export MASTER_PORT=29500
 
+TEST_SCRIPT=${1:-pytorch_multicomm_test.py}
+echo "==> Selected PyTorch Test: $TEST_SCRIPT"
+
 (
   export RANK=0
   export LOCAL_RANK=0
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      python3 pytorch_ddp_test.py --epochs -1 &
+      python3 $TEST_SCRIPT --epochs -1 &
       
   export RANK=1
   export LOCAL_RANK=1
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      python3 pytorch_ddp_test.py --epochs -1 &
+      python3 $TEST_SCRIPT --epochs -1 &
       
   wait
 ) &

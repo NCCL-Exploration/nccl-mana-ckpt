@@ -33,8 +33,8 @@
 extern "C" {
 #endif
 
-#define MAX_VCOMMS 16
-#define VCOMM_MAX_RANKS 64  /* max ranks in ONE communicator */
+#define MAX_VCOMMS 256
+#define VCOMM_MAX_RANKS 256 /* max ranks in ONE communicator */
 #define VCOMM_IDENT_LEN 16  /* 128-bit identity */
 #define VCOMM_IDENT_HEX 33  /* 32 hex chars + NUL */
 #define VCOMM_NAME_MAX 64   /* bounded copy of config.netName / config.commName */

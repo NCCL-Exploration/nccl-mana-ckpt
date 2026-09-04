@@ -22,12 +22,13 @@
         }                                                                                          \
     } while (0)
 
-#define MAX_STREAMS 64
+#define MAX_STREAMS 256
 #define POLL_US 200
 #define MAX_CHASE_ROUNDS 32
 
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
+static pthread_mutex_t g_stream_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int g_nranks = 0;
 int g_my_rank = -1;
@@ -50,13 +51,19 @@ static unsigned g_epoch = 0;
 static void pre_init_cuda(void);
 void add_stream(cudaStream_t stream) {
     int i;
+    if (stream == 0 || stream == NULL)
+        return;
+    pthread_mutex_lock(&g_stream_lock);
     for (i = 0; i < g_num_streams; i++) {
-        if (g_active_streams[i] == stream)
+        if (g_active_streams[i] == stream) {
+            pthread_mutex_unlock(&g_stream_lock);
             return;
+        }
     }
     if (g_num_streams < MAX_STREAMS) {
         g_active_streams[g_num_streams++] = stream;
     }
+    pthread_mutex_unlock(&g_stream_lock);
 }
 
 /*
@@ -683,7 +690,15 @@ static void rebuild_create_comms(void) {
                v->cuda_dev);
         fflush(stdout);
 
-        r = call_real_ncclCommInitRankConfig(&real, v->nranks, id, v->rank, vcomm_config(v));
+        ncclConfig_t *cfg = vcomm_config(v);
+        ncclConfig_t sync_cfg;
+        if (cfg != NULL) {
+            sync_cfg = *cfg;
+            sync_cfg.blocking = 1; /* force synchronous rebuild */
+            cfg = &sync_cfg;
+        }
+
+        r = call_real_ncclCommInitRankConfig(&real, v->nranks, id, v->rank, cfg);
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] rebuild: ncclCommInitRank failed for %s: %s\n", hex,
                     ncclGetErrorString(r));
