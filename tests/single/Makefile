@@ -48,6 +48,9 @@ multicomm_test: multicomm_test.c
 group_comm_test: group_comm_test.c
 	nvcc ${CFLAGS} -o $@ $<
 
+nonblocking_test: nonblocking_test.c
+	nvcc ${CFLAGS} -o $@ $<
+
 # Deliberately split in two: the helper is the only half that links NCCL, and
 # the driver must have no NCCL linkage at all, so that libnccl reaches the
 # process only through an RTLD_LOCAL dlopen.
@@ -133,6 +136,39 @@ groupcomm: group_comm_test $(NCCL_PLUGIN)
 		echo -e "${RED}FAIL: rebuilt $$nrebuilt communicators, expected 3${NC}"; exit 1; fi; \
 	echo -e "${GREEN}PASS: 3 group-created communicators rebuilt and verified after restart${NC}"
 
+# ncclConfig_t.blocking = 0, which makes creation AND the rebuild return
+# ncclInProgress. PyTorch sets this under TORCH_NCCL_USE_COMM_NONBLOCKING.
+NONBLOCK_ITERS ?= 12
+NONBLOCK_CKPT_DELAY ?= 5
+nonblocking: nonblocking_test $(NCCL_PLUGIN)
+	@echo -e "${GREEN}==> Non-blocking communicator checkpoint/restart <==${NC}"; \
+	$(MAKE) kill; \
+	rm -f ckpt_*.dmtcp; \
+	$(DMTCP_LAUNCH) --coord-port $(PORT) --interval 0 --with-plugin $(PLUGIN) \
+	  ./nonblocking_test $(NONBLOCK_ITERS) > nonblocking_run1.log 2>&1 & \
+	PID=$$!; \
+	sleep $(NONBLOCK_CKPT_DELAY); \
+	echo "Triggering checkpoint mid-run..."; \
+	$(DMTCP_CMD) --coord-port $(PORT) --checkpoint; \
+	wait $$PID; RC=$$?; \
+	sed -n '1,200p' nonblocking_run1.log; \
+	if [ $$RC -ne 0 ]; then \
+		echo -e "${RED}FAIL: initial run exited $$RC (resume-in-place)${NC}"; exit 1; fi; \
+	if ! grep -q "^PASS nonblocking" nonblocking_run1.log; then \
+		echo -e "${RED}FAIL: initial run did not report PASS${NC}"; exit 1; fi; \
+	latest=$$(ls -t ckpt_*.dmtcp 2>/dev/null | head -n 1); \
+	if [ -z "$$latest" ]; then \
+		echo -e "${RED}FAIL: no checkpoint image was written${NC}"; exit 1; fi; \
+	echo -e "${GREEN}--- Restarting from $$latest ---${NC}"; \
+	$(DMTCP_RESTART) --coord-port $(PORT) $$latest > nonblocking_run2.log 2>&1; \
+	RC=$$?; \
+	sed -n '1,200p' nonblocking_run2.log; \
+	if [ $$RC -ne 0 ]; then \
+		echo -e "${RED}FAIL: restart exited $$RC${NC}"; exit 1; fi; \
+	if ! grep -q "^PASS nonblocking" nonblocking_run2.log; then \
+		echo -e "${RED}FAIL: restarted run did not report PASS${NC}"; exit 1; fi; \
+	echo -e "${GREEN}PASS: non-blocking communicator rebuilt after checkpoint and restart${NC}"
+
 # Symbol-resolution regression: no checkpoint, just a clean run. Fails on any
 # build whose only resolver is dlsym(RTLD_NEXT, ...).
 dlopen_test: nccl_dlopen_test $(NCCL_PLUGIN)
@@ -212,8 +248,8 @@ $(DRIVER): $(DRIVER).cpp
 
 clean:
 	rm -f $(DRIVER) single_gpu_test multiproc send_recv simple_init_test multicomm_test
-	rm -f group_comm_test nccl_dlopen_test libnccl_dlopen_helper.so
-	rm -f multicomm_run1.log multicomm_run2.log groupcomm_run1.log groupcomm_run2.log dlopen_run.log
+	rm -f group_comm_test nonblocking_test nccl_dlopen_test libnccl_dlopen_helper.so
+	rm -f multicomm_run1.log multicomm_run2.log groupcomm_run1.log groupcomm_run2.log dlopen_run.log nonblocking_run1.log nonblocking_run2.log
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 clean simple_test multicomm groupcomm dlopen_test
+.PHONY: all test_all test1 test2 test3 test4 clean simple_test multicomm groupcomm dlopen_test nonblocking
