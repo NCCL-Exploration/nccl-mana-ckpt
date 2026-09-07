@@ -74,6 +74,26 @@ void init_rank_info(vcomm_t *v) {
     }
 }
 
+/*
+ * The two NCCL entry points the plugin calls but does not interpose. Linking
+ * them directly leaves undefined symbols the loader can only satisfy from the
+ * global scope, which holds no NCCL when the application dlopened it
+ * RTLD_LOCAL -- so the first rebuild dies on a symbol lookup error.
+ */
+static const char *nccl_err_str(ncclResult_t r) {
+    static const char *(*fn)(ncclResult_t);
+    if (fn == NULL)
+        *(void **)&fn = nccl_real_dlsym("ncclGetErrorString");
+    return (fn != NULL) ? fn(r) : "<ncclGetErrorString unavailable>";
+}
+
+static ncclResult_t nccl_get_unique_id(ncclUniqueId *id) {
+    static ncclResult_t (*fn)(ncclUniqueId *);
+    if (fn == NULL)
+        *(void **)&fn = nccl_real_dlsym("ncclGetUniqueId");
+    return (fn != NULL) ? fn(id) : ncclInternalError;
+}
+
 /* ── KVDB keys ────────────────────────────────────────────────────── */
 
 /*
@@ -460,7 +480,7 @@ static void teardown_all_comms(void) {
         r = call_real_ncclCommDestroy(real);
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] teardown: ncclCommDestroy failed: %s\n",
-                    ncclGetErrorString(r));
+                    nccl_err_str(r));
             fflush(stderr);
         }
     }
@@ -576,7 +596,7 @@ static void rebuild_clique(int clique) {
     r = call_real_ncclCommInitAll(tmp, count, devlist);
     if (r != ncclSuccess) {
         fprintf(stderr, "[NCCL PLUGIN] rebuild: ncclCommInitAll failed: %s\n",
-                ncclGetErrorString(r));
+                nccl_err_str(r));
         fflush(stderr);
         exit(1);
     }
@@ -615,10 +635,10 @@ static void rebuild_publish_ids(void) {
         if (v->origin != VCOMM_REMOTE || v->real != NULL || v->rank != 0)
             continue;
 
-        r = ncclGetUniqueId(&id);
+        r = nccl_get_unique_id(&id);
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] rebuild: ncclGetUniqueId failed: %s\n",
-                    ncclGetErrorString(r));
+                    nccl_err_str(r));
             fflush(stderr);
             exit(1);
         }
@@ -686,7 +706,7 @@ static void rebuild_create_comms(void) {
         r = call_real_ncclCommInitRankConfig(&real, v->nranks, id, v->rank, vcomm_config(v));
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] rebuild: ncclCommInitRank failed for %s: %s\n", hex,
-                    ncclGetErrorString(r));
+                    nccl_err_str(r));
             fflush(stderr);
             exit(1);
         }

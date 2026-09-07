@@ -21,6 +21,9 @@ test_nccl_wrappers
 test_vcomm
 test_nccl.c
 **/multicomm_test
+**/group_comm_test
+**/nccl_dlopen_test
+**/libnccl_dlopen_helper.so
 **/drain_recv
 **/drain_send
 **/drain_no_msgs

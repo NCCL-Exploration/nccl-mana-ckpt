@@ -183,11 +183,16 @@ static int test_local_clique_is_local(void) {
 static int test_empty_registry(void) {
     registry_clear();
     ckpt_pending = 1;
-    /* A process that has not created a communicator yet has nothing to drive to
-     * a cut, so it is held immediately and its checkpoint phases are all
-     * vacuous. Critically it still reaches every barrier -- that is asserted by
-     * the end-to-end pre-init checkpoint test, not here. */
-    CHECK(gate_closed());
+    /*
+     * A process with no communicator has no frontier to freeze, so the gate must
+     * let it through. Holding it -- what the empty loop used to do -- deadlocks
+     * against a peer already inside the creation rendezvous, whose raised
+     * activity count spins quiesce_nccl() forever.
+     *
+     * Its checkpoint phases are still vacuous and it still reaches every
+     * barrier; that is asserted by the end-to-end pre-init test, not here.
+     */
+    CHECK(!gate_closed());
 
     ckpt_pending = 0;
     CHECK(!gate_closed());

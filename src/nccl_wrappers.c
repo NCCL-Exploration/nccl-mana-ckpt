@@ -35,6 +35,7 @@
 #include "vcomm.h"
 #include <cuda_runtime.h>
 #include <dlfcn.h>
+#include <link.h>
 #include <nccl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -45,6 +46,8 @@
 /* Newer entry points are wrapped only when the NCCL headers in use declare
  * them, so the plugin still builds against older NCCL. */
 #define NCCL_HAS_2_30 (defined(NCCL_VERSION_CODE) && NCCL_VERSION_CODE >= 23000)
+/* ncclGroupSimulateEnd and ncclSimInfo_t arrived in NCCL 2.22. */
+#define NCCL_HAS_SIM_INFO (defined(NCCL_VERSION_CODE) && NCCL_VERSION_CODE >= 22200)
 
 #define GATE_POLL_US 200
 
@@ -90,6 +93,9 @@ static ncclResult_t (*real_ncclRedOpCreatePreMulSum)(ncclRedOp_t *, void *, nccl
 static ncclResult_t (*real_ncclRedOpDestroy)(ncclRedOp_t, ncclComm_t) = NULL;
 static ncclResult_t (*real_ncclGroupStart)(void) = NULL;
 static ncclResult_t (*real_ncclGroupEnd)(void) = NULL;
+#if NCCL_HAS_SIM_INFO
+static ncclResult_t (*real_ncclGroupSimulateEnd)(ncclSimInfo_t *) = NULL;
+#endif
 static const char *(*real_ncclGetLastError)(ncclComm_t) = NULL;
 #if NCCL_HAS_2_30
 static ncclResult_t (*real_ncclCommGetUniqueId)(ncclComm_t, ncclUniqueId *) = NULL;
@@ -114,10 +120,64 @@ static ncclResult_t (*real_ncclPutSignal)(const void *, size_t, ncclDataType_t, 
                                           cudaStream_t) = NULL;
 #endif
 
+/*
+ * RTLD_NEXT searches only the global scope, so it cannot see a libnccl that
+ * reached the process through an RTLD_LOCAL dlopen -- which is how CPython loads
+ * libtorch_cuda.so, hence every PyTorch job. Interposition still works, so we
+ * get called and then cannot call through.
+ *
+ * RTLD_DEFAULT must never be a step in the chain: it would find this plugin's
+ * own definition and recurse.
+ */
+static int nccl_so_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    const char **out = (const char **)data;
+    const char *base;
+
+    (void)size;
+    if (info->dlpi_name == NULL || info->dlpi_name[0] == '\0')
+        return 0;
+    base = strrchr(info->dlpi_name, '/');
+    base = (base != NULL) ? base + 1 : info->dlpi_name;
+    if (strncmp(base, "libnccl.so", 10) != 0)
+        return 0;
+    *out = info->dlpi_name;
+    return 1; /* stop the walk */
+}
+
+/*
+ * dl_iterate_phdr sees every mapped object, RTLD_LOCAL ones included; RTLD_NOLOAD
+ * then binds to that exact instance rather than loading a second NCCL. Failure
+ * is not cached, so a lookup made before libnccl is mapped can succeed later.
+ */
+void *nccl_real_dlsym(const char *name) {
+    static void *handle;
+    static pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
+    void *h = __atomic_load_n(&handle, __ATOMIC_ACQUIRE);
+
+    if (h == NULL) {
+        const char *path = NULL;
+        pthread_mutex_lock(&handle_lock);
+        h = handle;
+        if (h == NULL) {
+            dl_iterate_phdr(nccl_so_cb, &path);
+            if (path != NULL)
+                h = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+            if (h == NULL)
+                h = dlopen("libnccl.so.2", RTLD_NOW);
+            __atomic_store_n(&handle, h, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&handle_lock);
+    }
+    return (h != NULL) ? dlsym(h, name) : NULL;
+}
+
 #define LOAD_SYM(name)                                                                             \
     do {                                                                                           \
-        if (!real_##name)                                                                          \
-            *(void **)(&real_##name) = dlsym(RTLD_NEXT, #name);                                     \
+        if (!real_##name) {                                                                        \
+            *(void **)(&real_##name) = dlsym(RTLD_NEXT, #name);                                    \
+            if (!real_##name)                                                                      \
+                *(void **)(&real_##name) = nccl_real_dlsym(#name);                                 \
+        }                                                                                          \
     } while (0)
 
 /*
@@ -130,8 +190,9 @@ static ncclResult_t (*real_ncclPutSignal)(const void *, size_t, ncclDataType_t, 
     do {                                                                                           \
         LOAD_SYM(name);                                                                            \
         if (real_##name == NULL) {                                                                 \
-            fprintf(stderr, "[NCCL PLUGIN] dlsym(RTLD_NEXT, \"%s\") returned NULL;"                \
-                            " refusing to call through it\n",                                      \
+            fprintf(stderr,                                                                        \
+                    "[NCCL PLUGIN] cannot resolve real \"%s\": neither dlsym(RTLD_NEXT) nor"       \
+                    " libnccl's own handle provides it; refusing to call through NULL\n",          \
                     #name);                                                                        \
             fflush(stderr);                                                                        \
             return retval;                                                                         \
@@ -184,18 +245,24 @@ int nccl_activity(void) {
 
 int nccl_gate_closed_locked(void) {
     int i;
+    int live = 0;
     if (!ckpt_pending)
         return 0;
     for (i = 0; i < MAX_VCOMMS; i++) {
         vcomm_t *v = &g_vcomms[i];
         if (v->origin == VCOMM_FREE)
             continue;
+        live++;
         /* target < 0 means "no consensus yet", which counts as at-target: the
          * frontier must freeze the instant a checkpoint is requested. */
         if (v->target >= 0 && v->seq < v->target)
             return 0; /* this rank still owes progress somewhere */
     }
-    return 1;
+    /* No live comm means no frontier to freeze, and the call this thread is
+     * about to make is a creation rendezvous. Holding it deadlocks against a
+     * peer already inside real_ncclGroupEnd(), whose raised activity count then
+     * spins quiesce_nccl() forever. The empty loop used to return "closed". */
+    return live > 0;
 }
 
 /*
@@ -252,6 +319,79 @@ static void leave_nccl(void) {
  */
 static int in_group_region(void) {
     return t_group_depth > 0;
+}
+
+/*
+ * Communicators registered while a group region was open.
+ *
+ * Inside a region NCCL only queues the init job: it keeps the ncclComm_t* it was
+ * handed and writes through it at ncclGroupEnd, so that destination must outlive
+ * the call -- a local, as every creation path used to pass, is a write into a
+ * returned stack frame. The registry slot is stable and is also the right
+ * publication point: v->real stays NULL, so wait_real() parks, until the comm
+ * exists. Anything unknowable until then is filled in here.
+ */
+static void record_comm_ranks(vcomm_t *v, int nranks, int rank);
+static void record_comm_device(vcomm_t *v, ncclComm_t real);
+
+typedef struct {
+    int index;
+    int query_ranks; /* rank/size must be read off the comm; a split child */
+} pending_create_t;
+
+static __thread pending_create_t t_pending[MAX_VCOMMS];
+static __thread int t_npending;
+
+static void pending_create_add(vcomm_t *v, int query_ranks) {
+    if (t_npending >= MAX_VCOMMS) {
+        fprintf(stderr,
+                "[NCCL PLUGIN] more than %d communicators created in one group region.\n"
+                "              Raise MAX_VCOMMS in src/vcomm.h and rebuild.\n",
+                MAX_VCOMMS);
+        fflush(stderr);
+        abort();
+    }
+    t_pending[t_npending].index = vcomm_index(v);
+    t_pending[t_npending].query_ranks = query_ranks;
+    t_npending++;
+}
+
+static void finish_pending_creates(int ok) {
+    int i;
+
+    for (i = 0; i < t_npending; i++) {
+        vcomm_t *v = &g_vcomms[t_pending[i].index];
+        ncclComm_t real = v->real;
+
+        if (!ok || real == NULL) {
+            /* A registered comm that does not exist would still be published
+             * for rebuild, blocking every peer in ncclCommInitRank. */
+            v->real = NULL;
+            vcomm_free(v);
+            continue;
+        }
+
+        if (t_pending[i].query_ranks) {
+            int nranks = 0, rank = 0;
+            LOAD_SYM(ncclCommCount);
+            LOAD_SYM(ncclCommUserRank);
+            if (real_ncclCommCount == NULL || real_ncclCommUserRank == NULL ||
+                real_ncclCommCount(real, &nranks) != ncclSuccess ||
+                real_ncclCommUserRank(real, &rank) != ncclSuccess) {
+                fprintf(stderr,
+                        "[NCCL PLUGIN] could not read rank/size of a communicator created in a"
+                        " group region; it cannot be rebuilt after a checkpoint\n");
+                fflush(stderr);
+                v->real = NULL;
+                vcomm_free(v);
+                continue;
+            }
+            record_comm_ranks(v, nranks, rank);
+        }
+        record_comm_device(v, real);
+        init_rank_info(v);
+    }
+    t_npending = 0;
 }
 
 /* ── accounting ───────────────────────────────────────────────────── */
@@ -340,23 +480,9 @@ ncclResult_t call_real_ncclCommInitAll(ncclComm_t *comms, int ndev, const int *d
  * NCCL binds a comm to the current device at creation -- device == rank is false
  * whenever CUDA_VISIBLE_DEVICES is set per rank, which is the normal Slurm case.
  */
-static void record_comm(vcomm_t *v, ncclComm_t real, int nranks, int rank,
-                        const ncclConfig_t *config) {
-    int dev = -1;
-
+static void record_comm_ranks(vcomm_t *v, int nranks, int rank) {
     v->nranks = nranks;
     v->rank = rank;
-
-    LOAD_SYM(ncclCommCuDevice);
-    if (real_ncclCommCuDevice != NULL && real_ncclCommCuDevice(real, &dev) == ncclSuccess) {
-        v->cuda_dev = dev;
-    } else if (cudaGetDevice(&dev) == cudaSuccess) {
-        v->cuda_dev = dev;
-    } else {
-        v->cuda_dev = 0;
-    }
-
-    vcomm_store_config(v, config);
 
     if (v->nranks > VCOMM_MAX_RANKS) {
         fprintf(stderr,
@@ -366,6 +492,32 @@ static void record_comm(vcomm_t *v, ncclComm_t real, int nranks, int rank,
         fflush(stderr);
         abort();
     }
+}
+
+/*
+ * `real` is NULL for a comm created inside a group region. cudaGetDevice is not a
+ * guess there: NCCL binds the comm to the creating thread's current device. The
+ * probe is redone with the live handle once the region closes.
+ */
+static void record_comm_device(vcomm_t *v, ncclComm_t real) {
+    int dev = -1;
+
+    LOAD_SYM(ncclCommCuDevice);
+    if (real != NULL && real_ncclCommCuDevice != NULL &&
+        real_ncclCommCuDevice(real, &dev) == ncclSuccess) {
+        v->cuda_dev = dev;
+    } else if (cudaGetDevice(&dev) == cudaSuccess) {
+        v->cuda_dev = dev;
+    } else {
+        v->cuda_dev = 0;
+    }
+}
+
+static void record_comm(vcomm_t *v, ncclComm_t real, int nranks, int rank,
+                        const ncclConfig_t *config) {
+    record_comm_ranks(v, nranks, rank);
+    record_comm_device(v, real);
+    vcomm_store_config(v, config);
 
     /* Published last: an application thread must never observe a half-built
      * entry, and a non-NULL `real` is what releases wait_real(). */
@@ -389,6 +541,15 @@ static void registry_fatal(vcomm_status_t st, const char *fn) {
     abort();
 }
 
+/*
+ * With ncclConfig_t.blocking = 0, creation succeeds by returning ncclInProgress
+ * and the caller polls ncclCommGetAsyncError. The old `!= ncclSuccess` test read
+ * that as failure: nothing registered, *comm unwritten, real handle leaked.
+ */
+static int init_ok(ncclResult_t res) {
+    return res == ncclSuccess || res == ncclInProgress;
+}
+
 /* ── comm creation ────────────────────────────────────────────────── */
 
 static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank,
@@ -399,13 +560,9 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
     vcomm_status_t st;
     ncclResult_t res;
 
-    DMTCP_PLUGIN_DISABLE_CKPT();
+    int grouped = in_group_region();
 
-    res = call_real_ncclCommInitRankConfig(&real, nranks, commId, rank, config);
-    if (res != ncclSuccess || real == NULL) {
-        DMTCP_PLUGIN_ENABLE_CKPT();
-        return res;
-    }
+    DMTCP_PLUGIN_DISABLE_CKPT();
 
     /* The uniqueId is already a universal name for this communicator: every
      * member passed byte-identical bytes. Digest it to a fixed width and
@@ -413,12 +570,37 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
      * dead after restart. */
     vcomm_ident_from_id(&commId, ident);
 
-    st = vcomm_new(VCOMM_REMOTE, ident, &v);
-    if (st != VCOMM_OK)
-        registry_fatal(st, fn);
+    if (grouped) {
+        /* The handle is written at ncclGroupEnd, so the slot must exist first
+         * and be the destination. */
+        st = vcomm_new(VCOMM_REMOTE, ident, &v);
+        if (st != VCOMM_OK)
+            registry_fatal(st, fn);
+        record_comm_ranks(v, nranks, rank);
+        record_comm_device(v, NULL);
+        vcomm_store_config(v, config);
 
-    record_comm(v, real, nranks, rank, config);
-    init_rank_info(v);
+        res = call_real_ncclCommInitRankConfig((ncclComm_t *)&v->real, nranks, commId, rank,
+                                               config);
+        if (!init_ok(res)) {
+            v->real = NULL;
+            vcomm_free(v);
+            DMTCP_PLUGIN_ENABLE_CKPT();
+            return res;
+        }
+        pending_create_add(v, 0);
+    } else {
+        res = call_real_ncclCommInitRankConfig(&real, nranks, commId, rank, config);
+        if (!init_ok(res) || real == NULL) {
+            DMTCP_PLUGIN_ENABLE_CKPT();
+            return res;
+        }
+        st = vcomm_new(VCOMM_REMOTE, ident, &v);
+        if (st != VCOMM_OK)
+            registry_fatal(st, fn);
+        record_comm(v, real, nranks, rank, config);
+        init_rank_info(v);
+    }
     *comm = vcomm_handle(v); /* R1 */
 
     DMTCP_PLUGIN_ENABLE_CKPT();
@@ -467,7 +649,7 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
 
     memset(real, 0, sizeof(real));
     res = call_real_ncclCommInitAll(real, ndev, devlist);
-    if (res != ncclSuccess) {
+    if (!init_ok(res)) {
         DMTCP_PLUGIN_ENABLE_CKPT();
         return res;
     }
@@ -513,6 +695,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     vcomm_status_t st;
     ncclResult_t res;
     int split_index;
+    int grouped;
     int nranks = 0, rank = 0;
 
     LOAD_SYM(ncclCommSplit);
@@ -521,7 +704,11 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     if (parent == NULL) /* R2 */
         return real_ncclCommSplit(comm, color, key, newcomm, config);
 
-    parent_real = enter_nccl(parent, 0);
+    /* The enclosing ncclGroupStart already holds the gate, the activity count
+     * and the wrapper lock. Taking them again could park a thread inside an open
+     * batch its peers are waiting to see closed. */
+    grouped = in_group_region();
+    parent_real = grouped ? wait_real(parent) : enter_nccl(parent, 0);
 
     /* Take the index before the call, so all members agree even if some get
      * NULL back. */
@@ -529,8 +716,34 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     split_index = parent->nsplits++;
     pthread_mutex_unlock(&g_seq_lock);
 
+    vcomm_ident_from_split(parent->ident, color, split_index, ident);
+
+    if (grouped) {
+        /* As in init_rank_common. rank and size cannot be read off the child
+         * until the region closes either, so they are deferred rather than
+         * recorded as the 0/0 that used to fail the rebuild. */
+        st = vcomm_new(VCOMM_REMOTE, ident, &v);
+        if (st != VCOMM_OK)
+            registry_fatal(st, "ncclCommSplit");
+        record_comm_device(v, NULL);
+        vcomm_store_config(v, config ? config : vcomm_config(parent));
+
+        res = real_ncclCommSplit(parent_real, color, key, (ncclComm_t *)&v->real, config);
+        if (!init_ok(res)) {
+            v->real = NULL;
+            vcomm_free(v);
+            return res;
+        }
+        /* NCCL_SPLIT_NOCOLOR resolves at group end: a NULL handle there means
+         * "no child" and the slot is released. */
+        pending_create_add(v, 1);
+        if (newcomm != NULL)
+            *newcomm = vcomm_handle(v); /* R1 */
+        return res;
+    }
+
     res = real_ncclCommSplit(parent_real, color, key, &real, config);
-    if (res != ncclSuccess) {
+    if (!init_ok(res)) {
         leave_nccl();
         return res;
     }
@@ -545,17 +758,24 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
         return res;
     }
 
-    vcomm_ident_from_split(parent->ident, color, split_index, ident);
     st = vcomm_new(VCOMM_REMOTE, ident, &v);
     if (st != VCOMM_OK)
         registry_fatal(st, "ncclCommSplit");
 
     LOAD_SYM(ncclCommCount);
     LOAD_SYM(ncclCommUserRank);
-    if (real_ncclCommCount)
-        real_ncclCommCount(real, &nranks);
-    if (real_ncclCommUserRank)
-        real_ncclCommUserRank(real, &rank);
+    if (real_ncclCommCount == NULL || real_ncclCommUserRank == NULL ||
+        real_ncclCommCount(real, &nranks) != ncclSuccess ||
+        real_ncclCommUserRank(real, &rank) != ncclSuccess) {
+        /* 0/0 would pass every check here, kill the drain via peer_ok, and
+         * only then fail the rebuild. */
+        fprintf(stderr, "[NCCL PLUGIN] ncclCommSplit: could not read the child's rank/size;"
+                        " it cannot be rebuilt after a checkpoint\n");
+        fflush(stderr);
+        vcomm_free(v);
+        leave_nccl();
+        return ncclInternalError;
+    }
 
     /* A child with no config inherits the parent's, so record the parent's copy
      * rather than defaulting -- otherwise a restart silently changes behaviour. */
@@ -769,6 +989,12 @@ ncclResult_t ncclCommMemStats(ncclComm_t comm, ncclCommMemStat_t stat, uint64_t 
  * Each of these counts one step on its OWN communicator's sequence, which is the
  * whole point of the change: a program doing one AllReduce on comm_world and two
  * on a sub-communicator per iteration cannot be described by a single counter.
+ *
+ * Inside a group region the enclosing ncclGroupStart already holds the gate, the
+ * activity count and the wrapper lock, so none is taken again -- but the step
+ * still counts, hence the seq++ on both paths. Advancing only on the ungated
+ * path pinned seq at 0 for every batched collective, leaving
+ * sequence_consensus() to settle on a cut that described nothing.
  */
 
 #define COLLECTIVE_PROLOGUE(sym, forward)                                                          \
@@ -780,7 +1006,10 @@ ncclResult_t ncclCommMemStats(ncclComm_t comm, ncclCommMemStat_t stat, uint64_t 
         return forward;                                                                            \
     add_stream(stream);                                                                            \
     if (in_group_region()) {                                                                       \
-        real = wait_real(v);                                                                        \
+        nccl_seq_lock();                                                                           \
+        v->seq++;                                                                                  \
+        nccl_seq_unlock();                                                                         \
+        real = wait_real(v);                                                                       \
     } else {                                                                                       \
         real = enter_nccl(v, 1); /* R4 */                                                          \
     }
@@ -994,6 +1223,9 @@ ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int
  * reentrant per-thread read lock, so the per-op toggles inside nest correctly.
  */
 ncclResult_t ncclGroupStart(void) {
+    ncclResult_t ret;
+    int took_gate = 0;
+
     REQUIRE_SYM(ncclGroupStart, ncclInternalError);
     if (t_group_depth == 0) {
         for (;;) {
@@ -1010,21 +1242,54 @@ ncclResult_t ncclGroupStart(void) {
             DMTCP_PLUGIN_ENABLE_CKPT();
             usleep(GATE_POLL_US);
         }
+        took_gate = 1;
+    }
+
+    ret = real_ncclGroupStart();
+    if (ret != ncclSuccess) {
+        /* No region was opened, so hold nothing: a raised activity count with
+         * no thread left to drop it stalls every later checkpoint. */
+        if (took_gate) {
+            __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+            DMTCP_PLUGIN_ENABLE_CKPT();
+        }
+        return ret;
     }
     t_group_depth++;
-    return real_ncclGroupStart();
+    return ret;
+}
+
+/* Shared by every way a region can close. */
+static void group_region_close(ncclResult_t ret) {
+    finish_pending_creates(init_ok(ret));
+    __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+    DMTCP_PLUGIN_ENABLE_CKPT();
 }
 
 ncclResult_t ncclGroupEnd(void) {
     ncclResult_t ret;
     REQUIRE_SYM(ncclGroupEnd, ncclInternalError);
     ret = real_ncclGroupEnd();
-    if (t_group_depth > 0 && --t_group_depth == 0) {
-        __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
-        DMTCP_PLUGIN_ENABLE_CKPT();
-    }
+    if (t_group_depth > 0 && --t_group_depth == 0)
+        group_region_close(ret);
     return ret;
 }
+
+/*
+ * Closes NCCL's group just as ncclGroupEnd does, so it must unwind identically.
+ * Left unwrapped, the region stays open on this thread forever: quiesce_nccl()
+ * spins, and every later collective takes the in-region path and skips the gate.
+ */
+#if NCCL_HAS_SIM_INFO
+ncclResult_t ncclGroupSimulateEnd(ncclSimInfo_t *simInfo) {
+    ncclResult_t ret;
+    REQUIRE_SYM(ncclGroupSimulateEnd, ncclInternalError);
+    ret = real_ncclGroupSimulateEnd(simInfo);
+    if (t_group_depth > 0 && --t_group_depth == 0)
+        group_region_close(ret);
+    return ret;
+}
+#endif
 
 /* ── synthesized collectives ──────────────────────────────────────── */
 
@@ -1247,6 +1512,9 @@ void resolve_wrapper_pointers(void) {
     LOAD_SYM(ncclRedOpDestroy);
     LOAD_SYM(ncclGroupStart);
     LOAD_SYM(ncclGroupEnd);
+#if NCCL_HAS_SIM_INFO
+    LOAD_SYM(ncclGroupSimulateEnd);
+#endif
     LOAD_SYM(ncclGetLastError);
 #if NCCL_HAS_2_30
     LOAD_SYM(ncclCommGetUniqueId);
@@ -1294,6 +1562,9 @@ void clear_wrapper_pointers(void) {
     real_ncclRedOpDestroy = NULL;
     real_ncclGroupStart = NULL;
     real_ncclGroupEnd = NULL;
+#if NCCL_HAS_SIM_INFO
+    real_ncclGroupSimulateEnd = NULL;
+#endif
     real_ncclGetLastError = NULL;
 #if NCCL_HAS_2_30
     real_ncclCommGetUniqueId = NULL;
