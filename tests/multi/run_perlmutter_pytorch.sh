@@ -19,6 +19,9 @@ DMTCP_LAUNCH=${DMTCP_ROOT}/bin/dmtcp_launch
 DMTCP_CMD=${DMTCP_ROOT}/bin/dmtcp_command
 PLUGIN=${SLURM_SUBMIT_DIR}/../../bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so
 
+# Workarounds required to run PyTorch under DMTCP at all; see the file.
+. ${SLURM_SUBMIT_DIR}/pytorch_dmtcp_env.sh
+
 # NCCL / MANA Environment
 export NCCL_P2P_DISABLE=0
 export NCCL_NET_GDR_LEVEL=PHB
@@ -41,12 +44,12 @@ export MASTER_PORT=29500
 (
   export RANK=0
   export LOCAL_RANK=0
-  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
+  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip --with-plugin $PLUGIN \
       python3 pytorch_ddp_test.py --epochs -1 &
       
   export RANK=1
   export LOCAL_RANK=1
-  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
+  $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --no-gzip --with-plugin $PLUGIN \
       python3 pytorch_ddp_test.py --epochs -1 &
       
   wait
