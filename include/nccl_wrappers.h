@@ -40,6 +40,13 @@ void nccl_seq_unlock(void);
 int nccl_activity(void); /* threads inside a NCCL call or an open group region */
 
 /*
+ * Resolve a real NCCL symbol when dlsym(RTLD_NEXT, ...) cannot see libnccl,
+ * i.e. when the application reached it through an RTLD_LOCAL dlopen. Returns
+ * NULL if NCCL is not mapped yet; failure is not cached.
+ */
+void *nccl_real_dlsym(const char *name);
+
+/*
  * Direct access to the real NCCL entry points, for plugin-internal use only.
  * The checkpoint path must never re-enter the interposed names: that would
  * redo wrapper bookkeeping, and in the destroy case would free the registry
