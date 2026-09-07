@@ -472,6 +472,11 @@ ncclResult_t call_real_ncclCommInitAll(ncclComm_t *comms, int ndev, const int *d
     return real_ncclCommInitAll(comms, ndev, devlist);
 }
 
+ncclResult_t call_real_ncclCommGetAsyncError(ncclComm_t real_comm, ncclResult_t *asyncError) {
+    REQUIRE_SYM(ncclCommGetAsyncError, ncclInternalError);
+    return real_ncclCommGetAsyncError(real_comm, asyncError);
+}
+
 /* ── registration ─────────────────────────────────────────────────── */
 
 /*

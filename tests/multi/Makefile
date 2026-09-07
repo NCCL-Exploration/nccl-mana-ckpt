@@ -106,8 +106,76 @@ $(DRIVER): $(DRIVER).cpp
 $(P2P_DRIVER): $(P2P_DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# --- Minimal PyTorch DDP checkpoint/restart ---
+#
+# Needs a venv with torch in this directory (PT_PY overrides the interpreter).
+# PYTHONPATH picks up pyshim/sitecustomize.py, which stops `import torch` from
+# deadlocking DMTCP in a fork; see that file. Both ranks share one GPU via
+# NCCL_MULTI_RANK_GPU_ENABLE, so this runs on a single-GPU host.
+PT_PY ?= $(CURDIR)/venv/bin/python
+PT_PORT ?= 7783
+# One rank per GPU by default, so this runs as-is on a laptop and on a node.
+PT_GPUS := $(shell n=$$(nvidia-smi --list-gpus 2>/dev/null | wc -l); \
+                   [ "$$n" -gt 0 ] && echo $$n || echo 1)
+PT_RANKS ?= $(PT_GPUS)
+PT_CKPT_DELAY ?= 25
+PT_CKPT_TIMEOUT ?= 400
+PT_RESTART_RUN ?= 45
+PT_ENV = WORLD_SIZE=$(PT_RANKS) MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+         NCCL_MULTI_RANK_GPU_ENABLE=1 NCCL_DEBUG=WARN
+
+pytorch_minimal: $(NCCL_PLUGIN)
+	@echo -e "${GREEN}==> Minimal PyTorch DDP checkpoint/restart <==${NC}"; \
+	if [ ! -x "$(PT_PY)" ]; then \
+		echo -e "${RED}No interpreter at $(PT_PY); set PT_PY=/path/to/python${NC}"; exit 1; fi; \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	rm -f ckpt_*.dmtcp dmtcp_restart_script*.sh pt_rank*.log; rm -rf ckpt_*_files; \
+	$(DMTCP_ROOT)/bin/dmtcp_coordinator --daemon -p $(PT_PORT) >/dev/null 2>&1; sleep 1; \
+	. $(CURDIR)/pytorch_dmtcp_env.sh; \
+	PIDS=""; \
+	for r in $$(seq 0 $$(($(PT_RANKS)-1))); do \
+		setsid env $(PT_ENV) RANK=$$r LOCAL_RANK=$$((r % $(PT_GPUS))) \
+		  $(DMTCP_LAUNCH) --coord-port $(PT_PORT) --interval 0 --no-gzip \
+		  --with-plugin $(PLUGIN) $(PT_PY) pytorch_minimal_test.py --steps -1 \
+		  > pt_rank$$r.log 2>&1 & \
+		PIDS="$$PIDS $$!"; \
+	done; \
+	sleep $(PT_CKPT_DELAY); \
+	echo "Triggering checkpoint mid-training..."; \
+	timeout $(PT_CKPT_TIMEOUT) $(DMTCP_CMD) --coord-port $(PT_PORT) --checkpoint; \
+	for i in $$(seq 1 40); do \
+		[ $$(ls ckpt_*.dmtcp 2>/dev/null | wc -l) -ge $(PT_RANKS) ] && break; sleep 5; \
+	done; \
+	grep -aE "^\[pt\]|NCCL Plugin|NCCL PLUGIN" pt_rank0.log | tail -20; \
+	nimg=$$(ls ckpt_*.dmtcp 2>/dev/null | wc -l); \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	for q in $$PIDS; do kill -9 -$$q 2>/dev/null || kill -9 $$q 2>/dev/null || true; done; \
+	if ! grep -aq "sequence consensus converged" pt_rank0.log; then \
+		echo -e "${RED}FAIL: the plugin never reached a consistent cut${NC}"; exit 1; fi; \
+	if [ "$$nimg" -lt $(PT_RANKS) ]; then \
+		echo -e "${RED}FAIL: $$nimg checkpoint images, expected $(PT_RANKS)${NC}"; \
+		echo -e "${RED}      (known DMTCP-side failure: ProcSelfMaps::getNextArea)${NC}"; exit 1; fi; \
+	latest=$$(ls -t ckpt_*.dmtcp | head -n 1); \
+	echo -e "${GREEN}--- Restarting from $$latest ---${NC}"; \
+	$(DMTCP_RESTART) --coord-port $(PT_PORT) ckpt_*.dmtcp > pt_restart.log 2>&1 & \
+	RPID=$$!; \
+	sleep $(PT_RESTART_RUN); \
+	kill -9 $$RPID 2>/dev/null || true; \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	grep -aE "^\[pt\]|NCCL Plugin|rebuild" pt_restart.log | tail -12; \
+	nreb=$$(grep -ac "rebuild: comm" pt_restart.log); \
+	if [ "$$nreb" -lt $(PT_RANKS) ]; then \
+		echo -e "${RED}FAIL: $$nreb communicators rebuilt, expected $(PT_RANKS)${NC}"; exit 1; fi; \
+	if grep -aqE "^FAIL|Error\]|terminate called" pt_restart.log; then \
+		echo -e "${RED}FAIL: the restarted run reported an error${NC}"; exit 1; fi; \
+	steps=$$(grep -ac "all_reduce ok" pt_restart.log); \
+	if [ "$$steps" -lt 3 ]; then \
+		echo -e "${RED}FAIL: restarted run made no progress${NC}"; exit 1; fi; \
+	echo -e "${GREEN}PASS: checkpointed, restarted, $$nreb comm(s) rebuilt, training resumed${NC}"
+
 clean:
 	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv drain_no_msgs cc_simple cc_complex
+	rm -f pt_rank*.log pt_restart.log
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean pytorch_minimal

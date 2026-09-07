@@ -651,6 +651,29 @@ static void rebuild_publish_ids(void) {
     }
 }
 
+/*
+ * The stored config is replayed verbatim, so a communicator the application
+ * created with blocking = 0 is rebuilt non-blocking too and comes back
+ * ncclInProgress: it exists but NCCL is still finishing it in the background.
+ * v->real must not be published until that completes -- the store is what
+ * releases application threads from wait_real(), and NCCL rejects a comm used
+ * before its init returned ncclSuccess.
+ *
+ * The wait is unbounded, matching the blocking path: ncclCommInitRank is
+ * collective, so a rebuild whose peers never arrive hangs either way.
+ */
+static ncclResult_t wait_comm_ready(ncclComm_t real) {
+    for (;;) {
+        ncclResult_t state = ncclSuccess;
+        ncclResult_t r = call_real_ncclCommGetAsyncError(real, &state);
+        if (r != ncclSuccess)
+            return r;
+        if (state != ncclInProgress)
+            return state;
+        usleep(POLL_US);
+    }
+}
+
 static void rebuild_create_comms(void) {
     char key[KVDB_KEY_MAX];
     int order[MAX_VCOMMS];
@@ -704,6 +727,8 @@ static void rebuild_create_comms(void) {
         fflush(stdout);
 
         r = call_real_ncclCommInitRankConfig(&real, v->nranks, id, v->rank, vcomm_config(v));
+        if (r == ncclInProgress && real != NULL)
+            r = wait_comm_ready(real);
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] rebuild: ncclCommInitRank failed for %s: %s\n", hex,
                     nccl_err_str(r));

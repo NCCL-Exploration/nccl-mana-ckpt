@@ -60,6 +60,7 @@ ncclResult_t call_real_ncclCommDestroy(ncclComm_t real_comm);
 ncclResult_t call_real_ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId,
                                               int rank, ncclConfig_t *config);
 ncclResult_t call_real_ncclCommInitAll(ncclComm_t *comms, int ndev, const int *devlist);
+ncclResult_t call_real_ncclCommGetAsyncError(ncclComm_t real_comm, ncclResult_t *asyncError);
 
 /*
  * The dlsym results are dropped across a restart and re-resolved eagerly, on the

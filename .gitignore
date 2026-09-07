@@ -20,8 +20,10 @@ test_nccl
 test_nccl_wrappers
 test_vcomm
 test_nccl.c
+**/__pycache__/
 **/multicomm_test
 **/group_comm_test
+**/nonblocking_test
 **/nccl_dlopen_test
 **/libnccl_dlopen_helper.so
 **/drain_recv
