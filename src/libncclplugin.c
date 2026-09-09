@@ -81,16 +81,14 @@ void init_rank_info(vcomm_t *v) {
  * RTLD_LOCAL -- so the first rebuild dies on a symbol lookup error.
  */
 static const char *nccl_err_str(ncclResult_t r) {
-    static const char *(*fn)(ncclResult_t);
-    if (fn == NULL)
-        *(void **)&fn = nccl_real_dlsym("ncclGetErrorString");
+    const char *(*fn)(ncclResult_t);
+    *(void **)&fn = nccl_real_dlsym("ncclGetErrorString");
     return (fn != NULL) ? fn(r) : "<ncclGetErrorString unavailable>";
 }
 
 static ncclResult_t nccl_get_unique_id(ncclUniqueId *id) {
-    static ncclResult_t (*fn)(ncclUniqueId *);
-    if (fn == NULL)
-        *(void **)&fn = nccl_real_dlsym("ncclGetUniqueId");
+    ncclResult_t (*fn)(ncclUniqueId *);
+    *(void **)&fn = nccl_real_dlsym("ncclGetUniqueId");
     return (fn != NULL) ? fn(id) : ncclInternalError;
 }
 
@@ -674,8 +672,36 @@ static ncclResult_t wait_comm_ready(ncclComm_t real) {
     }
 }
 
-static void rebuild_create_comms(void) {
+/*
+ * Fresh ids, fetched on the checkpoint thread.  dmtcp_kvdb_* is a coordinator
+ * round-trip and is only legal there -- the same reason publication and the
+ * barrier stay on that thread.  The worker only touches CUDA and NCCL.
+ */
+static ncclUniqueId g_rebuild_ids[MAX_VCOMMS];
+static int g_rebuild_id_ok[MAX_VCOMMS];
+
+static void rebuild_fetch_ids(void) {
     char key[KVDB_KEY_MAX];
+    int order[MAX_VCOMMS];
+    int n = vcomm_order(order);
+    int k;
+
+    for (k = 0; k < MAX_VCOMMS; k++)
+        g_rebuild_id_ok[k] = 0;
+
+    for (k = 0; k < n; k++) {
+        int idx = order[k];
+        vcomm_t *v = &g_vcomms[idx];
+
+        if (v->real != NULL || v->origin != VCOMM_REMOTE)
+            continue;
+        key_uid(key, v);
+        g_rebuild_id_ok[idx] =
+            dmtcp_kvdb_get_blob(key, &g_rebuild_ids[idx], sizeof(g_rebuild_ids[idx]));
+    }
+}
+
+static void rebuild_create_comms(void) {
     int order[MAX_VCOMMS];
     int n, k;
 
@@ -692,7 +718,7 @@ static void rebuild_create_comms(void) {
      */
     for (k = 0; k < n; k++) {
         vcomm_t *v = &g_vcomms[order[k]];
-        ncclUniqueId id;
+        ncclUniqueId id = g_rebuild_ids[order[k]];
         ncclComm_t real = NULL;
         ncclResult_t r;
         char hex[VCOMM_IDENT_HEX];
@@ -712,8 +738,7 @@ static void rebuild_create_comms(void) {
          * is a different number whenever CUDA_VISIBLE_DEVICES is set per rank. */
         CUDA_CHECK(cudaSetDevice(v->cuda_dev));
 
-        key_uid(key, v);
-        if (!dmtcp_kvdb_get_blob(key, &id, sizeof(id))) {
+        if (!g_rebuild_id_ok[order[k]]) {
             fprintf(stderr,
                     "[NCCL PLUGIN] rebuild: no fresh id published for comm %s"
                     " (rank %d/%d)\n",
@@ -753,15 +778,26 @@ static void rebuild_all_comms(void) {
     pthread_t worker;
     int rc;
 
+    printf("[NCCL Plugin] rebuild: phase 1 cuda init\n");
+    fflush(stdout);
     pre_init_cuda();
 
+    printf("[NCCL Plugin] rebuild: phase 2 publish ids\n");
+    fflush(stdout);
     rebuild_publish_ids();
 
     /* Unconditional on every peer: a process with no communicators still has to
      * reach this, or its peers block here forever. Barriers are only legal on
      * the checkpoint thread, which is why publication stays here. */
+    printf("[NCCL Plugin] rebuild: phase 3 barrier\n");
+    fflush(stdout);
     snprintf(barrier, sizeof(barrier), "nccl-mana/%u/ids-published", g_epoch);
     dmtcp_global_barrier(barrier);
+
+    rebuild_fetch_ids();
+
+    printf("[NCCL Plugin] rebuild: phase 4 worker thread\n");
+    fflush(stdout);
 
     /*
      * Create the communicators on an ordinary thread rather than on this one.
