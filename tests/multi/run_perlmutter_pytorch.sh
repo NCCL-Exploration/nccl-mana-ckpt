@@ -20,7 +20,7 @@ DMTCP_CMD=${DMTCP_ROOT}/bin/dmtcp_command
 PLUGIN=${SLURM_SUBMIT_DIR}/../../bin/libncclplugin.so:${DMTCP_ROOT}/plugin/cuda/libdmtcp_cuda.so
 
 # Workarounds required to run PyTorch under DMTCP at all; see the file.
-. ${SLURM_SUBMIT_DIR}/pytorch_dmtcp_env.sh
+PT_ENV_DIR=${SLURM_SUBMIT_DIR} . ${SLURM_SUBMIT_DIR}/pytorch_dmtcp_env.sh
 
 # NCCL / MANA Environment
 export NCCL_P2P_DISABLE=0

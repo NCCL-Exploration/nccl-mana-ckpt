@@ -47,7 +47,22 @@ def main():
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
-    dist.init_process_group(backend="nccl", init_method="env://")
+    # A TCPStore does not survive checkpoint/restart: DMTCP restores its sockets
+    # by binding their original local addresses, which are still in TIME_WAIT
+    # from the checkpointed process, so every rank comes back with a dead store
+    # ("Bind failed: Address already in use", then TCPStore recv/send errors from
+    # ProcessGroupNCCL's HeartbeatMonitor).  A FileStore has no sockets to
+    # restore.  PT_STORE_FILE must be on a filesystem shared by all ranks.
+    store_file = os.environ.get("PT_STORE_FILE")
+    if store_file:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="file://" + os.path.abspath(store_file),
+            rank=rank,
+            world_size=world_size,
+        )
+    else:
+        dist.init_process_group(backend="nccl", init_method="env://")
     torch.cuda.set_device(local_rank)
     print(f"[pt] rank {rank}/{world_size} process group ready", flush=True)
 

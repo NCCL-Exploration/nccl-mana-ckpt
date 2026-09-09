@@ -149,22 +149,23 @@ static int nccl_so_cb(struct dl_phdr_info *info, size_t size, void *data) {
  * then binds to that exact instance rather than loading a second NCCL. Failure
  * is not cached, so a lookup made before libnccl is mapped can succeed later.
  */
+static void *g_nccl_handle;
+
 void *nccl_real_dlsym(const char *name) {
-    static void *handle;
     static pthread_mutex_t handle_lock = PTHREAD_MUTEX_INITIALIZER;
-    void *h = __atomic_load_n(&handle, __ATOMIC_ACQUIRE);
+    void *h = __atomic_load_n(&g_nccl_handle, __ATOMIC_ACQUIRE);
 
     if (h == NULL) {
         const char *path = NULL;
         pthread_mutex_lock(&handle_lock);
-        h = handle;
+        h = g_nccl_handle;
         if (h == NULL) {
             dl_iterate_phdr(nccl_so_cb, &path);
             if (path != NULL)
                 h = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
             if (h == NULL)
                 h = dlopen("libnccl.so.2", RTLD_NOW);
-            __atomic_store_n(&handle, h, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_nccl_handle, h, __ATOMIC_RELEASE);
         }
         pthread_mutex_unlock(&handle_lock);
     }
@@ -1539,6 +1540,8 @@ void resolve_wrapper_pointers(void) {
 }
 
 void clear_wrapper_pointers(void) {
+    /* Re-resolved after a restart like every other cached symbol. */
+    __atomic_store_n(&g_nccl_handle, (void *)NULL, __ATOMIC_RELEASE);
     real_ncclSend = NULL;
     real_ncclRecv = NULL;
     real_ncclAllReduce = NULL;
