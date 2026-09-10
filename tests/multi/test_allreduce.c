@@ -2,6 +2,19 @@
 #include <string.h>
 
 
+typedef struct {
+	void* sendbuff;
+	void* recvbuff;
+	size_t count;
+	ncclComm_t comm;
+} allreduce_data_t;
+
+static void call_allreduce(void* call_data, cudaStream_t stream) {
+	allreduce_data_t* data = ((allreduce_data_t*) call_data);
+	NCCLCHECK(ncclAllReduce(data->sendbuff, data->recvbuff, data->count,
+				ncclInt, ncclSum, data->comm, stream));
+}
+
 int main(int argc, char* argv[]) {
 	if (argc < 3) {
 		fprintf(stderr, "Proper usage is: %s <rank> <number of ranks>\n", argv[0]);
@@ -9,10 +22,6 @@ int main(int argc, char* argv[]) {
 	}
 	int rank = atoi(argv[1]);
 	int num_ranks = atoi(argv[2]);
-	const char* test_scenario = getenv("COLLECTIVE_TEST_SCENARIO");
-	if (!test_scenario) test_scenario = "POST_COLLECTIVE";
-	const char* ckpt_fired_flag_path = getenv("COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE");
-	if (!ckpt_fired_flag_path) ckpt_fired_flag_path = "/tmp/collective_test_ckpt_fired.flag";
 	// Initialize CUDA device, NCCL unique ID, and communicator.
 	CUDACHECK(cudaSetDevice(rank));
 	ncclUniqueId Id;
@@ -31,35 +40,11 @@ int main(int argc, char* argv[]) {
 	// Initialize the CUDA stream.
 	cudaStream_t cuStream;
 	CUDACHECK(cudaStreamCreate(&cuStream));
-	// Sequentially check all scenarios.
-	if (strcmp(test_scenario, "PRE_COLLECTIVE") == 0) {
-		printf("MARKER:PRE_COLLECTIVE\n"); fflush(stdout);
-		while (access(ckpt_fired_flag_path, F_OK) != 0) usleep(1000);
-		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
-		CUDACHECK(cudaStreamSynchronize(cuStream));
-	} else if (strcmp(test_scenario, "STRAGGLING_RANK") == 0) {
-		printf("MARKER:STRAGGLING_RANK\n"); fflush(stdout);
-		if (rank == (num_ranks - 1)) {
-			while (access(ckpt_fired_flag_path, F_OK) != 0) usleep(1000);
-		}
-		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
-		if (rank != (num_ranks - 1)) {
-			printf("MARKER:STRAGGLING_RANK\n"); fflush(stdout);
-		}
-		CUDACHECK(cudaStreamSynchronize(cuStream));
-	} else if (strcmp(test_scenario, "INFLIGHT") == 0) {
-		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
-		if (cudaStreamQuery(cuStream) == cudaErrorNotReady) {
-			printf("MARKER:INFLIGHT\n"); fflush(stdout);
-			while (access(ckpt_fired_flag_path, F_OK) != 0) usleep(1000);
-		}
-		CUDACHECK(cudaStreamSynchronize(cuStream));
-	} else { // post collective case.
-		NCCLCHECK(ncclAllReduce(sendbuff, recvbuff, count, ncclInt, ncclSum, comm, cuStream));
-		CUDACHECK(cudaStreamSynchronize(cuStream));
-		printf("MARKER:POST_COLLECTIVE\n"); fflush(stdout);
-		while (access(ckpt_fired_flag_path, F_OK) != 0) usleep(1000);
-	}
+	// Initialize context and call reduce.
+	collective_ctx_t cctx;
+	collective_init(&cctx, rank, num_ranks, cuStream);
+	allreduce_data_t data = { sendbuff, recvbuff, count, comm };
+	run_collective(&cctx, &data, call_allreduce);	
 	// Retrieve the result of ncclAllReduce.
 	int* result = malloc(count * sizeof(int));
 	CUDACHECK(cudaMemcpy(result, recvbuff, count * sizeof(int), cudaMemcpyDeviceToHost));
