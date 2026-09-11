@@ -63,7 +63,6 @@ int main(int argc, char* argv[]) {
 			break;
 		}
 	}
-	printf(mismatch ? "TEST FILE FAIL\n" : "TEST FILE PASS\n");
 	// Free memory.
 	free(hostbuff);
 	free(result);
@@ -72,5 +71,6 @@ int main(int argc, char* argv[]) {
 	cudaStreamDestroy(cuStream);
 	ncclCommDestroy(comm);
 	// Return mismatch result.
+	printf(mismatch ? "TEST FILE FAIL\n" : "TEST FILE PASS\n"); fflush(stdout);
 	return mismatch;
 }	

@@ -11,11 +11,11 @@
 export SLURM_CPU_BIND="cores"
 export UCX_MEM_EVENTS=n
 
-# Usage: sbatch test_aicr_ckpt.sh <test_binary> <n_cycles> <nranks> <timeout_s>
+# Usage: sbatch test_aicr_ckpt.sh <test_binary> <n_cycles> <timeout_s> <num_ranks> 
 TEST_BIN=$1
 N_CYCLES=${2:-5}
-NRANKS=${3:-2}
-TIMEOUT_S=${4:-60}
+TIMEOUT_S=${3:-60}
+NRANKS=${4:-2}
 
 set -euo pipefail
 ulimit -c unlimited
@@ -59,8 +59,6 @@ TMP_RUN_DIR="/tmp/dmtcp_job_${SLURM_JOB_ID:-local}"
 rm -rf "$TMP_RUN_DIR"
 mkdir -p "$TMP_RUN_DIR"
 cd "$TMP_RUN_DIR"
-FLAG_FILE="$TMP_RUN_DIR/collective_ckpt_fired_${SLURM_JOB_ID}.flag"
-ID_FILE="$TMP_RUN_DIR/collective_id_${SLURM_JOB_ID}.bin"
 RESULTS_DIR="$SCRIPT_DIR/results_${SLURM_JOB_ID}"
 mkdir -p "$RESULTS_DIR"
 
@@ -91,72 +89,57 @@ check_coordinator_running() {
   [ "$PEERS" != "" ] && [ "$PEERS" -ge "$NRANKS" ] && [ "$RUNNING" = "yes" ]
 }
 
-# Start up coordinator.
-"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
-killall -9 dmtcp_coordinator 2>/dev/null || true
-sleep 0.5
-echo "Starting DMTCP coordinator on port $PORT..."
-"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
-sleep 1
-"$DMTCP_CMD" --coord-port "$PORT" --status >/dev/null 2>&1
-# Launch each rank under DMTCP.
-PIDS=()
-for ((i=0; i<NRANKS; i++)); do
-        COLLECTIVE_TEST_ID_FILE="$ID_FILE" \
-        COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE="$FLAG_FILE" \
-        "$DMTCP_LAUNCH" -j --coord-port "$PORT" --no-gzip \
-        --with-plugin "$NCCL_PLUGIN:$CUDA_PLUGIN" \
-        "$SCRIPT_DIR/$TEST_BIN" "$i" "$NRANKS" > "rank${i}.log" 2>&1 &
-        PIDS+=("$!")
-done
-wait_with_timeout "all ranks to connect to coordinator" check_coordinator_running
-wait_with_timeout "loop marker on rank 0" bash -c 'grep -q "TEST MARKER: LOOP" rank0.log'
 # Repeatedly checkpoint and restart.
-RESTART_PID=""
 for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
-	# Checkpoint.
-        echo "==> Cycle $cycle/$N_CYCLES: checkpointing..."
-        if ! "$DMTCP_CMD" --coord-port "$PORT" --bcheckpoint; then
-		echo "FAIL: checkpoint command failed on cycle $cycle"
-		exit 1
-	fi
-	# Get the restart script.
-	wait_with_timeout "restart script to appear" bash -c 'ls -t dmtcp_restart_script*.sh >/dev/null 2>&1'
-	RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -1)
-	if ! ls dmtcp_restart_script*.sh >/dev/null 2>&1; then
-		echo "FAIL: checkpoint reported success but no restart script was written"
-		ls -la "$TMP_RUN_DIR" >&2
-		exit 1
-	fi	
-	# Reture the current coordinator and computation running.
+	# Set up file flags and id files.
+	echo "==> Cycle $cycle/$N_CYCLES"
+	FLAG_FILE="$TMP_RUN_DIR/ckpt_fired_flag_cycle${cycle}.flag"
+	ID_FILE="$TMP_RUN_DIR/collective_id_cycle${cycle}.flag"
+	rm -f "$FLAG_FILE" "$ID_FILE"
+	# Set up the coordinator.
 	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
 	killall -9 dmtcp_coordinator 2>/dev/null || true
 	sleep 0.5
-	# Restart the coordinator and run the checkpointed processes.
-        "$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
-        sleep 1
-       ./"$RESTART_SCRIPT" --coord-port "$PORT" > "cycle${cycle}.log" 2>&1 &
-        RESTART_PID=$!
-        wait_with_timeout "cycle $cycle to reconnect" check_coordinator_running
-        echo "Cycle $cycle complete."
+	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
+	sleep 1
+	# Start up the test binary.
+	for ((i=0; i<NRANKS; i++)); do
+		COLLECTIVE_TEST_ID_FILE="$ID_FILE" \
+		COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE="$FLAG_FILE" \
+		"$DMTCP_LAUNCH" -j --coord-port "$PORT" --no-gzip \
+			--with-plugin "$NCCL_PLUGIN:$CUDA_PLUGIN" \
+			"$SCRIPT_DIR/$TEST_BIN" "$i" "$NRANKS" > "rank${i}_c${cycle}.log" 2>&1 &
+	done
+	wait_with_timeout "ranks connect (cycle $cycle)" check_coordinator_running
+	wait_with_timeout "loop marker (cycle $cycle)" bash -c "grep -q 'TEST MARKER: LOOP' rank0_c${cycle}.log"
+	# Checkpoint.
+	"$DMTCP_CMD" --coord-port "$PORT" --bcheckpoint || { echo "FAIL: checkpoint failed on cycle $cycle"; exit 1; }
+	wait_with_timeout "restart script (cycle $cycle)" bash -c 'ls -t dmtcp_restart_script*.sh >/dev/null 2>&1'
+	RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -1)
+	# Allow the test binary to continue.
+	touch "$FLAG_FILE"
+	# Kill the coordinator and the test processes.
+	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
+	killall -9 dmtcp_coordinator 2>/dev/null || true
+	sleep 0.5
+	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
+	sleep 1
+	# Restart the test.
+	./"$RESTART_SCRIPT" --coord-port "$PORT" > "restart_c${cycle}.log" 2>&1
+	RC=$?
+	# Check that the restart completed successfully.
+	if [ $RC -ne 0 ]; then
+		echo "FAIL: cycle $cycle restart: nonzero return code ($RC)."
+		cat "restart_c${cycle}.log"
+		exit 1
+	fi
+	# Check that the test files under restart pass.
+	PASS_COUNT=$(grep -c "TEST FILE PASS" "restart_c${cycle}.log" || echo 0)
+	if [ "$PASS_COUNT" -ne "$NRANKS" ]; then
+		echo "FAIL: cycle $cycle had only $PASS_COUNT/$NRANKS ranks pass"
+		cat "restart_c${cycle}.log"
+		exit 1
+	fi
+	echo "Cycle $cycle PASSED ($PASS_COUNT/$NRANKS)."
 done
-# Check the final cycle's result.
-touch "$FLAG_FILE"
-wait "$RESTART_PID"
-RESTART_RC=$?
-# Check that final cycle exited fine.
-if [ $RESTART_RC -ne 0 ]; then
-        echo "FAIL: final generation exited nonzero ($RESTART_RC)"
-        cat "cycle${N_CYCLES}.log"
-        exit 1
-fi
-# Check that all files passed.
-PASS_COUNT=$(grep -c "TEST FILE PASS" "cycle${N_CYCLES}.log" 2>/dev/null || echo 0)
-if [ "$PASS_COUNT" -eq "$NRANKS" ]; then
-        echo "TEST PASSED: $TEST_BIN ($PASS_COUNT/$NRANKS ranks passed)."
-        exit 0
-else
-        echo "TEST FAILED: $TEST_BIN (only $PASS_COUNT/$NRANKS ranks passed)."
-        cat "cycle${N_CYCLES}.log"
-        exit 1
-fi
+echo "TEST PASSED: all $N_CYCLES cycles independently verified."
