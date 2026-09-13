@@ -108,11 +108,16 @@ $(P2P_DRIVER): $(P2P_DRIVER).cpp
 
 # --- Minimal PyTorch DDP checkpoint/restart ---
 #
-# Needs a venv with torch in this directory (PT_PY overrides the interpreter).
+# PT_PY is autodetected (see below); override it to pick a specific interpreter.
 # PYTHONPATH picks up pyshim/sitecustomize.py, which stops `import torch` from
 # deadlocking DMTCP in a fork; see that file. Both ranks share one GPU via
 # NCCL_MULTI_RANK_GPU_ENABLE, so this runs on a single-GPU host.
-PT_PY ?= $(CURDIR)/venv/bin/python
+ifeq ($(origin PT_PY), undefined)
+PT_PY := $(firstword $(wildcard $(CURDIR)/venv/bin/python) \
+                     $(if $(VIRTUAL_ENV),$(wildcard $(VIRTUAL_ENV)/bin/python)) \
+                     $(shell command -v python3 2>/dev/null) \
+                     $(shell command -v python 2>/dev/null))
+endif
 PT_PORT ?= 7783
 # One rank per GPU by default, so this runs as-is on a laptop and on a node.
 PT_GPUS := $(shell n=$$(nvidia-smi --list-gpus 2>/dev/null | wc -l); \
@@ -138,8 +143,12 @@ PT_ENV = WORLD_SIZE=$(PT_RANKS) MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
 
 pytorch_minimal: $(NCCL_PLUGIN)
 	@echo -e "${GREEN}==> Minimal PyTorch DDP checkpoint/restart <==${NC}"; \
+	if [ -z "$(PT_PY)" ]; then \
+		echo -e "${RED}No python with torch found (tried ./venv, \$$VIRTUAL_ENV, PATH)."; \
+		echo -e "      Set it explicitly: make pytorch_minimal PT_PY=/path/to/python${NC}"; \
+		exit 1; fi; \
 	if [ ! -x "$(PT_PY)" ]; then \
-		echo -e "${RED}No interpreter at $(PT_PY); set PT_PY=/path/to/python${NC}"; exit 1; fi; \
+		echo -e "${RED}Not executable: $(PT_PY)${NC}"; exit 1; fi; \
 	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
 	rm -f ckpt_*.dmtcp dmtcp_restart_script*.sh pt_rank*.log $(PT_STORE_FILE); \
 	rm -rf ckpt_*_files; \
