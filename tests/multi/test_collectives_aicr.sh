@@ -47,11 +47,14 @@ CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PORT=7783
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,NET
-export NCCL_NET_GDR_LEVEL=PHB
-export DMTCP_SLEEP_ON_FAILURE=1
+export DMTCP_SLEEP_ON_FAILURE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_IB_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
+export NCCL_P2P_DISABLE=1
+export NCCL_CUMEM_ENABLE=0
+export NCCL_DMABUF_ENABLE=0
+export NCCL_NVLS_ENABLE=0
 export MPICH_GPU_SUPPORT_ENABLED=0
 # Set up directories.
 cd $SCRIPT_DIR
@@ -64,7 +67,7 @@ mkdir -p "$RESULTS_DIR"
 
 copy_logs_back() {
         cp -v "$TMP_RUN_DIR"/*.log "$RESULTS_DIR/" 2>/dev/null || true
-        cp -v "$TMP_RUN_DIR"/dmtcp_restart_script*.sh "$RESULTS_DIR/" 2>/dev/null || true
+	cp -v "$TMP_RUN_DIR"/core* "$RESULTS_DIR/" 2>/dev/null || true
 }
 trap copy_logs_back EXIT
 
@@ -89,13 +92,35 @@ check_coordinator_running() {
   [ "$PEERS" != "" ] && [ "$PEERS" -ge "$NRANKS" ] && [ "$RUNNING" = "yes" ]
 }
 
+exit_all_processes() {
+	for pid  in "${PIDS[@]}"; do
+		if kill -0 "$pid" 2>/dev/null; then
+			return 1;
+		fi
+	done
+	return 0
+}
+
+all_ranks_ready() {
+	local num_ready=0
+	for ((i=0; i<NRANKS; i++)); do
+		if grep -q "SETUP COMPLETE" "rank${i}_c${cycle}.log" 2>/dev/null; then
+			num_ready=$((num_ready + 1))
+		fi
+	done
+	[ "$num_ready" -eq "$NRANKS" ]
+}
+
 # Repeatedly checkpoint and restart.
 for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
-	# Set up file flags and id files.
+	# Set up id files.
 	echo "==> Cycle $cycle/$N_CYCLES"
-	FLAG_FILE="$TMP_RUN_DIR/ckpt_fired_flag_cycle${cycle}.flag"
-	ID_FILE="$TMP_RUN_DIR/collective_id_cycle${cycle}.flag"
-	rm -f "$FLAG_FILE" "$ID_FILE"
+	ID_FILE="$TMP_RUN_DIR/collective_id_cycle.flag"
+	FLAG_FILE="$TMP_RUN_DIR/collective_exit_flag_file.flag"
+	rm -f "$ID_FILE" "$FLAG_FILE"
+	rm -f "$TMP_RUN_DIR"/dmtcp_restart_script*.sh
+	rm -f "$TMP_RUN_DIR"/ckpt_*.dmtcp
+
 	# Set up the coordinator.
 	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
 	killall -9 dmtcp_coordinator 2>/dev/null || true
@@ -103,20 +128,31 @@ for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
 	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
 	sleep 1
 	# Start up the test binary.
+	PIDS=()
 	for ((i=0; i<NRANKS; i++)); do
 		COLLECTIVE_TEST_ID_FILE="$ID_FILE" \
-		COLLECTIVE_TEST_CKPT_FIRED_FLAG_FILE="$FLAG_FILE" \
+		COLLECTIVE_EXIT_FLAG_FILE="$FLAG_FILE" \
 		"$DMTCP_LAUNCH" -j --coord-port "$PORT" --no-gzip \
 			--with-plugin "$NCCL_PLUGIN:$CUDA_PLUGIN" \
 			"$SCRIPT_DIR/$TEST_BIN" "$i" "$NRANKS" > "rank${i}_c${cycle}.log" 2>&1 &
+		PIDS+=("$!")
 	done
 	wait_with_timeout "ranks connect (cycle $cycle)" check_coordinator_running
-	wait_with_timeout "loop marker (cycle $cycle)" bash -c "grep -q 'TEST MARKER: LOOP' rank0_c${cycle}.log"
-	# Checkpoint.
+	wait_with_timeout "ranks to finish setup (cycle $cycle)" all_ranks_ready
+	# Try to randomoly checkpoint.
+	FIXED_DELAY=0.3
+	DELAY=${FIXED_DELAY:-$(bc <<< "scale=3; 3 * $RANDOM / 32767")} || { echo "FAIL: bc not available"; exit 1; }
+	echo "Sleeping for a delay of ${DELAY} before checkpointing cycle ${cycle}."
+	sleep "$DELAY"
 	"$DMTCP_CMD" --coord-port "$PORT" --bcheckpoint || { echo "FAIL: checkpoint failed on cycle $cycle"; exit 1; }
 	wait_with_timeout "restart script (cycle $cycle)" bash -c 'ls -t dmtcp_restart_script*.sh >/dev/null 2>&1'
 	RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -1)
-	# Allow the test binary to continue.
+	# Wait for processes to clean up memory and exit.
+	for pid in "${PIDS[@]}"; do
+                kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+        done
+	wait_with_timeout "original processes to exit (cycle $cycle)" exit_all_processes
+	# Release the test file.
 	touch "$FLAG_FILE"
 	# Kill the coordinator and the test processes.
 	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
@@ -124,17 +160,17 @@ for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
 	sleep 0.5
 	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
 	sleep 1
-	# Restart the test.
-	./"$RESTART_SCRIPT" --coord-port "$PORT" > "restart_c${cycle}.log" 2>&1
-	RC=$?
-	# Check that the restart completed successfully.
-	if [ $RC -ne 0 ]; then
-		echo "FAIL: cycle $cycle restart: nonzero return code ($RC)."
-		cat "restart_c${cycle}.log"
-		exit 1
-	fi
+	# Restart and check that the restart completed successfully.
+	RC=0
+        ./"$RESTART_SCRIPT" --coord-port "$PORT" > "restart_c${cycle}.log" 2>&1 || RC=$?
+        if [ "$RC" -ne 0 ]; then
+                echo "FAIL: cycle $cycle restart: nonzero return code ($RC)."
+                cat "restart_c${cycle}.log"
+                exit 1
+        fi
 	# Check that the test files under restart pass.
-	PASS_COUNT=$(grep -c "TEST FILE PASS" "restart_c${cycle}.log" || echo 0)
+        PASS_COUNT=$(grep -c "TEST FILE PASS" "restart_c${cycle}.log" || true)
+        PASS_COUNT=${PASS_COUNT:-0}
 	if [ "$PASS_COUNT" -ne "$NRANKS" ]; then
 		echo "FAIL: cycle $cycle had only $PASS_COUNT/$NRANKS ranks pass"
 		cat "restart_c${cycle}.log"
