@@ -104,6 +104,9 @@ static inline void run_collective(collective_ctx_t* cctx, void* call_data,
 		collective_fnc collective_fnc) {
 	const char* queue_size_env = getenv("COLLECTIVE_TEST_QUEUE_SIZE");
 	int min_queue_size = queue_size_env ? atoi(queue_size_env) : 500;
+	// Initialize NCCL communication and prepare all ranks.
+	collective_fnc(call_data, cctx->stream);
+	CUDACHECK(cudaStreamSynchronize(cctx->stream));
 	printf("TEST SETUP COMPLETE\n"); fflush(stdout);
 	for (int i = 0; i < min_queue_size; i++) {
 		collective_fnc(call_data, cctx->stream);

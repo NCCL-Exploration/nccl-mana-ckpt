@@ -2,7 +2,7 @@
 #SBATCH --partition=b200-batch
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --gpus=2
+#SBATCH --gpus=3
 #SBATCH --nodes=1
 #SBATCH --time=00:30:00
 #SBATCH -J collective-nccl-ckpt
@@ -15,7 +15,7 @@ export UCX_MEM_EVENTS=n
 TEST_BIN=$1
 N_CYCLES=${2:-5}
 TIMEOUT_S=${3:-60}
-NRANKS=${4:-2}
+NRANKS=${4:-3}
 
 set -euo pipefail
 ulimit -c unlimited
@@ -47,7 +47,7 @@ CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PORT=7783
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,NET
-export DMTCP_SLEEP_ON_FAILURE=0
+export DMTCP_SLEEP_ON_FAILURE=1
 export NCCL_SHM_DISABLE=1
 export NCCL_IB_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
@@ -84,7 +84,7 @@ wait_with_timeout() {
         done
 }
 
-check_coordinator_running() {
+check_ranks_connected() {
   local STATUS
   STATUS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null)
   local PEERS=$(echo "$STATUS" | grep NUM_PEERS | awk -F= '{print $2}')
@@ -94,9 +94,7 @@ check_coordinator_running() {
 
 exit_all_processes() {
 	for pid  in "${PIDS[@]}"; do
-		if kill -0 "$pid" 2>/dev/null; then
-			return 1;
-		fi
+		wait "$pid"
 	done
 	return 0
 }
@@ -120,13 +118,17 @@ for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
 	rm -f "$ID_FILE" "$FLAG_FILE"
 	rm -f "$TMP_RUN_DIR"/dmtcp_restart_script*.sh
 	rm -f "$TMP_RUN_DIR"/ckpt_*.dmtcp
-
 	# Set up the coordinator.
 	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
 	killall -9 dmtcp_coordinator 2>/dev/null || true
 	sleep 0.5
 	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
 	sleep 1
+	if ! $DMTCP_CMD --coord-port $PORT --status >/dev/null 2>&1; then
+		echo "ERROR: Failed to start DMTCP coordinator."
+		exit 1
+	fi
+	echo "Coordinator is running."
 	# Start up the test binary.
 	PIDS=()
 	for ((i=0; i<NRANKS; i++)); do
@@ -137,27 +139,20 @@ for ((cycle=1; cycle<=N_CYCLES; cycle++)); do
 			"$SCRIPT_DIR/$TEST_BIN" "$i" "$NRANKS" > "rank${i}_c${cycle}.log" 2>&1 &
 		PIDS+=("$!")
 	done
-	wait_with_timeout "ranks connect (cycle $cycle)" check_coordinator_running
+	wait_with_timeout "ranks connect (cycle $cycle)" check_ranks_connected
 	wait_with_timeout "ranks to finish setup (cycle $cycle)" all_ranks_ready
 	# Try to randomoly checkpoint.
-	FIXED_DELAY=0.3
-	DELAY=${FIXED_DELAY:-$(bc <<< "scale=3; 3 * $RANDOM / 32767")} || { echo "FAIL: bc not available"; exit 1; }
+	DELAY=$(bc <<< "scale=3; 3 * $RANDOM / 32767") || { echo "FAIL: bc not available"; exit 1; }
 	echo "Sleeping for a delay of ${DELAY} before checkpointing cycle ${cycle}."
 	sleep "$DELAY"
 	"$DMTCP_CMD" --coord-port "$PORT" --bcheckpoint || { echo "FAIL: checkpoint failed on cycle $cycle"; exit 1; }
 	wait_with_timeout "restart script (cycle $cycle)" bash -c 'ls -t dmtcp_restart_script*.sh >/dev/null 2>&1'
 	RESTART_SCRIPT=$(ls -t dmtcp_restart_script*.sh | head -1)
-	# Wait for processes to clean up memory and exit.
-	for pid in "${PIDS[@]}"; do
-                kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
-        done
-	wait_with_timeout "original processes to exit (cycle $cycle)" exit_all_processes
 	# Release the test file.
 	touch "$FLAG_FILE"
+	# Wait for processes to clean up memory and exit.
+	wait_with_timeout "original processes to exit (cycle $cycle)" exit_all_processes
 	# Kill the coordinator and the test processes.
-	"$DMTCP_CMD" --coord-port "$PORT" --quit --quiet 2>/dev/null || true
-	killall -9 dmtcp_coordinator 2>/dev/null || true
-	sleep 0.5
 	"$DMTCP_ROOT/bin/dmtcp_coordinator" --daemon --coord-port "$PORT" --exit-on-last
 	sleep 1
 	# Restart and check that the restart completed successfully.
