@@ -149,8 +149,10 @@ pytorch_minimal: $(NCCL_PLUGIN)
 		exit 1; fi; \
 	if [ ! -x "$(PT_PY)" ]; then \
 		echo -e "${RED}Not executable: $(PT_PY)${NC}"; exit 1; fi; \
+	JOB_START=$$(date +%s%N); \
+	PHASE1_START=$$(date +%s%N); \
 	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
-	rm -f ckpt_*.dmtcp dmtcp_restart_script*.sh pt_rank*.log $(PT_STORE_FILE); \
+	rm -f ckpt_*.dmtcp dmtcp_restart_script*.sh pt_rank*.log pt_restart.log $(PT_STORE_FILE) pt_ckpt_metrics.json; \
 	rm -rf ckpt_*_files; \
 	$(DMTCP_ROOT)/bin/dmtcp_coordinator --daemon -p $(PT_PORT) >/dev/null 2>&1; sleep 1; \
 	if [ -n "$(PT_STORE_FILE)" ] && command -v flock >/dev/null 2>&1; then \
@@ -199,15 +201,26 @@ pytorch_minimal: $(NCCL_PLUGIN)
 		$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
 		for q in $$PIDS; do kill -9 -$$q 2>/dev/null || kill -9 $$q 2>/dev/null || true; done; \
 		exit 1; fi; \
+	READY_TIME=$$(date +%s%N); \
+	STARTUP_MS=$$(((READY_TIME - PHASE1_START) / 1000000)); \
 	echo "All $(PT_RANKS) rank(s) training; checkpointing in $(PT_CKPT_DELAY)s..."; \
 	sleep $(PT_CKPT_DELAY); \
 	echo "Triggering checkpoint mid-training..."; \
+	CKPT_START=$$(date +%s%N); \
 	timeout $(PT_CKPT_TIMEOUT) $(DMTCP_CMD) --coord-port $(PT_PORT) --checkpoint; \
+	CKPT_TRIGGER=$$(date +%s%N); \
+	CKPT_TRIGGER_MS=$$(((CKPT_TRIGGER - CKPT_START) / 1000000)); \
 	for i in $$(seq 1 40); do \
 		[ $$(ls ckpt_*.dmtcp 2>/dev/null | wc -l) -ge $(PT_RANKS) ] && break; sleep 5; \
 	done; \
+	CKPT_DONE=$$(date +%s%N); \
+	CKPT_TOTAL_MS=$$(((CKPT_DONE - CKPT_START) / 1000000)); \
 	grep -aE "^\[pt\]|NCCL Plugin|NCCL PLUGIN" pt_rank0.log | tail -20; \
 	nimg=$$(ls ckpt_*.dmtcp 2>/dev/null | wc -l); \
+	PRE_STEPS=$$(grep -a "all_reduce ok" pt_rank0.log 2>/dev/null | tail -1 | grep -o 'step [0-9]*' | awk '{print $$2}' || echo "0"); \
+	CKPT_BYTES=$$(du -csb ckpt_*.dmtcp 2>/dev/null | tail -1 | awk '{print $$1}' || echo "0"); \
+	NCCL_TIME_S=$$(grep -a "\[NCCL PLUGIN\] Checkpoint overhead:" pt_rank*.log 2>/dev/null | awk '{print $$5}' | sort -n | tail -1 || echo "0"); \
+	CUDA_TIME_S=$$(grep -a "\[CUDA PLUGIN\] Checkpoint overhead:" pt_rank*.log 2>/dev/null | awk '{print $$5}' | sort -n | tail -1 || echo "0"); \
 	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
 	for q in $$PIDS; do kill -9 -$$q 2>/dev/null || kill -9 $$q 2>/dev/null || true; done; \
 	if ! grep -aq "sequence consensus converged" pt_rank0.log; then \
@@ -217,11 +230,23 @@ pytorch_minimal: $(NCCL_PLUGIN)
 		echo -e "${RED}      (known DMTCP-side failure: ProcSelfMaps::getNextArea)${NC}"; exit 1; fi; \
 	latest=$$(ls -t ckpt_*.dmtcp | head -n 1); \
 	echo -e "${GREEN}--- Restarting from $$latest ---${NC}"; \
+	RESTART_START=$$(date +%s%N); \
 	$(DMTCP_RESTART) --coord-port $(PT_PORT) ckpt_*.dmtcp > pt_restart.log 2>&1 & \
 	RPID=$$!; \
-	sleep $(PT_RESTART_RUN); \
+	FIRST_STEP_MS="N/A"; \
+	for i in $$(seq 1 $(PT_RESTART_RUN)); do \
+		if [ "$$FIRST_STEP_MS" = "N/A" ] && grep -aq "all_reduce ok" pt_restart.log 2>/dev/null; then \
+			NOW=$$(date +%s%N); \
+			FIRST_STEP_MS=$$(((NOW - RESTART_START) / 1000000)); \
+		fi; \
+		sleep 1; \
+	done; \
 	kill -9 $$RPID 2>/dev/null || true; \
 	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	RESTART_DONE=$$(date +%s%N); \
+	RESTART_MS=$$(((RESTART_DONE - RESTART_START) / 1000000)); \
+	JOB_DONE=$$(date +%s%N); \
+	JOB_TOTAL_MS=$$(((JOB_DONE - JOB_START) / 1000000)); \
 	grep -aE "^\[pt\]|NCCL Plugin|rebuild" pt_restart.log | tail -12; \
 	if grep -aqE "Error\]|JASSERT|Terminating|Segmentation fault|Killed" pt_restart.log; then \
 		echo -e "${RED}FAIL: dmtcp_restart failed; first errors:${NC}"; \
@@ -239,6 +264,26 @@ pytorch_minimal: $(NCCL_PLUGIN)
 	steps=$$(grep -ac "all_reduce ok" pt_restart.log); \
 	if [ "$$steps" -lt 3 ]; then \
 		echo -e "${RED}FAIL: restarted run made no progress${NC}"; exit 1; fi; \
+	$(PT_PY) $(CURDIR)/report_metrics.py \
+		--startup-ms "$$STARTUP_MS" \
+		--ckpt-trig-ms "$$CKPT_TRIGGER_MS" \
+		--ckpt-total-ms "$$CKPT_TOTAL_MS" \
+		--restart-total-ms "$$RESTART_MS" \
+		--first-step-ms "$$FIRST_STEP_MS" \
+		--job-total-ms "$$JOB_TOTAL_MS" \
+		--ckpt-bytes "$$CKPT_BYTES" \
+		--nccl-overhead-sec "$${NCCL_TIME_S:-0}" \
+		--cuda-overhead-sec "$${CUDA_TIME_S:-0}" \
+		--ckpt-file-count "$$nimg" \
+		--rebuilt-comms "$$nreb" \
+		--pre-steps "$${PRE_STEPS:-0}" \
+		--post-steps "$$steps" \
+		--ranks "$(PT_RANKS)" \
+		--gpus "$(PT_GPUS)" \
+		--store "$(if $(PT_STORE_FILE),FileStore ($(PT_STORE_FILE)),TCPStore (env://))" \
+		--rank0-log "pt_rank0.log" \
+		--restart-log "pt_restart.log" \
+		--json-out "pt_ckpt_metrics.json" 2>/dev/null || true; \
 	echo -e "${GREEN}PASS: checkpointed, restarted, $$nreb comm(s) rebuilt, training resumed${NC}"
 
 clean:
