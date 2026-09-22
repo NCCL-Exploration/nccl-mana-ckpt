@@ -81,6 +81,7 @@ def main():
 
     step = 0
     while args.steps < 0 or step < args.steps:
+        t0 = time.perf_counter()
         inputs = torch.randn(args.batch_size, args.width, device=local_rank)
         targets = torch.randint(0, 10, (args.batch_size,), device=local_rank)
         optimizer.zero_grad()
@@ -102,9 +103,10 @@ def main():
             )
             sys.exit(1)
 
+        step_ms = (time.perf_counter() - t0) * 1000.0
         if step % args.report_every == 0:
             print(
-                f"[pt] rank {rank} step {step} loss {loss.item():.4f} all_reduce ok",
+                f"[pt] rank {rank} step {step} step_time {step_ms:.2f}ms loss {loss.item():.4f} all_reduce ok",
                 flush=True,
             )
         step += 1
