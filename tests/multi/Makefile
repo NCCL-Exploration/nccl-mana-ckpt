@@ -53,19 +53,19 @@ test4: $(DRIVER) $(NCCL_PLUGIN)
 	@$(call run_test,4,Test 4: In-transit checkpoint,10,$(MSGS),$(SIZE),$(NGPUS))
 
 drain_send: drain_send.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 drain_recv: drain_recv.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 drain_no_msgs: drain_no_msgs.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 cc_simple: cc_simple.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 cc_complex: cc_complex.c
-	nvcc ${CFLAGS} -o $@ $<
+	nvcc ${CFLAGS} $(MPI_FLAGS) -o $@ $<
 
 # --- Helper Macro ---
 define run_test
@@ -106,8 +106,189 @@ $(DRIVER): $(DRIVER).cpp
 $(P2P_DRIVER): $(P2P_DRIVER).cpp
 	$(CC) $(CFLAGS) -o $@ $< -ldl
 
+# --- Minimal PyTorch DDP checkpoint/restart ---
+#
+# PT_PY is autodetected (see below); override it to pick a specific interpreter.
+# PYTHONPATH picks up pyshim/sitecustomize.py, which stops `import torch` from
+# deadlocking DMTCP in a fork; see that file. Both ranks share one GPU via
+# NCCL_MULTI_RANK_GPU_ENABLE, so this runs on a single-GPU host.
+ifeq ($(origin PT_PY), undefined)
+PT_PY := $(firstword $(wildcard $(CURDIR)/venv/bin/python) \
+                     $(if $(VIRTUAL_ENV),$(wildcard $(VIRTUAL_ENV)/bin/python)) \
+                     $(shell command -v python3 2>/dev/null) \
+                     $(shell command -v python 2>/dev/null))
+endif
+PT_PORT ?= 7783
+# One rank per GPU by default, so this runs as-is on a laptop and on a node.
+PT_GPUS := $(shell n=$$(nvidia-smi --list-gpus 2>/dev/null | wc -l); \
+                   [ "$$n" -gt 0 ] && echo $$n || echo 1)
+PT_RANKS ?= $(PT_GPUS)
+PT_CKPT_DELAY ?= 10
+PT_STARTUP_TIMEOUT ?= 600
+PT_CKPT_TIMEOUT ?= 400
+PT_RESTART_RUN ?= 45
+# Empty uses PyTorch's own TCPStore (env://), which is what real jobs run.
+# DMTCP does not restore its sockets, so after a restart the watchdog logs
+# TCPStore errors -- but they are warnings from the dump-signal check, not the
+# training path, and the run still passes.
+#
+# Set this to a path to use a FileStore instead, which restores silently.  That
+# path must support flock() and be visible to every rank: node-local /tmp works
+# for a single node, while GPFS and Lustre generally fail with the kernel's
+# ENOTSUPP, surfacing as "DistStoreError: Unknown error 524".
+PT_STORE_FILE ?=
+PT_ENV = WORLD_SIZE=$(PT_RANKS) MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+         PT_STORE_FILE=$(PT_STORE_FILE) \
+         NCCL_MULTI_RANK_GPU_ENABLE=1 NCCL_DEBUG=WARN
+
+pytorch_minimal: $(NCCL_PLUGIN)
+	@echo -e "${GREEN}==> Minimal PyTorch DDP checkpoint/restart <==${NC}"; \
+	if [ -z "$(PT_PY)" ]; then \
+		echo -e "${RED}No python with torch found (tried ./venv, \$$VIRTUAL_ENV, PATH)."; \
+		echo -e "      Set it explicitly: make pytorch_minimal PT_PY=/path/to/python${NC}"; \
+		exit 1; fi; \
+	if [ ! -x "$(PT_PY)" ]; then \
+		echo -e "${RED}Not executable: $(PT_PY)${NC}"; exit 1; fi; \
+	JOB_START=$$(date +%s%N); \
+	PHASE1_START=$$(date +%s%N); \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	rm -f ckpt_*.dmtcp dmtcp_restart_script*.sh pt_rank*.log pt_restart.log $(PT_STORE_FILE) pt_ckpt_metrics.json; \
+	rm -rf ckpt_*_files; \
+	$(DMTCP_ROOT)/bin/dmtcp_coordinator --daemon -p $(PT_PORT) >/dev/null 2>&1; sleep 1; \
+	if [ -n "$(PT_STORE_FILE)" ] && command -v flock >/dev/null 2>&1; then \
+		flock -n "$(PT_STORE_FILE)" true 2>/dev/null || { \
+			echo -e "${RED}FAIL: $(PT_STORE_FILE) does not support flock()."; \
+			echo -e "      PyTorch's FileStore requires it, and reports the failure as"; \
+			echo -e "      'DistStoreError: Unknown error 524' once every rank is up."; \
+			echo -e "      Parallel filesystems (GPFS, Lustre without -o flock) lack it;"; \
+			echo -e "      use a node-local path, e.g. PT_STORE_FILE=/tmp/pt_store_$$USER${NC}"; \
+			exit 1; }; \
+	fi; \
+	PT_ENV_DIR=$(CURDIR); . $(CURDIR)/pytorch_dmtcp_env.sh; \
+	PIDS=""; \
+	for r in $$(seq 0 $$(($(PT_RANKS)-1))); do \
+		setsid env $(PT_ENV) RANK=$$r LOCAL_RANK=$$((r % $(PT_GPUS))) \
+		  $(DMTCP_LAUNCH) --coord-port $(PT_PORT) --interval 0 --no-gzip \
+		  --with-plugin $(PLUGIN) $(PT_PY) pytorch_minimal_test.py --steps -1 \
+		  > pt_rank$$r.log 2>&1 & \
+		PIDS="$$PIDS $$!"; \
+	done; \
+	echo "Waiting up to $(PT_STARTUP_TIMEOUT)s for $(PT_RANKS) rank(s) to start training..."; \
+	ready=0; \
+	for i in $$(seq 1 $(PT_STARTUP_TIMEOUT)); do \
+		st=$$($(DMTCP_CMD) --coord-port $(PT_PORT) --status 2>/dev/null); \
+		np=$$(echo "$$st" | grep -o 'NUM_PEERS=[0-9]*' | cut -d= -f2); \
+		rn=$$(echo "$$st" | grep -o 'RUNNING=[a-z]*' | cut -d= -f2); \
+		trained=$$(grep -l "all_reduce ok" pt_rank*.log 2>/dev/null | wc -l); \
+		if [ "$$np" = "$(PT_RANKS)" ] && [ "$$rn" = "yes" ] \
+		   && [ "$$trained" -ge $(PT_RANKS) ]; then ready=1; break; fi; \
+		if grep -alE "Traceback \(most recent call last\)|^FAIL " pt_rank*.log \
+		     >/dev/null 2>&1; then \
+			echo -e "${RED}A rank failed during startup:${NC}"; break; fi; \
+		alive=0; \
+		for q in $$PIDS; do kill -0 $$q 2>/dev/null && alive=$$((alive+1)); done; \
+		if [ "$$alive" -eq 0 ] && [ "$$i" -gt 5 ]; then \
+			echo -e "${RED}All launcher processes exited before training started.${NC}"; \
+			break; fi; \
+		sleep 1; \
+	done; \
+	if [ "$$ready" -ne 1 ]; then \
+		echo -e "${RED}FAIL: ranks never reached training (waited $${i}s, max $(PT_STARTUP_TIMEOUT)s):"; \
+		echo -e "      coordinator NUM_PEERS=$$np (want $(PT_RANKS)), RUNNING=$$rn (want yes)"; \
+		echo -e "      rank logs showing training: $$trained of $(PT_RANKS)"; \
+		echo -e "      raise PT_STARTUP_TIMEOUT, or see pt_rank*.log below${NC}"; \
+		for f in pt_rank*.log; do echo "--- $$f ---"; tail -n 12 "$$f"; done; \
+		$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+		for q in $$PIDS; do kill -9 -$$q 2>/dev/null || kill -9 $$q 2>/dev/null || true; done; \
+		exit 1; fi; \
+	READY_TIME=$$(date +%s%N); \
+	STARTUP_MS=$$(((READY_TIME - PHASE1_START) / 1000000)); \
+	echo "All $(PT_RANKS) rank(s) training; checkpointing in $(PT_CKPT_DELAY)s..."; \
+	sleep $(PT_CKPT_DELAY); \
+	echo "Triggering checkpoint mid-training..."; \
+	CKPT_START=$$(date +%s%N); \
+	timeout $(PT_CKPT_TIMEOUT) $(DMTCP_CMD) --coord-port $(PT_PORT) --checkpoint; \
+	CKPT_TRIGGER=$$(date +%s%N); \
+	CKPT_TRIGGER_MS=$$(((CKPT_TRIGGER - CKPT_START) / 1000000)); \
+	for i in $$(seq 1 40); do \
+		[ $$(ls ckpt_*.dmtcp 2>/dev/null | wc -l) -ge $(PT_RANKS) ] && break; sleep 5; \
+	done; \
+	CKPT_DONE=$$(date +%s%N); \
+	CKPT_TOTAL_MS=$$(((CKPT_DONE - CKPT_START) / 1000000)); \
+	grep -aE "^\[pt\]|NCCL Plugin|NCCL PLUGIN" pt_rank0.log | tail -20; \
+	nimg=$$(ls ckpt_*.dmtcp 2>/dev/null | wc -l); \
+	PRE_STEPS=$$(grep -a "all_reduce ok" pt_rank0.log 2>/dev/null | tail -1 | grep -o 'step [0-9]*' | awk '{print $$2}' || echo "0"); \
+	CKPT_BYTES=$$(du -csb ckpt_*.dmtcp 2>/dev/null | tail -1 | awk '{print $$1}' || echo "0"); \
+	NCCL_TIME_S=$$(grep -a "\[NCCL PLUGIN\] Checkpoint overhead:" pt_rank*.log 2>/dev/null | awk '{print $$5}' | sort -n | tail -1 || echo "0"); \
+	CUDA_TIME_S=$$(grep -a "\[CUDA PLUGIN\] Checkpoint overhead:" pt_rank*.log 2>/dev/null | awk '{print $$5}' | sort -n | tail -1 || echo "0"); \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	for q in $$PIDS; do kill -9 -$$q 2>/dev/null || kill -9 $$q 2>/dev/null || true; done; \
+	if ! grep -aq "sequence consensus converged" pt_rank0.log; then \
+		echo -e "${RED}FAIL: the plugin never reached a consistent cut${NC}"; exit 1; fi; \
+	if [ "$$nimg" -lt $(PT_RANKS) ]; then \
+		echo -e "${RED}FAIL: $$nimg checkpoint images, expected $(PT_RANKS)${NC}"; \
+		echo -e "${RED}      (known DMTCP-side failure: ProcSelfMaps::getNextArea)${NC}"; exit 1; fi; \
+	latest=$$(ls -t ckpt_*.dmtcp | head -n 1); \
+	echo -e "${GREEN}--- Restarting from $$latest ---${NC}"; \
+	RESTART_START=$$(date +%s%N); \
+	$(DMTCP_RESTART) --coord-port $(PT_PORT) ckpt_*.dmtcp > pt_restart.log 2>&1 & \
+	RPID=$$!; \
+	FIRST_STEP_MS="N/A"; \
+	for i in $$(seq 1 $(PT_RESTART_RUN)); do \
+		if [ "$$FIRST_STEP_MS" = "N/A" ] && grep -aq "all_reduce ok" pt_restart.log 2>/dev/null; then \
+			NOW=$$(date +%s%N); \
+			FIRST_STEP_MS=$$(((NOW - RESTART_START) / 1000000)); \
+		fi; \
+		sleep 1; \
+	done; \
+	kill -9 $$RPID 2>/dev/null || true; \
+	$(DMTCP_CMD) --coord-port $(PT_PORT) --quit --quiet 2>/dev/null || true; \
+	RESTART_DONE=$$(date +%s%N); \
+	RESTART_MS=$$(((RESTART_DONE - RESTART_START) / 1000000)); \
+	JOB_DONE=$$(date +%s%N); \
+	JOB_TOTAL_MS=$$(((JOB_DONE - JOB_START) / 1000000)); \
+	grep -aE "^\[pt\]|NCCL Plugin|rebuild" pt_restart.log | tail -12; \
+	if grep -aqE "Error\]|JASSERT|Terminating|Segmentation fault|Killed" pt_restart.log; then \
+		echo -e "${RED}FAIL: dmtcp_restart failed; first errors:${NC}"; \
+		grep -aE "Error\]|JASSERT|Terminating|Segmentation fault|Killed" pt_restart.log | head -5; \
+		echo "--- tail of pt_restart.log ---"; tail -20 pt_restart.log; \
+		echo "--- tail of pt_rank0.log ---"; tail -10 pt_rank0.log; \
+		exit 1; fi; \
+	nreb=$$(grep -ac "rebuild: comm" pt_restart.log); \
+	if [ "$$nreb" -lt $(PT_RANKS) ]; then \
+		echo -e "${RED}FAIL: $$nreb communicators rebuilt, expected $(PT_RANKS)${NC}"; \
+		echo "--- tail of pt_restart.log ---"; tail -20 pt_restart.log; \
+		exit 1; fi; \
+	if grep -aqE "^FAIL|Error\]|terminate called" pt_restart.log; then \
+		echo -e "${RED}FAIL: the restarted run reported an error${NC}"; exit 1; fi; \
+	steps=$$(grep -ac "all_reduce ok" pt_restart.log); \
+	if [ "$$steps" -lt 3 ]; then \
+		echo -e "${RED}FAIL: restarted run made no progress${NC}"; exit 1; fi; \
+	$(PT_PY) $(CURDIR)/report_metrics.py \
+		--startup-ms "$$STARTUP_MS" \
+		--ckpt-trig-ms "$$CKPT_TRIGGER_MS" \
+		--ckpt-total-ms "$$CKPT_TOTAL_MS" \
+		--restart-total-ms "$$RESTART_MS" \
+		--first-step-ms "$$FIRST_STEP_MS" \
+		--job-total-ms "$$JOB_TOTAL_MS" \
+		--ckpt-bytes "$$CKPT_BYTES" \
+		--nccl-overhead-sec "$${NCCL_TIME_S:-0}" \
+		--cuda-overhead-sec "$${CUDA_TIME_S:-0}" \
+		--ckpt-file-count "$$nimg" \
+		--rebuilt-comms "$$nreb" \
+		--pre-steps "$${PRE_STEPS:-0}" \
+		--post-steps "$$steps" \
+		--ranks "$(PT_RANKS)" \
+		--gpus "$(PT_GPUS)" \
+		--store "$(if $(PT_STORE_FILE),FileStore ($(PT_STORE_FILE)),TCPStore (env://))" \
+		--rank0-log "pt_rank0.log" \
+		--restart-log "pt_restart.log" \
+		--json-out "pt_ckpt_metrics.json" 2>/dev/null || true; \
+	echo -e "${GREEN}PASS: checkpointed, restarted, $$nreb comm(s) rebuilt, training resumed${NC}"
+
 clean:
 	rm -f $(DRIVER) $(P2P_DRIVER) drain_send drain_recv drain_no_msgs cc_simple cc_complex
+	rm -f pt_rank*.log pt_restart.log
 	rm -rf ckpt_*_files/ *.dmtcp *.temp dmtcp_restart_script*.sh
 
-.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean
+.PHONY: all test_all test1 test2 test3 test4 gather_p2p_test scatter_p2p_test clean pytorch_minimal
