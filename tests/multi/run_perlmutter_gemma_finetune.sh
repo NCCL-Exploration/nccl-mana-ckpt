@@ -56,12 +56,12 @@ PYTHON_EXEC="python3"
   export RANK=0
   export LOCAL_RANK=0
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      $PYTHON_EXEC gemma_finetune_test.py --epochs -1 &
+      $PYTHON_EXEC gemma_benchmark.py --epochs -1 &
       
   export RANK=1
   export LOCAL_RANK=1
   $DMTCP_LAUNCH -j --coord-port $PORT --interval 0 --with-plugin $PLUGIN \
-      $PYTHON_EXEC gemma_finetune_test.py --epochs -1 &
+      $PYTHON_EXEC gemma_benchmark.py --epochs -1 &
       
   wait
 ) &
