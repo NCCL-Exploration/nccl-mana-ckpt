@@ -35,7 +35,7 @@ extern "C" ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff, size_t
         } \
     } while (0)
 
-const int ITERS = 10;
+const int ITERS = 100;
 const int WARMUP = 2;
 const size_t COUNT = 1024 * 1024; // 1M floats = 4MB per GPU
 

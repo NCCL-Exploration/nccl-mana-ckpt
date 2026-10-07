@@ -22,11 +22,24 @@ if [ ! -f ../../bin/libncclplugin.so ]; then
     make -C ../.. plugin
 fi
 
+# Resolve DMTCP Paths
 DMTCP_LAUNCH="../../dmtcp/bin/dmtcp_launch"
 if [ ! -x "$DMTCP_LAUNCH" ]; then
-    echo "Warning: dmtcp_launch not found at $DMTCP_LAUNCH. Please ensure DMTCP is built."
-    # We will try to rely on PATH if possible
     DMTCP_LAUNCH="dmtcp_launch"
+fi
+
+NCCL_PLUGIN="$(realpath ../../bin/libncclplugin.so)"
+CUDA_PLUGIN="$(realpath ../../dmtcp/plugin/cuda/libdmtcp_cuda.so)"
+
+if [ ! -f "$CUDA_PLUGIN" ]; then
+    # Fallback to system-wide or user path if needed
+    CUDA_PLUGIN="$(realpath ../../../dmtcp/plugin/cuda/libdmtcp_cuda.so 2>/dev/null || echo '')"
+fi
+
+# Sanity check plugins
+if [ -z "$CUDA_PLUGIN" ] || [ ! -f "$CUDA_PLUGIN" ]; then
+    echo "Warning: CUDA plugin not found at ../../dmtcp/plugin/cuda/libdmtcp_cuda.so."
+    echo "This might cause Bus errors during GPU memory operations."
 fi
 
 echo ""
@@ -39,9 +52,9 @@ echo ""
 echo "=========================================================="
 echo " RUN 2: NCCL-CR PLUGIN INTERPOSITION"
 echo "=========================================================="
-# We must use dmtcp_launch so that the DMTCP symbols (like dmtcp_plugin_disable_ckpt)
-# are loaded into the process. We use --interval 0 to prevent actual checkpoints.
-$DMTCP_LAUNCH --interval 0 --no-gzip --with-plugin $(realpath ../../bin/libncclplugin.so) ./profile_collectives
+# We must use BOTH the NCCL plugin and the CUDA plugin.
+# Order matters: NCCL_PLUGIN must precede CUDA_PLUGIN.
+$DMTCP_LAUNCH --interval 0 --no-gzip --with-plugin "$NCCL_PLUGIN:$CUDA_PLUGIN" ./profile_collectives
 
 echo ""
 echo "=========================================================="
