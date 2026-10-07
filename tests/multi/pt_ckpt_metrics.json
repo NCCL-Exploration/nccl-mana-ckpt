@@ -1,0 +1,33 @@
+{
+  "config": {
+    "ranks": 2,
+    "gpus": 2,
+    "store": "TCPStore (env://)",
+    "comm_backend": "NCCL (MANA Plugin)"
+  },
+  "phase1_startup_and_checkpoint": {
+    "startup_to_training_ms": 13773,
+    "pre_ckpt_steps": 50,
+    "pre_ckpt_avg_step_ms": 17.99,
+    "ckpt_trigger_cmd_ms": 16,
+    "ckpt_total_latency_ms": 25107,
+    "nccl_overhead_sec": 1.771019,
+    "cuda_overhead_sec": 0.0,
+    "disk_write_sec": 23.336
+  },
+  "checkpoint_storage": {
+    "ckpt_file_count": 2,
+    "ckpt_size_bytes": 10113115854,
+    "ckpt_size_mb": 9644.62,
+    "ckpt_size_gb": 9.419,
+    "disk_write_speed_mb_s": 413.29
+  },
+  "phase2_restart_and_recovery": {
+    "rebuilt_comms": 2,
+    "time_to_first_step_ms": 28302,
+    "post_restart_duration_ms": 45358,
+    "post_restart_steps": 36,
+    "post_restart_avg_step_ms": 2914.8
+  },
+  "total_wall_clock_ms": 94350
+}
