@@ -48,10 +48,12 @@ template <typename Func>
 void measure_collective(const std::string& name, std::vector<GpuCtx>& ctxs, int num_gpus, Func func) {
     // Warmup
     for (int i = 0; i < WARMUP; ++i) {
+        NCCL_CHECK(ncclGroupStart());
         for (int g = 0; g < num_gpus; ++g) {
             CUDA_CHECK(cudaSetDevice(g));
             func(g, ctxs[g]);
         }
+        NCCL_CHECK(ncclGroupEnd());
         for (int g = 0; g < num_gpus; ++g) {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream));
@@ -61,10 +63,12 @@ void measure_collective(const std::string& name, std::vector<GpuCtx>& ctxs, int 
     // Timed run
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < ITERS; ++i) {
+        NCCL_CHECK(ncclGroupStart());
         for (int g = 0; g < num_gpus; ++g) {
             CUDA_CHECK(cudaSetDevice(g));
             func(g, ctxs[g]);
         }
+        NCCL_CHECK(ncclGroupEnd());
         for (int g = 0; g < num_gpus; ++g) {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream));
