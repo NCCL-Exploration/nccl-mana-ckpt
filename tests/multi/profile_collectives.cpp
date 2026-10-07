@@ -2,18 +2,15 @@
 #include <nccl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <chrono>
-#include <string>
-#include <vector>
+#include <string.h>
+#include <sys/time.h>
 
-#if !defined(NCCL_MAJOR) || (NCCL_MAJOR == 2 && NCCL_MINOR < 20)
 extern "C" ncclResult_t ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) __attribute__((weak));
 extern "C" ncclResult_t ncclGather(const void* sendbuff, void* recvbuff, size_t count,
                                    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) __attribute__((weak));
 extern "C" ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff, size_t count,
                                     ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) __attribute__((weak));
-#endif
 
 #define CUDA_CHECK(cmd) \
     do { \
@@ -33,9 +30,9 @@ extern "C" ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff, size_t
         } \
     } while (0)
 
-const int ITERS = 10;
-const int WARMUP = 2;
-const size_t COUNT = 1024 * 1024; // 1M floats = 4MB per GPU
+#define ITERS 10
+#define WARMUP 2
+#define COUNT (1024 * 1024)
 
 struct GpuCtx {
     ncclComm_t comm;
@@ -44,118 +41,98 @@ struct GpuCtx {
     float *recv_buf;
 };
 
-template <typename Func>
-void measure_collective(const std::string& name, std::vector<GpuCtx>& ctxs, int num_gpus, Func func) {
-    // Warmup
-    for (int i = 0; i < WARMUP; ++i) {
-        NCCL_CHECK(ncclGroupStart());
-        for (int g = 0; g < num_gpus; ++g) {
-            CUDA_CHECK(cudaSetDevice(g));
-            func(g, ctxs[g]);
-        }
-        NCCL_CHECK(ncclGroupEnd());
-        for (int g = 0; g < num_gpus; ++g) {
-            CUDA_CHECK(cudaSetDevice(g));
-            CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream));
-        }
-    }
-
-    // Timed run
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < ITERS; ++i) {
-        NCCL_CHECK(ncclGroupStart());
-        for (int g = 0; g < num_gpus; ++g) {
-            CUDA_CHECK(cudaSetDevice(g));
-            func(g, ctxs[g]);
-        }
-        NCCL_CHECK(ncclGroupEnd());
-        for (int g = 0; g < num_gpus; ++g) {
-            CUDA_CHECK(cudaSetDevice(g));
-            CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream));
-        }
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    
-    std::chrono::duration<double> diff = end - start;
-    double avg_time_ms = (diff.count() * 1000.0) / ITERS;
-    
-    printf("%-20s : %.4f ms\n", name.c_str(), avg_time_ms);
+double get_time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (tv.tv_sec * 1000.0) + (tv.tv_usec / 1000.0);
 }
+
+#define MEASURE_COLLECTIVE(NAME, FUNC_CALL) do { \
+    for (i = 0; i < WARMUP; ++i) { \
+        NCCL_CHECK(ncclGroupStart()); \
+        for (g = 0; g < num_gpus; ++g) { \
+            CUDA_CHECK(cudaSetDevice(g)); \
+            FUNC_CALL; \
+        } \
+        NCCL_CHECK(ncclGroupEnd()); \
+        for (g = 0; g < num_gpus; ++g) { \
+            CUDA_CHECK(cudaSetDevice(g)); \
+            CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream)); \
+        } \
+    } \
+    double t0 = get_time_ms(); \
+    for (i = 0; i < ITERS; ++i) { \
+        NCCL_CHECK(ncclGroupStart()); \
+        for (g = 0; g < num_gpus; ++g) { \
+            CUDA_CHECK(cudaSetDevice(g)); \
+            FUNC_CALL; \
+        } \
+        NCCL_CHECK(ncclGroupEnd()); \
+        for (g = 0; g < num_gpus; ++g) { \
+            CUDA_CHECK(cudaSetDevice(g)); \
+            CUDA_CHECK(cudaStreamSynchronize(ctxs[g].stream)); \
+        } \
+    } \
+    printf("%-20s : %.4f ms\n", NAME, (get_time_ms() - t0) / ITERS); \
+} while(0)
 
 int main(int argc, char* argv[]) {
     int num_gpus = 4;
-    int devs[4] = {0, 1, 2, 3};
-    
     int dev_count = 0;
+    int g, i;
+    struct GpuCtx ctxs[8];
+    
     CUDA_CHECK(cudaGetDeviceCount(&dev_count));
     if (dev_count < num_gpus) num_gpus = dev_count;
     
-    printf("Profiling NCCL Collectives on %d GPUs (Iterations: %d, Payload: %zu floats/GPU)\n", num_gpus, ITERS, COUNT);
+    printf("Profiling NCCL Collectives on %d GPUs (Iterations: %d, Payload: %d floats/GPU)\n", num_gpus, ITERS, COUNT);
     
-    std::vector<GpuCtx> ctxs(num_gpus);
-    std::vector<ncclComm_t> comms(num_gpus);
-    NCCL_CHECK(ncclCommInitAll(comms.data(), num_gpus, devs));
+    ncclUniqueId id;
+    NCCL_CHECK(ncclGetUniqueId(&id));
     
-    for (int g = 0; g < num_gpus; ++g) {
+    NCCL_CHECK(ncclGroupStart());
+    for (g = 0; g < num_gpus; ++g) {
         CUDA_CHECK(cudaSetDevice(g));
-        ctxs[g].comm = comms[g];
+        NCCL_CHECK(ncclCommInitRank(&ctxs[g].comm, num_gpus, id, g));
+    }
+    NCCL_CHECK(ncclGroupEnd());
+    
+    for (g = 0; g < num_gpus; ++g) {
+        CUDA_CHECK(cudaSetDevice(g));
         CUDA_CHECK(cudaStreamCreate(&ctxs[g].stream));
         CUDA_CHECK(cudaMalloc(&ctxs[g].send_buf, COUNT * sizeof(float) * num_gpus)); 
-        CUDA_CHECK(cudaMemset(ctxs[g].send_buf, 0, COUNT * sizeof(float) * num_gpus));
         CUDA_CHECK(cudaMalloc(&ctxs[g].recv_buf, COUNT * sizeof(float) * num_gpus));
+        CUDA_CHECK(cudaMemset(ctxs[g].send_buf, 0, COUNT * sizeof(float) * num_gpus));
         CUDA_CHECK(cudaMemset(ctxs[g].recv_buf, 0, COUNT * sizeof(float) * num_gpus));
     }
     
     printf("----------------------------------------\n");
     printf("%-20s   %s\n", "Collective", "Avg Runtime (ms)");
     printf("----------------------------------------\n");
+    fflush(stdout);
     
-    measure_collective("AllReduce", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-        NCCL_CHECK(ncclAllReduce(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, ncclSum, ctx.comm, ctx.stream));
-    });
+    MEASURE_COLLECTIVE("AllReduce", NCCL_CHECK(ncclAllReduce(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, ncclSum, ctxs[g].comm, ctxs[g].stream)));
+    MEASURE_COLLECTIVE("Broadcast", NCCL_CHECK(ncclBroadcast(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, 0, ctxs[g].comm, ctxs[g].stream)));
+    MEASURE_COLLECTIVE("Reduce", NCCL_CHECK(ncclReduce(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, ncclSum, 0, ctxs[g].comm, ctxs[g].stream)));
+    MEASURE_COLLECTIVE("AllGather", NCCL_CHECK(ncclAllGather(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, ctxs[g].comm, ctxs[g].stream)));
+    MEASURE_COLLECTIVE("ReduceScatter", NCCL_CHECK(ncclReduceScatter(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, ncclSum, ctxs[g].comm, ctxs[g].stream)));
     
-    measure_collective("Broadcast", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-        NCCL_CHECK(ncclBroadcast(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, 0, ctx.comm, ctx.stream));
-    });
-    
-    measure_collective("Reduce", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-        NCCL_CHECK(ncclReduce(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, ncclSum, 0, ctx.comm, ctx.stream));
-    });
-    
-    measure_collective("AllGather", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-        NCCL_CHECK(ncclAllGather(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, ctx.comm, ctx.stream));
-    });
-    
-    measure_collective("ReduceScatter", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-        NCCL_CHECK(ncclReduceScatter(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, ncclSum, ctx.comm, ctx.stream));
-    });
-
-    if (ncclAlltoAll != nullptr) {
-        measure_collective("AlltoAll", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-            NCCL_CHECK(ncclAlltoAll(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, ctx.comm, ctx.stream));
-        });
+    if (ncclAlltoAll != NULL) {
+        MEASURE_COLLECTIVE("AlltoAll", NCCL_CHECK(ncclAlltoAll(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, ctxs[g].comm, ctxs[g].stream)));
     }
-
-    if (ncclGather != nullptr) {
-        measure_collective("Gather", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-            NCCL_CHECK(ncclGather(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, 0, ctx.comm, ctx.stream));
-        });
+    if (ncclGather != NULL) {
+        MEASURE_COLLECTIVE("Gather", NCCL_CHECK(ncclGather(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, 0, ctxs[g].comm, ctxs[g].stream)));
     }
-
-    if (ncclScatter != nullptr) {
-        measure_collective("Scatter", ctxs, num_gpus, [&](int g, GpuCtx& ctx) {
-            NCCL_CHECK(ncclScatter(ctx.send_buf, ctx.recv_buf, COUNT, ncclFloat32, 0, ctx.comm, ctx.stream));
-        });
+    if (ncclScatter != NULL) {
+        MEASURE_COLLECTIVE("Scatter", NCCL_CHECK(ncclScatter(ctxs[g].send_buf, ctxs[g].recv_buf, COUNT, ncclFloat32, 0, ctxs[g].comm, ctxs[g].stream)));
     }
     
-    // Cleanup
-    for (int g = 0; g < num_gpus; ++g) {
+    for (g = 0; g < num_gpus; ++g) {
         CUDA_CHECK(cudaSetDevice(g));
         CUDA_CHECK(cudaFree(ctxs[g].send_buf));
         CUDA_CHECK(cudaFree(ctxs[g].recv_buf));
         CUDA_CHECK(cudaStreamDestroy(ctxs[g].stream));
         NCCL_CHECK(ncclCommDestroy(ctxs[g].comm));
     }
-    
     return 0;
 }

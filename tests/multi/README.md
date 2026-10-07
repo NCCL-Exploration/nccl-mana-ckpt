@@ -20,8 +20,12 @@ On a Perlmutter GPU node (or an interactive `salloc` session with 4 GPUs), simpl
 ### What it does
 
 1. Compiles `profile_collectives.cpp` against the local CUDA and NCCL modules.
-2. Initializes a 4-GPU clique (`ncclCommInitAll`).
+2. Initializes a 4-GPU clique using `ncclGroupStart()` and `ncclCommInitRank()`.
 3. Allocates 4MB (1M floats) of payload per GPU.
 4. **Run 1**: Executes 10 iterations of each collective natively (without the plugin).
-5. **Run 2**: Re-executes the exact same suite but forcibly injects `LD_PRELOAD=../../bin/libncclplugin.so`.
-6. Outputs the end-to-end average runtime in milliseconds for each collective function, allowing you to directly calculate the overhead delta (which should be well under a microsecond per call).
+5. **Run 2**: Re-executes the exact same suite but forcibly injects the plugins via `dmtcp_launch --with-plugin`.
+6. Outputs the end-to-end average runtime in milliseconds for each collective function side-by-side, allowing you to directly calculate the overhead delta (which should be minimal).
+
+### Troubleshooting
+- **Bus Error / Crash during Warmup**: This is typically caused by issues initializing communicators across multiple GPUs on a single thread. The script uses explicit `ncclGroupStart()` blocks to avoid these lockups and safely navigate the plugin's state tracking.
+- **Missing Symbols**: Ensure that the plugin (`libncclplugin.so`) is compiled. The script will attempt to build it automatically if missing.
