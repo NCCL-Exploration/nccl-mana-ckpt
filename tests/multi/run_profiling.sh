@@ -10,7 +10,6 @@ if [ -n "$NCCL_DIR" ]; then
 elif [ -n "$NCCL_HOME" ]; then
     NCCL_FLAGS="-I$NCCL_HOME/include -L$NCCL_HOME/lib -Xlinker -rpath=$NCCL_HOME/lib"
 else
-    # Fallback to standard locations or modules
     NCCL_FLAGS="-L/shared/EL9/explorer/nvidia-hpc-sdk/24.7/Linux_x86_64/24.7/REDIST/comm_libs/12.5/nccl/lib"
 fi
 
@@ -23,6 +22,13 @@ if [ ! -f ../../bin/libncclplugin.so ]; then
     make -C ../.. plugin
 fi
 
+DMTCP_LAUNCH="../../dmtcp/bin/dmtcp_launch"
+if [ ! -x "$DMTCP_LAUNCH" ]; then
+    echo "Warning: dmtcp_launch not found at $DMTCP_LAUNCH. Please ensure DMTCP is built."
+    # We will try to rely on PATH if possible
+    DMTCP_LAUNCH="dmtcp_launch"
+fi
+
 echo ""
 echo "=========================================================="
 echo " RUN 1: NATIVE NCCL (NO PLUGIN)"
@@ -33,7 +39,9 @@ echo ""
 echo "=========================================================="
 echo " RUN 2: NCCL-CR PLUGIN INTERPOSITION"
 echo "=========================================================="
-LD_PRELOAD=../../bin/libncclplugin.so ./profile_collectives
+# We must use dmtcp_launch so that the DMTCP symbols (like dmtcp_plugin_disable_ckpt)
+# are loaded into the process. We use --interval 0 to prevent actual checkpoints.
+$DMTCP_LAUNCH --interval 0 --no-gzip --with-plugin $(realpath ../../bin/libncclplugin.so) ./profile_collectives
 
 echo ""
 echo "=========================================================="
