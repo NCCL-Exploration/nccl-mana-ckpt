@@ -72,6 +72,12 @@ make nccl_check
 
 ## Plugin Loading
 
+The plugin sets `NCCL_RAS_ENABLE=0` in every process it is loaded into, unless
+the variable is already set. NCCL's RAS service (2.24+) keeps TCP connections
+between processes that outlive every communicator, and DMTCP can deadlock
+draining them in a multi-node checkpoint. If you set `NCCL_RAS_ENABLE` to a
+non-zero value, the plugin keeps it and prints a warning.
+
 CUDA/NCCL checkpoint and restart flows normally require both plugins:
 
 1. `bin/libncclplugin.so`: this repository's NCCL checkpoint plugin.
