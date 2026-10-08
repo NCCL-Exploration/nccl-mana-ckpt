@@ -454,6 +454,13 @@ ncclResult_t call_real_ncclCommDestroy(ncclComm_t real_comm) {
     return real_ncclCommDestroy(real_comm);
 }
 
+ncclResult_t call_real_ncclCommFinalize(ncclComm_t real_comm) {
+    LOAD_SYM(ncclCommFinalize);
+    if (real_ncclCommFinalize == NULL)
+        return ncclSuccess; /* NCCL without Finalize: Destroy does all of it */
+    return real_ncclCommFinalize(real_comm);
+}
+
 ncclResult_t call_real_ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId,
                                               int rank, ncclConfig_t *config) {
     if (config == NULL) {

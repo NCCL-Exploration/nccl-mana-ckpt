@@ -453,29 +453,54 @@ static void drain_comm(vcomm_t *v) {
  * the interposed ncclCommDestroy also frees the registry slot, which here would
  * throw away the very metadata the rebuild needs.
  */
+static ncclResult_t wait_comm_ready(ncclComm_t real);
+
+/*
+ * Two passes, both in vcomm_order (the same on every rank): finalize every
+ * communicator, then destroy them. ncclCommFinalize is NCCL's orderly,
+ * collective shutdown -- it completes outstanding operations and flushes the
+ * proxy's connections with the peers -- so no rank frees its side while a peer
+ * is still using it. Destroy then only releases local resources.
+ */
 static void teardown_all_comms(void) {
     int order[MAX_VCOMMS];
+    ncclComm_t reals[MAX_VCOMMS];
     int n = vcomm_order(order);
     int k;
 
     for (k = n - 1; k >= 0; k--) {
         vcomm_t *v = &g_vcomms[order[k]];
-        ncclComm_t real = v->real;
         ncclResult_t r;
         char hex[VCOMM_IDENT_HEX];
 
-        if (real == NULL)
+        reals[k] = v->real;
+        if (reals[k] == NULL)
             continue;
 
         vcomm_ident_hex(v->ident, hex);
-        printf("[NCCL Plugin] teardown: destroying comm %s (rank %d/%d)\n", hex, v->rank,
+        printf("[NCCL Plugin] teardown: finalizing comm %s (rank %d/%d)\n", hex, v->rank,
                v->nranks);
         fflush(stdout);
 
         /* Cleared first, so any application thread arriving at a wrapper blocks
          * in wait_real() instead of using a handle we are about to destroy. */
         v->real = NULL;
-        r = call_real_ncclCommDestroy(real);
+        r = call_real_ncclCommFinalize(reals[k]);
+        if (r == ncclInProgress) /* non-blocking communicator */
+            r = wait_comm_ready(reals[k]);
+        if (r != ncclSuccess) {
+            fprintf(stderr, "[NCCL PLUGIN] teardown: ncclCommFinalize failed: %s\n",
+                    nccl_err_str(r));
+            fflush(stderr);
+        }
+    }
+
+    for (k = n - 1; k >= 0; k--) {
+        ncclResult_t r;
+
+        if (reals[k] == NULL)
+            continue;
+        r = call_real_ncclCommDestroy(reals[k]);
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] teardown: ncclCommDestroy failed: %s\n",
                     nccl_err_str(r));
