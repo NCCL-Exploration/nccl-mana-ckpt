@@ -35,11 +35,18 @@
  *************************************************************************/
 
 #include "nccl.h"
+#ifdef WITH_MPI_INIT
+/* MPI_Init/MPI_Finalize only, for checkpointers that need MPI initialized
+ * (e.g. MANA); all communication stays NCCL. */
+#include <mpi.h>
+#endif
 #include "npbparams.h"
 #include <cuda_runtime.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /******************/
@@ -283,6 +290,13 @@ void c_print_results(char *name, char cl, int n1, int n2, int n3, int niter, int
 #endif
 
 #include "c_timers.h"
+
+/* Wall clock for IS_TARGET_SECONDS calibration (c_timers' clock is static). */
+static double is_wtime(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
 
 /*****************************************************************/
 /*     Dynamically allocate space for main arrays                */
@@ -874,6 +888,9 @@ void rank(int iteration) {
 
 int main(int argc, char **argv) {
 
+#ifdef WITH_MPI_INIT
+    MPI_Init(&argc, &argv);
+#endif
     int i, iteration, itemp, active;
 
     double timecounter, maxtime;
@@ -915,9 +932,15 @@ int main(int argc, char **argv) {
         deviceCount = 1;
     }
 
-    printf("Rank %d using device %d of %d available devices\n", my_rank, my_rank % deviceCount,
+    /* By the rank on this node: Slurm may place ranks cyclically (rank 1 and
+     * rank 3 on one node of two), where the global rank picks one GPU twice. */
+    const char *local_env = getenv("SLURM_LOCALID");
+    if (local_env == NULL)
+        local_env = getenv("LOCAL_RANK");
+    int local_rank = local_env != NULL ? atoi(local_env) : my_rank;
+    printf("Rank %d using device %d of %d available devices\n", my_rank, local_rank % deviceCount,
            deviceCount);
-    cudaSetDevice(my_rank % deviceCount);
+    cudaSetDevice(local_rank % deviceCount);
     cudaStreamCreate(&cuda_stream);
 
     /*  Check to see whether total number of processes is within bounds.
@@ -968,20 +991,27 @@ int main(int argc, char **argv) {
     }
 
     if (!active) {
+#ifdef WITH_MPI_INIT
+        MPI_Finalize();
+#endif
         exit(0);
     }
 
-    /* Initialize NCCL for active ranks only */
+    /* Initialize NCCL for active ranks only. The id file must be on a
+     * filesystem every rank can see; override it for multi-node runs. */
+    const char *id_file = getenv("IS_NCCL_ID_FILE");
+    if (id_file == NULL || id_file[0] == '\0')
+        id_file = "/tmp/is_nccl_id.bin";
     if (my_rank == 0) {
         ncclGetUniqueId(&nccl_id);
-        FILE *f = fopen("/tmp/is_nccl_id.bin", "wb");
+        FILE *f = fopen(id_file, "wb");
         if (f) {
             fwrite(&nccl_id, sizeof(nccl_id), 1, f);
             fclose(f);
         }
     } else {
         FILE *f = NULL;
-        while ((f = fopen("/tmp/is_nccl_id.bin", "rb")) == NULL) {
+        while ((f = fopen(id_file, "rb")) == NULL) {
             usleep(100000);
         }
         usleep(200000);
@@ -1072,15 +1102,64 @@ int main(int argc, char **argv) {
         timer_clear(i);
 #endif
 
+    /*  Per-iteration pause (seconds), so a checkpoint can land mid-run.
+        IS_ITER_SLEEP=0 measures the kernel and communication time alone. */
+    const char *sleep_env = getenv("IS_ITER_SLEEP");
+    unsigned iter_sleep = sleep_env ? (unsigned)atoi(sleep_env) : 1;
+
+    /*  IS_REPEAT=R runs the 10 NPB iterations R times, to lengthen a run
+        (e.g. at scale, or to leave room for checkpoints). Each pass rewrites
+        the same two keys with the same values (see rank()), so every pass
+        ranks identical data and NPB's verification stays valid, scaled by R.
+        IS_TARGET_SECONDS=T instead picks R after the first pass so the timed
+        section lasts about T seconds at any scale; the pass time is agreed
+        with an allreduce (max), so every rank computes the same R.
+        rank(i) overwrites keys i and i + MAX_ITERATIONS, so each pass first
+        restores the 2*MAX_ITERATIONS+1 leading keys to their state at the
+        start of the timed section: every pass then ranks exactly the data
+        NPB's partial verification expects for iterations 1..10. */
+    const char *repeat_env = getenv("IS_REPEAT");
+    const char *target_env = getenv("IS_TARGET_SECONDS");
+    double target = target_env ? atof(target_env) : 0.0;
+    int repeat = repeat_env ? atoi(repeat_env) : 1;
+    if (repeat < 1)
+        repeat = 1;
+
+    INT_TYPE saved_keys[2 * MAX_ITERATIONS + 1];
+    memcpy(saved_keys, key_array, sizeof(saved_keys));
+
     /*  Start timer  */
     timer_start(0);
 
     /*  This is the main iteration */
-    for (iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
-        if (my_rank == 0 && CLASS != 'S')
-            printf("        %d\n", iteration);
-        rank(iteration);
-        sleep(1);
+    for (int pass = 0; pass < repeat; pass++) {
+        double pass_start = is_wtime();
+        if (pass > 0)
+            memcpy(key_array, saved_keys, sizeof(saved_keys));
+        for (iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+            if (my_rank == 0 && CLASS != 'S')
+                printf("        %d\n", pass * MAX_ITERATIONS + iteration);
+            rank(iteration);
+            if (iter_sleep > 0)
+                sleep(iter_sleep);
+        }
+        if (pass == 0 && target > 0) {
+            double t = is_wtime() - pass_start, *d_t;
+            cudaMalloc((void **)&d_t, sizeof(double));
+            cudaMemcpy(d_t, &t, sizeof(double), cudaMemcpyHostToDevice);
+            ncclAllReduce(d_t, d_t, 1, ncclFloat64, ncclMax, nccl_comm, cuda_stream);
+            cudaStreamSynchronize(cuda_stream);
+            cudaMemcpy(&t, d_t, sizeof(double), cudaMemcpyDeviceToHost);
+            cudaFree(d_t);
+            repeat = t > 0 ? (int)ceil(target / t) : 1;
+            if (repeat < 1)
+                repeat = 1;
+            if (repeat > 1000000)
+                repeat = 1000000;
+            if (my_rank == 0)
+                printf(" IS_TARGET_SECONDS=%.1f: pass time %.4f s -> %d passes\n", target, t,
+                       repeat);
+        }
     }
 
     /*  Stop timer, obtain time for processors */
@@ -1121,11 +1200,12 @@ int main(int argc, char **argv) {
 
     /*  The final printout  */
     if (my_rank == 0) {
-        if (passed_verification != 5 * MAX_ITERATIONS + comm_size)
+        if (passed_verification != 5 * MAX_ITERATIONS * repeat + comm_size)
             passed_verification = 0;
-        c_print_results("IS", CLASS, (int)(TOTAL_KEYS), MIN_PROCS, 0, MAX_ITERATIONS, comm_size,
-                        np_total, maxtime,
-                        ((double)(MAX_ITERATIONS)*TOTAL_KEYS * MIN_PROCS) / maxtime / 1000000.,
+        c_print_results("IS", CLASS, (int)(TOTAL_KEYS), MIN_PROCS, 0, MAX_ITERATIONS * repeat,
+                        comm_size, np_total, maxtime,
+                        ((double)(MAX_ITERATIONS)*repeat * TOTAL_KEYS * MIN_PROCS) / maxtime /
+                            1000000.,
                         "keys ranked", passed_verification, NPBVERSION, COMPILETIME, MPICC, CLINK,
                         CMPI_LIB, CMPI_INC, CFLAGS, CLINKFLAGS);
     }
@@ -1178,6 +1258,9 @@ int main(int argc, char **argv) {
 
     if (my_rank == 0)
         remove("/tmp/is_nccl_id.bin");
+#ifdef WITH_MPI_INIT
+    MPI_Finalize();
+#endif
     return 0;
 }
 /**************************/

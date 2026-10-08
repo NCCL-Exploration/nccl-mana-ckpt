@@ -13,6 +13,7 @@ NCCL_MULTI_RANK_GPU_ENABLE=1 (NCCL >= 2.30).
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -37,6 +38,14 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--report-every", type=int, default=5)
+    # Pause per step, so a checkpoint can land mid-training. 0 for throughput runs.
+    parser.add_argument("--sleep", type=float, default=0.2)
+    # Untimed steps before throughput is measured (first-step setup, NCCL warm-up).
+    parser.add_argument("--warmup", type=int, default=5)
+    # Instead of --steps: time the warm-up, agree on the slowest rank's step
+    # time (all_reduce MAX), and run as many steps as fill DURATION seconds.
+    # Every rank computes the same count, so the collectives stay matched.
+    parser.add_argument("--duration", type=float, default=0)
     args = parser.parse_args()
 
     if "WORLD_SIZE" not in os.environ or "RANK" not in os.environ:
@@ -79,8 +88,27 @@ def main():
     criterion = nn.CrossEntropyLoss()
     print(f"[pt] rank {rank} DDP constructed", flush=True)
 
+    warmup = max(args.warmup, 2)
     step = 0
-    while args.steps < 0 or step < args.steps:
+    t_start = time.time()
+    t_measure = None
+    while args.steps < 0 or step < args.steps or (args.duration > 0 and t_measure is None):
+        if step == 1:
+            t_first = time.time()  # step 0 includes one-time setup
+        if step == warmup:
+            t_measure = time.time()
+            if args.duration > 0:
+                per_step = torch.tensor(
+                    [(t_measure - t_first) / (warmup - 1)], dtype=torch.float64, device=local_rank
+                )
+                dist.all_reduce(per_step, op=dist.ReduceOp.MAX)
+                args.steps = warmup + max(1, math.ceil(args.duration / per_step.item()))
+                if rank == 0:
+                    print(
+                        f"[pt] duration {args.duration:.1f} s: {per_step.item():.4f} s/step "
+                        f"-> {args.steps} steps",
+                        flush=True,
+                    )
         inputs = torch.randn(args.batch_size, args.width, device=local_rank)
         targets = torch.randint(0, 10, (args.batch_size,), device=local_rank)
         optimizer.zero_grad()
@@ -108,7 +136,20 @@ def main():
                 flush=True,
             )
         step += 1
-        time.sleep(0.2)
+        if args.sleep > 0:
+            time.sleep(args.sleep)
+
+    # Throughput over the steps after warm-up (all steps if the run was shorter).
+    t_end = time.time()
+    if t_measure is not None and step > warmup:
+        elapsed, measured = t_end - t_measure, step - warmup
+    else:
+        elapsed, measured = t_end - t_start, step
+    print(
+        f"[pt] rank {rank} elapsed {elapsed:.6f} s for {measured} steps "
+        f"({measured / elapsed if elapsed > 0 else 0:.3f} steps/s)",
+        flush=True,
+    )
 
     print(f"PASS pytorch_minimal: rank {rank}, {step} steps", flush=True)
     dist.destroy_process_group()
