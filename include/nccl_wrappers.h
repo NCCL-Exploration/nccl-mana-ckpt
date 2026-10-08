@@ -57,6 +57,7 @@ ncclResult_t call_real_ncclSend(const void *sendbuff, size_t count, ncclDataType
 ncclResult_t call_real_ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int peer,
                                ncclComm_t real_comm, cudaStream_t stream);
 ncclResult_t call_real_ncclCommDestroy(ncclComm_t real_comm);
+ncclResult_t call_real_ncclCommFinalize(ncclComm_t real_comm);
 ncclResult_t call_real_ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId,
                                               int rank, ncclConfig_t *config);
 ncclResult_t call_real_ncclCommInitAll(ncclComm_t *comms, int ndev, const int *devlist);
