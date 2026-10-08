@@ -1,0 +1,22 @@
+diff --git a/src/plugin/ipc/connectionlist.cpp b/src/plugin/ipc/connectionlist.cpp
+index c1eb0725..0becde4b 100644
+--- a/src/plugin/ipc/connectionlist.cpp
++++ b/src/plugin/ipc/connectionlist.cpp
+@@ -176,6 +176,17 @@ ConnectionList::deleteStaleConnections()
+   for (FdToConMapT::iterator i = _fdToCon.begin(); i != _fdToCon.end(); ++i) {
+     if (_isBadFd(i->first)) {
+       staleFds.push_back(i->first);
++    } else if (i->second->conType() == Connection::FILE &&
++               Util::strStartsWith(
++                 jalib::Filesystem::GetDeviceName(i->first).c_str(),
++                 "anon_inode:")) {
++      // A file's fd that now names an anonymous inode (eventfd, epoll,
++      // timerfd, dma-buf, ...): it was closed and its number reused without
++      // DMTCP seeing it -- e.g. by MANA's lower half, which does not go
++      // through DMTCP's wrappers.  No file has such a path, so the record is
++      // stale; checkpointing it would copy the "file" (a non-blocking eventfd
++      // reads EAGAIN forever) and a restart would try to reopen it.
++      staleFds.push_back(i->first);
+     }
+   }
+ 
