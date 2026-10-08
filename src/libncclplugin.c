@@ -921,6 +921,25 @@ static void pre_init_cuda(void) {
     }
 }
 
+/*
+ * NCCL RAS (2.24+) is a per-process service that keeps its own TCP connections
+ * to peer processes. They outlive every communicator, so teardown cannot close
+ * them, and DMTCP's socket drain/handshake on such a connection deadlocked a
+ * 2-node checkpoint. RAS is diagnostics only: turn it off unless the user chose
+ * otherwise. DMTCP_EVENT_INIT runs before main(), so before NCCL reads it; the
+ * setting is part of the environment that a restart restores.
+ */
+static void disable_nccl_ras(void) {
+    const char *v = getenv("NCCL_RAS_ENABLE");
+    if (v == NULL) {
+        setenv("NCCL_RAS_ENABLE", "0", 0);
+    } else if (strcmp(v, "0") != 0) {
+        fprintf(stderr, "[NCCL PLUGIN] warning: NCCL_RAS_ENABLE=%s; RAS connections can "
+                        "deadlock a multi-node checkpoint\n", v);
+        fflush(stderr);
+    }
+}
+
 static void nccl_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data) {
     static int first_time = 1;
     (void)data;
@@ -928,6 +947,7 @@ static void nccl_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data) {
     switch (event) {
     case DMTCP_EVENT_INIT:
         drain_log_init();
+        disable_nccl_ras();
         break;
 
     case DMTCP_EVENT_RUNNING_AFTER:
