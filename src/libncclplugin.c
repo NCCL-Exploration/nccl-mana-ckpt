@@ -799,10 +799,12 @@ static void *rebuild_worker(void *arg) {
 }
 
 static void rebuild_all_comms(void) {
+    struct timeval start, end;
     char barrier[80];
     pthread_t worker;
     int rc;
 
+    gettimeofday(&start, NULL);
     printf("[NCCL Plugin] rebuild: phase 1 cuda init\n");
     fflush(stdout);
     pre_init_cuda();
@@ -844,6 +846,12 @@ static void rebuild_all_comms(void) {
         exit(1);
     }
     pthread_join(worker, NULL);
+
+    gettimeofday(&end, NULL);
+    /* Parsed by tests/report/ -- keep the format. */
+    printf("[NCCL PLUGIN] Rebuild overhead: %.6f seconds\n",
+           (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0);
+    fflush(stdout);
 }
 
 /* ── DMTCP events ─────────────────────────────────────────────────── */
