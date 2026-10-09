@@ -1,0 +1,13 @@
+/* aws-ofi-nccl 1.6.0 binds its CUDA symbols to version node libcudart.so.13. */
+libcudart.so.13 {
+  global:
+    cudaGetDeviceCount;
+    cudaGetDevice;
+    cudaPointerGetAttributes;
+    cudaDeviceFlushGPUDirectRDMAWrites;
+    netsplit_stub_set_ndev;
+    netsplit_stub_set_thread_device;
+    netsplit_stub_add_device_range;
+    netsplit_stub_remove_device_range;
+  local: *;
+};

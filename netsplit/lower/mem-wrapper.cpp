@@ -1,0 +1,667 @@
+/****************************************************************************
+ *  Copyright (C) 2019-2020 by Twinkle Jain, Rohan garg, and Gene Cooperman *
+ *  jain.t@husky.neu.edu, rohgarg@ccs.neu.edu, gene@ccs.neu.edu             *
+ *                                                                          *
+ *  This file is part of DMTCP.                                             *
+ *                                                                          *
+ *  DMTCP is free software: you can redistribute it and/or                  *
+ *  modify it under the terms of the GNU Lesser General Public License as   *
+ *  published by the Free Software Foundation, either version 3 of the      *
+ *  License, or (at your option) any later version.                         *
+ *                                                                          *
+ *  DMTCP is distributed in the hope that it will be useful,                *
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of          *
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the           *
+ *  GNU Lesser General Public License for more details.                     *
+ *                                                                          *
+ *  You should have received a copy of the GNU Lesser General Public        *
+ *  License along with DMTCP:dmtcp/src.  If not, see                        *
+ *  <http://www.gnu.org/licenses/>.                                         *
+ ****************************************************************************/
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // For MAP_ANONYMOUS
+#endif
+#include <errno.h>
+#include <stddef.h>
+#include <assert.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <vector>
+#include <algorithm>
+
+#include "lower-half-api.h"
+#include "patch-trampoline.h"
+#include "logging.h"
+#include "mem-wrapper.h"
+#include "switch-context.h"
+
+using namespace std;
+
+#define MMAP_OFF_HIGH_MASK ((-(4096ULL << 1) << (8 * sizeof (off_t) - 1)))
+#define MMAP_OFF_LOW_MASK  (4096ULL - 1)
+#define MMAP_OFF_MASK (MMAP_OFF_HIGH_MASK | MMAP_OFF_LOW_MASK)
+#define _real_mmap mmap
+#define _real_munmap munmap
+
+std::vector<MmapInfo_t> allocated_blocks;
+std::vector<MmapInfo_t> free_blocks;
+char *max_allocated_addr = NULL;
+static char *arena_base = NULL;
+
+static void* __mmap_wrapper(void * , size_t , int , int , int , off_t);
+static void patchLibc(int , char * , char *);
+static void uhExit(int status);
+static void addRegionTommaps(char *, size_t);
+static int __munmap_wrapper(void *, size_t);
+static void updateMmaps(char *, size_t);
+static void patchSbrk(char *, char *, size_t);
+
+off_t get_symbol_offset(const char *pathame, const char *symbol);
+void *mmap_fixed_noreplace(void *addr, size_t length, int prot, int flags,
+                           int fd, off_t offset);
+
+bool mem_compare (MmapInfo_t &a, MmapInfo_t &b) {
+  return (a.addr < b.addr);
+}
+
+void print_blocks(vector<MmapInfo_t> &blocks) {
+  for (auto b : blocks) {
+    printf("block %p ~ %p, size %lx\n", b.addr, b.addr + b.len, b.len);
+  }
+  fflush(stdout);
+}
+
+void merge_overlap_blocks(MmapInfo_t new_block, vector<MmapInfo_t> &blocks) {
+  MmapInfo_t merged_block = new_block;
+  // Find and merge all overlapping blocks in the allocated list.
+  size_t blocks_size = blocks.size();
+  for (size_t i = 0; i < blocks_size;) {
+    char *it_end_addr = blocks[i].addr + blocks[i].len;
+    char *merged_end_addr = merged_block.addr + merged_block.len;
+    if (it_end_addr < merged_block.addr) {
+      i++;
+      continue;
+    } else if (blocks[i].addr > merged_end_addr) {
+      // If the iterator points to a block whose start address
+      // is larger than the end address of the merged block, there's
+      // no more blocks that may overlap with the merged_block since
+      // the allocated list is sorted.
+      break;
+    } else {
+      char *min_start_addr, *max_end_addr;
+      if (blocks[i].addr < merged_block.addr) {
+        min_start_addr = blocks[i].addr;
+      } else {
+        min_start_addr = merged_block.addr;
+      }
+      if (it_end_addr > merged_end_addr) {
+        max_end_addr = blocks[i].addr + blocks[i].len;
+      } else {
+        max_end_addr = merged_end_addr;
+      }
+      merged_block.addr = min_start_addr;
+      merged_block.len = max_end_addr - min_start_addr;
+      blocks.erase(blocks.begin() + i);
+      blocks_size--;
+    }
+  }
+  // Insert the new allocated block and sort the list.
+  blocks.push_back(merged_block);
+  std::sort(blocks.begin(), blocks.end(), mem_compare);
+}
+
+void remove_overlap_blocks(MmapInfo_t new_block, vector<MmapInfo_t> &blocks) {
+  char *new_block_end_addr = new_block.addr + new_block.len;
+  char *old_it_start = NULL, *old_it_end = NULL;
+  size_t blocks_size = blocks.size();
+  for (size_t i = 0; i < blocks_size;) {
+    char *it_end_addr = blocks[i].addr + blocks[i].len;
+    if (blocks[i].addr == NULL || (blocks[i].addr == old_it_start && it_end_addr == old_it_end)) {
+      printf("loop detected\n");
+      fflush(stdout);
+      volatile int dummy = 1;
+      while (dummy);
+    } else {
+      old_it_start = blocks[i].addr;
+      old_it_end = it_end_addr;
+    }
+    if (it_end_addr <= new_block.addr) {
+      i++;
+      continue;
+    } else if (blocks[i].addr >= new_block_end_addr) {
+      // If the iterator points to a block whose start address
+      // is larger than the end address of the new block, there's
+      // no more blocks that may overlap with the merged_block since
+      // the allocated list is sorted.
+      break;
+    } else {
+      MmapInfo_t updated_block;
+      if (blocks[i].addr < new_block.addr) {
+        if (it_end_addr > new_block.addr && it_end_addr < new_block_end_addr) {
+          // Overlap case 1:
+          // [==it==]
+          //      [==new_block==]
+          updated_block.addr = blocks[i].addr;
+          updated_block.len = blocks[i].len - (it_end_addr - new_block.addr);
+          blocks.erase(blocks.begin() + i);
+          blocks_size--;
+          if (updated_block.len > 0) {
+            blocks.push_back(updated_block);
+          }
+        } else {
+          // Overlap case 2:
+          // [==========it==========]
+          //      [==new_block==]
+          // New free block in front
+          updated_block.addr = blocks[i].addr;
+          updated_block.len = blocks[i].len - (it_end_addr - new_block.addr);
+          blocks.erase(blocks.begin() + i);
+          blocks_size--;
+          if (updated_block.len > 0) {
+            blocks.push_back(updated_block);
+          }
+          // New free block at back
+          updated_block.addr = new_block_end_addr;
+          updated_block.len = it_end_addr - new_block_end_addr;
+          if (updated_block.len > 0) {
+            blocks.push_back(updated_block);
+          }
+        }
+      } else {
+        if (it_end_addr > new_block_end_addr) {
+          // Overlap case 3:
+          //           [==it==]
+          // [==new_block==]
+          updated_block.addr = new_block_end_addr;
+          updated_block.len = it_end_addr - new_block_end_addr;
+          blocks.erase(blocks.begin() + i);
+          blocks_size--;
+          if (updated_block.len > 0) {
+            blocks.push_back(updated_block);
+          }
+        } else {
+          // Overlap case 4:
+          //    [==it==]
+          // [==new_block==]
+          blocks.erase(blocks.begin() + i);
+          blocks_size--;
+        }
+      }
+    }
+  }
+  std::sort(blocks.begin(), blocks.end(), mem_compare);
+}
+
+void *next_free_addr(char *addr, size_t length) {
+  uintptr_t align_mask = PAGE_SIZE - 1;
+  if (addr != NULL) {
+    uintptr_t hint_align = (uintptr_t)addr & -(uintptr_t)addr;
+    if (hint_align > (uintptr_t)PAGE_SIZE && hint_align <= (1UL << 21)) {
+      align_mask |= (hint_align - 1);
+    }
+  }
+  for (auto it = free_blocks.begin(); it != free_blocks.end(); it++) {
+    char *aligned = (char*) ROUND_UP((unsigned long)it->addr, align_mask + 1);
+    if ((size_t)(aligned - it->addr) + length <= it->len) {
+      return aligned;
+    }
+  }
+  return NULL;
+}
+
+// Takes the mappings that overlap [addr, addr + length) out of free_blocks.
+// Called when the arena's choice collides with a mapping that was not made
+// through the mmap wrapper.
+static void remove_foreign_mappings(char *addr, size_t length)
+{
+  int fd = open("/proc/self/maps", O_RDONLY);
+  if (fd < 0) {
+    return;
+  }
+  char buf[4096];
+  char line[512];
+  size_t len = 0;
+  ssize_t n;
+  while ((n = read(fd, buf, sizeof buf)) > 0) {
+    for (ssize_t i = 0; i < n; i++) {
+      if (buf[i] != '\n') {
+        if (len < sizeof line - 1) {
+          line[len++] = buf[i];
+        }
+        continue;
+      }
+      line[len] = '\0';
+      len = 0;
+      char *end;
+      char *start = (char*)strtoul(line, &end, 16);
+      char *stop = (char*)strtoul(end + 1, NULL, 16);
+      if (start < addr + length && stop > addr) {
+        remove_overlap_blocks({start, (size_t)(stop - start)}, free_blocks);
+      }
+    }
+  }
+  close(fd);
+}
+
+void init_mem_arena(char *base)
+{
+  arena_base = base;
+  free_blocks.clear();
+  // This [arena_base, SIZE_MAX] pair is just for bookkeeping, suggesting
+  // this area is available for the mmap wrapper to allocate memories.
+  // The wrapper allocates memories starting from the arena_base address.
+  // We are not really mapping this region in the memory now at this moment.
+  free_blocks.push_back({arena_base, SIZE_MAX / 2});
+  // CUDA: keep the CUDA driver's preferred UVA range out of the
+  // arena, so that the upper half's CUDA reserves it as in a native process.
+  // cuCheckpointProcessRestore() fails (CUDA_ERROR_OUT_OF_MEMORY) for a
+  // process whose driver had to place its UVA range elsewhere.
+  remove_overlap_blocks({(char*)0x200000000UL, 0x100200000UL}, free_blocks);
+}
+
+// At restart, after restore_mmap() has mapped the upper half's areas, the
+// upper half's new areas go above them.  Without an arena, they would go
+// where the kernel puts them, among the lower half's mappings, and a later
+// restart's lower half may already have mapped that address.
+void init_mem_arena_after_restore()
+{
+  init_mem_arena((char*)ROUND_UP(max_allocated_addr, PAGE_SIZE));
+}
+
+// Returns a pointer to the array of mmap-ed regions
+// Sets num to the number of valid items in the array
+std::vector<MmapInfo_t> &get_mmapped_list(int *num) {
+  *num = allocated_blocks.size();
+  return allocated_blocks;
+}
+
+int checkLibrary(int fd, const char* name,
+             char* glibcFullPath, size_t size) {
+  char procPath[PATH_MAX] = {0};
+  char fullPath[PATH_MAX] = {0};
+  snprintf(procPath, sizeof procPath, "/proc/self/fd/%d", fd);
+  ssize_t len = readlink(procPath, fullPath, sizeof fullPath);
+  if (len < 0) {
+    DLOG(ERROR, "Failed to get path for %s. Error: %s\n",
+         procPath, strerror(errno));
+    return 0;
+  }
+  DLOG(NOISE, "checkLibrary: %s\n", fullPath);
+  if (strstr(fullPath, name)) {
+    DLOG(NOISE, "checkLibrary found: %s\n", fullPath);
+    strncpy(glibcFullPath, fullPath, size);
+    return 1;
+  }
+  return 0;
+}
+
+
+void block_if_contains(void *target, void *addr, size_t length) {
+  if (addr <= (char*) target && (char*) addr + length >= (char*) target) {
+    printf("%p detected at mmap. Paused.\n", target);
+    fflush(stdout);
+    volatile int dummy = 1;
+    while (dummy);
+  }
+}
+
+// The upper half's heap.  The kernel's brk belongs to the lower half
+// (create_heap_guard_page()), and glibc's mmap'ed fallback arena never gives
+// memory back to the kernel, which is slow.  So the upper half's libc sbrk()
+// jumps to uhSbrk(), which moves a break of its own in a reserved region.
+// Other callers of sbrk() (DMTCP, MANA, the application) still see the
+// kernel's break: DMTCP places and restores memory around it.
+#define UH_BRK_RESERVE (1UL << 36)  // 64 GB of address space
+
+// In the reserved region's first page, so that it is checkpointed and
+// restored with the upper half.
+typedef struct {
+  char *brk;
+  char *base;            // [base, end): the heap's pages
+  char *end;
+  char *libc_text;       // [libc_text, libc_text_end): the upper half's
+  char *libc_text_end;   //   libc's code, where malloc calls sbrk()
+} UhBrk;
+
+// The upper half's sbrk(); patchSbrk() passes the heap's state in 'h'.
+static void*
+uhSbrk(intptr_t increment, UhBrk *h)
+{
+  char *caller = (char*)__builtin_return_address(0);
+  void *ret = (void*)-1;
+  JUMP_TO_LOWER_HALF(lh_info->fsaddr);
+  if (caller < h->libc_text || caller >= h->libc_text_end) {
+    // Not malloc: the kernel's break, which the upper half cannot move.
+    if (increment == 0) {
+      ret = (void*)syscall(SYS_brk, 0);
+    }
+  } else {
+    char *old = h->brk;
+    char *brk = old + increment;
+    if (brk >= h->base && brk <= h->end) {
+      char *from = (char*)ROUND_UP(old, PAGE_SIZE);
+      char *to = (char*)ROUND_UP(brk, PAGE_SIZE);
+      int rc = 0;
+      if (to > from) {
+        rc = mprotect(from, to - from, PROT_READ | PROT_WRITE);
+      } else if (to < from) {
+        // Released pages read as zeros when the heap grows again.
+        rc = madvise(to, from - to, MADV_DONTNEED);
+        if (rc == 0) {
+          rc = mprotect(to, from - to, PROT_NONE);
+        }
+      }
+      if (rc == 0) {
+        h->brk = brk;
+        ret = old;
+      }
+    }
+  }
+  RETURN_TO_UPPER_HALF();
+  return ret;
+}
+
+// Reserves the upper half's heap and makes its libc's sbrk() jump to
+// uhSbrk().  [libc_text, libc_text + len) is that libc's code.
+static void
+patchSbrk(char *sbrk, char *libc_text, size_t len)
+{
+#if defined(__x86_64__)
+  char *r = (char*)__mmap_wrapper(NULL, UH_BRK_RESERVE, PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                                  -1, 0);
+  if (r == MAP_FAILED || mprotect(r, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+    DLOG(ERROR, "No heap for the upper half: %s\n", strerror(errno));
+    return;
+  }
+  UhBrk *h = (UhBrk*)r;
+  h->base = h->brk = r + PAGE_SIZE;
+  h->end = r + UH_BRK_RESERVE;
+  h->libc_text = libc_text;
+  h->libc_text_end = libc_text + len;
+
+  unsigned char stub[] = {
+    0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0,  // movabs $h, %rsi
+    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,  // movabs $uhSbrk, %rax
+    0xff, 0xe0                           // jmp *%rax
+  };
+  void *target = (void*)&uhSbrk;
+  memcpy(stub + 2, &h, sizeof(h));
+  memcpy(stub + 12, &target, sizeof(target));
+  char *page = (char*)((unsigned long)sbrk & ~(PAGE_SIZE - 1));
+  size_t page_len =
+    ROUND_UP(sbrk + sizeof(stub), PAGE_SIZE) - (unsigned long)page;
+  if (mprotect(page, page_len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    DLOG(ERROR, "Cannot patch sbrk: %s\n", strerror(errno));
+    return;
+  }
+  memcpy(sbrk, stub, sizeof(stub));
+  mprotect(page, page_len, PROT_READ | PROT_EXEC);
+#endif
+}
+
+// This is a mmap wrapper only for restoring memory after restart.
+void* restore_mmap(void *addr, size_t length, int prot,
+                   int flags, int fd, off_t offset) {
+  void *ret = MAP_FAILED;
+  length = ROUND_UP(length, PAGE_SIZE);
+  if ((char*)addr + length > max_allocated_addr) {
+    max_allocated_addr = (char*)addr + length;
+  }
+  ret = _real_mmap(addr, length, prot, flags | MAP_FIXED, fd, offset);
+  if (ret != MAP_FAILED) {
+    char *new_block_end_addr = (char*)addr + length;
+    MmapInfo_t new_block = {(char*)addr,
+                            (size_t)(new_block_end_addr - (char*)addr)};
+    merge_overlap_blocks(new_block, allocated_blocks);
+    remove_overlap_blocks(new_block, free_blocks);
+  }
+  return ret;
+}
+
+// The block lists are shared by the upper half's threads, which call these
+// wrappers concurrently (e.g. an application thread's munmap() while MANA's
+// checkpoint thread creates a thread at restart): one at a time.  A
+// spinlock, since the threads share the lower half's TLS here.
+static volatile int blocks_lock = 0;
+
+static inline void
+lock_blocks()
+{
+  while (__sync_lock_test_and_set(&blocks_lock, 1)) {
+    while (blocks_lock) {
+#if defined(__x86_64__)
+      __builtin_ia32_pause();
+#endif
+    }
+  }
+}
+
+static inline void
+unlock_blocks()
+{
+  __sync_lock_release(&blocks_lock);
+}
+
+void* mmap_wrapper(void *addr, size_t length, int prot,
+                  int flags, int fd, off_t offset) {
+  void *ret = MAP_FAILED;
+  JUMP_TO_LOWER_HALF(lh_info->fsaddr);
+  lock_blocks();
+  ret = __mmap_wrapper(addr, length, prot, flags, fd, offset);
+  unlock_blocks();
+  RETURN_TO_UPPER_HALF();
+  return ret;
+}
+
+static void* __mmap_wrapper(void *addr, size_t length, int prot,
+                            int flags, int fd, off_t offset) {
+  static char *libc_base_addr = NULL;
+  void *ret = MAP_FAILED;
+  length = ROUND_UP(length, PAGE_SIZE);
+#ifndef MAP_FIXED_NOREPLACE
+# define MAP_FIXED_NOREPLACE 0
+#endif
+  if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
+    // The caller chose the address ("exactly here", replacing what is there
+    // or failing with EEXIST): never move it, never change the flags.  The
+    // CUDA driver reserves its UVA ranges with MAP_FIXED_NOREPLACE, and on
+    // restore (cuCheckpointProcessRestore) it must get the same addresses.
+    ret = _real_mmap(addr, length, prot, flags, fd, offset);
+    if (ret != MAP_FAILED && (char*)ret + length > max_allocated_addr) {
+      max_allocated_addr = (char*)ret + length;
+    }
+  } else if (arena_base != NULL && addr != NULL &&
+      (uintptr_t)addr < 0x7f0000000000UL &&
+      (ret = mmap_fixed_noreplace(addr, length, prot, flags, fd, offset))
+        != MAP_FAILED) {
+    // Honor a hint whose range is free.  The CUDA driver
+    // asks for its UVA range at 0x200000000 with a plain hint.  (Below the
+    // lower half's libraries, so a later restart's lower half can't be there.)
+    if ((char*)ret + length > max_allocated_addr) {
+      max_allocated_addr = (char*)ret + length;
+    }
+  } else if (arena_base != NULL) {
+    // The arena picks the address.  free_blocks knows only the upper half's
+    // regions, but the lower half maps memory there too (e.g. the CUDA
+    // driver's UVA reservation at 0x200000000, made in MPI_Init() by a
+    // CUDA-aware MPI).  So never clobber: on EEXIST, take the regions in the
+    // way out of free_blocks and try the next free address.
+    char *hint = (char*)addr;
+    while (1) {
+      addr = next_free_addr(hint, length);
+      ret = mmap_fixed_noreplace(addr, length, prot, flags, fd, offset);
+      if (ret != MAP_FAILED || errno != EEXIST) {
+        break;
+      }
+      remove_foreign_mappings((char*)addr, length);
+    }
+    if (ret != MAP_FAILED && (char*)ret + length > max_allocated_addr) {
+      max_allocated_addr = (char*)ret + length;
+    }
+  } else {
+    ret = _real_mmap(addr, length, prot, flags, fd, offset);
+  }
+  if (ret != MAP_FAILED) {
+    DLOG(NOISE, "LH: mmap (%lu): addr %p (%p) @ 0x%zx\n",
+         allocated_blocks.size(), ret, addr, length);
+    char *new_block_end_addr = (char*)ret + length;
+    MmapInfo_t new_block = {(char*)ret,
+                            (size_t)(new_block_end_addr - (char*)ret)};
+    merge_overlap_blocks(new_block, allocated_blocks);
+    remove_overlap_blocks(new_block, free_blocks);
+    if (fd > 0) {
+      char glibcFullPath[PATH_MAX] = {0};
+      int found = checkLibrary(fd, "libc.so", glibcFullPath, PATH_MAX) ||
+                  checkLibrary(fd, "libc-", glibcFullPath, PATH_MAX);
+      if (found) {
+        // ld.so starts every load of libc by mapping it at file offset 0;
+        // later segments come at other offsets, with MAP_FIXED.  Take the
+        // base only from that first mapping: a data segment (no PROT_EXEC)
+        // would otherwise leave its address here, and the next libc loaded
+        // (the upper half has one per link namespace) would be patched at
+        // that stale base -- in some other library's memory.
+        if (offset == 0) {
+          libc_base_addr = static_cast<char*>(ret);
+        }
+        if ((prot & PROT_EXEC) && libc_base_addr != NULL) {
+          int rc = mprotect(ret, length, prot | PROT_WRITE);
+          if (rc < 0) {
+            DLOG(ERROR,
+                 "Failed to add PROT_WRITE perms for memory region at: %p "
+                 "of: %zu bytes. Error: %s\n", addr, length, strerror(errno));
+            return NULL;
+          }
+          patchLibc(fd, libc_base_addr, glibcFullPath);
+          off_t sbrk_offset = get_symbol_offset(glibcFullPath, "__sbrk");
+          if (sbrk_offset) {
+            patchSbrk(libc_base_addr + sbrk_offset, (char*)ret, length);
+          }
+          rc = mprotect(ret, length, prot);
+          if (rc < 0) {
+            DLOG(ERROR, "Failed to restore perms for memory region at: %p "
+                "of: %zu bytes. Error: %s\n", addr, length, strerror(errno));
+            return NULL;
+          }
+          libc_base_addr = NULL;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int munmap_wrapper(void *addr, size_t length) {
+  int ret = -1;
+  JUMP_TO_LOWER_HALF(lh_info->fsaddr);
+  lock_blocks();
+  ret = __munmap_wrapper(addr, length);
+  unlock_blocks();
+  RETURN_TO_UPPER_HALF();
+  return ret;
+}
+
+static int __munmap_wrapper(void *addr, size_t length) {
+  int ret = -1;
+  if (addr == 0) {
+    errno = EINVAL;
+    return ret;
+  }
+  length = ROUND_UP(length, PAGE_SIZE);
+  ret = _real_munmap(addr, length);
+  if (ret != -1) {
+    DLOG(NOISE, "LH: munmap (%lu): %p @ 0x%zx\n",
+         allocated_blocks.size(), addr, length);
+    char *new_block_end_addr = (char*)addr + length;
+    MmapInfo_t new_block = {(char*)addr,
+                            (size_t)(new_block_end_addr - (char*)addr)};
+    remove_overlap_blocks(new_block, allocated_blocks);
+    merge_overlap_blocks(new_block, free_blocks);
+  }
+  return ret;
+}
+
+// The MPI process, not a child that the upper half forked.  Set by the
+// lower half's main() at launch and again at restart.
+static pid_t lh_pid;
+
+void
+record_lower_half_pid()
+{
+  lh_pid = syscall(SYS_getpid);
+}
+
+// The upper half libc's _exit() jumps here (patchLibc()).  If the upper half
+// is in exit() (upper_half_exiting), end through the lower half's exit() so
+// that its exit handlers run too: MPICH sends PMI finalize from one, and
+// without it the process manager kills the other ranks.  A direct _exit()
+// and a child that the upper half forked just exit.
+static void
+uhExit(int status)
+{
+  if (lh_info->fsaddr != NULL) {
+    setFS((unsigned long)lh_info->fsaddr);
+  }
+  if (lh_info->upper_half_exiting && syscall(SYS_getpid) == lh_pid) {
+    exit(status);  // The lower half's
+  }
+  syscall(SYS_exit_group, status);
+  __builtin_unreachable();
+}
+
+static void patchLibc(int fd, char *base, char *glibc)
+{
+  assert(base != NULL);
+  assert(fd > 0);
+  DLOG(NOISE, "Patching libc (%s) @ %p\n", glibc, base);
+  // Save incoming offset
+  off_t save_offset = lseek(fd, 0, SEEK_CUR);
+  off_t mmap_offset = get_symbol_offset(glibc, "mmap");
+  if (! mmap_offset) {
+    char buf[256] = "/usr/lib/debug";
+    buf[sizeof(buf)-1] = '\0';
+    ssize_t rc = 0;
+    rc = readlink(glibc, buf+strlen(buf), sizeof(buf)-strlen(buf)-1);
+    if (rc != -1 && access(buf, F_OK) == 0) {
+      // Debian family (Ubuntu, etc.) use this scheme to store debug symbols.
+      //   http://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
+      fprintf(stderr, "Debug symbols for interpreter in: %s\n", buf);
+    }
+    mmap_offset = get_symbol_offset(buf, "mmap"); // elf interpreter debug path
+  }
+  assert(mmap_offset);
+  off_t munmap_offset = get_symbol_offset(glibc, "munmap");
+  if (! munmap_offset) {
+    char buf[256] = "/usr/lib/debug";
+    buf[sizeof(buf)-1] = '\0';
+    ssize_t rc = 0;
+    rc = readlink(glibc, buf+strlen(buf), sizeof(buf)-strlen(buf)-1);
+    if (rc != -1 && access(buf, F_OK) == 0) {
+      // Debian family (Ubuntu, etc.) use this scheme to store debug symbols.
+      //   http://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
+      fprintf(stderr, "Debug symbols for interpreter in: %s\n", buf);
+    }
+    munmap_offset = get_symbol_offset(buf, "munmap"); // elf interpreter debug path
+  }
+  assert(munmap_offset);
+  patch_trampoline(base + mmap_offset, reinterpret_cast<void*>(&mmap_wrapper));
+  patch_trampoline(base + munmap_offset, reinterpret_cast<void*>(&munmap_wrapper));
+  off_t exit_offset = get_symbol_offset(glibc, "_exit");
+  if (exit_offset) {
+    patch_trampoline(base + exit_offset, reinterpret_cast<void*>(&uhExit));
+  } else {
+    DLOG(ERROR, "No _exit in %s: the lower half's exit handlers won't run\n",
+         glibc);
+  }
+  // Restore file offset to not upset the caller
+  lseek(fd, save_offset, SEEK_SET);
+}
+
+// We don't need a wrapper for sbrk() because DMTCP has created a page above here
+// to make sbrk(0) fail in libc/application.

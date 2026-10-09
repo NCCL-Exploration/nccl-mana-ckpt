@@ -1,0 +1,353 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <assert.h>
+#include <sys/mman.h>
+#include <elf.h>
+
+#define ROUND_UP(x) ((unsigned long)((x) + (0x1000-1)) \
+                     & ~(unsigned long)(0x1000-1))
+
+extern char **environ; // also sometimes defined in unistd.h
+extern char **__environ;
+
+char *dbg_bottom_of_stack = NULL;
+char *dbg_end_marker_addr = NULL;
+char *dbg_env_strings_addr = NULL;
+char *dbg_argv_strings_addr = NULL;
+char *dbg_auxv_ptr_addr = NULL;
+char *dbg_env_ptr_addr = NULL;
+char *dbg_argv_ptr_addr = NULL;
+char *dbg_argc_addr = NULL;
+void debugStack(char *argc_ptr, char *argv_ptr) {
+  printf("original argc_ptr: %p\n", argc_ptr);
+  printf("original argv_ptr: %p\n", argv_ptr);
+  printf("dbg_argc_addr: %p\n", dbg_argc_addr);
+  printf("dbg_argv_ptr_addr: %p\n", dbg_argv_ptr_addr);
+  printf("dbg_env_ptr_addr: %p [16-byte aligned]\n", dbg_env_ptr_addr);
+  printf("dbg_auxv_ptr_addr: %p\n", dbg_auxv_ptr_addr);
+  printf("dbg_argv_strings_addr: %p\n", dbg_argv_strings_addr);
+  printf("dbg_env_strings_addr: %p\n", dbg_env_strings_addr);
+  printf("dbg_end_marker_addr: %p\n", dbg_end_marker_addr);
+  printf("dbg_bottom_of_stack: %p\n", dbg_bottom_of_stack );
+  fflush(stdout);
+}
+
+// See: http://articles.manugarg.com/aboutelfauxiliaryvectors.html
+//   (but unfortunately, that's for a 32-bit system)
+// The kernel code is here (not recommended for a first reading):
+//    https://github.com/torvalds/linux/blob/master/fs/binfmt_elf.c
+// The spec is here:  https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf
+char *deepCopyStack(int argc, char **argv, char *argc_ptr, char *argv_ptr,
+                   unsigned long dest_argc, char **dest_argv, char *dest_stack,
+                   Elf64_auxv_t **auxv_ptr, void **stack_bottom) {
+  if (((unsigned long)dest_stack & (16-1)) != 0) {
+    fprintf(stderr,
+      "deepCopyStack() passed dest_stack that's not 16-byte aligned.\n"
+      " This violates x86_64 ABI; needed for Intel SSE support.\n");
+    exit(1);
+  }
+  // The caller's stack pointer points to &argv[-1] (the argc word).
+  assert((long int)(argv[-1]) == argc);
+  int i;
+  for (i = 0; argv[i] != NULL; i++) ;
+  char **orig_envp = &(argv[i+1]);
+  for (i = 0; orig_envp[i] != NULL; i++) ;
+  Elf64_auxv_t *auxv = (Elf64_auxv_t *)&(orig_envp[i+1]);
+
+  // Allocate storage for dest_stack
+  // ... Figure out env strings size for current __environ.
+  // Snapshot the environment: it may change before the copy below
+  //   (e.g., MPI_Init() may putenv() a local buffer that is later reused).
+  int env_strings_count = 0;
+  while (__environ[env_strings_count] != NULL) {
+    env_strings_count++;
+  }
+  char **env_strings = (char **)malloc(env_strings_count * sizeof(char *));
+  size_t *env_strings_len =
+    (size_t *)malloc(env_strings_count * sizeof(size_t));
+  int env_strings_size = 0;
+  for (i = 0; i < env_strings_count && __environ[i] != NULL; i++) {
+    env_strings[i] = __environ[i];
+    env_strings_len[i] = strlen(__environ[i]);
+    env_strings_size += env_strings_len[i] + 1;
+  }
+  env_strings_count = i;
+  int env_ptr_size = (env_strings_count + 1) * sizeof(__environ[0]);
+  char *env_ptr_addr = (char *)&__environ[0];
+  char **new_env_ptrs = (char**)malloc(env_ptr_size);
+  memset(new_env_ptrs, 0, env_ptr_size);
+  // ... and the size of the strings of dest_argv[].  They are in the lower
+  //   half's memory (the kernel's stack, and the heap for the ELF interpreter's
+  //   path), which is not checkpointed and is replaced at restart.  So, as for
+  //   envp[], the new argv[] points to copies of the strings on the new stack.
+  size_t *argv_strings_len = (size_t *)malloc(dest_argc * sizeof(size_t));
+  int argv_strings_size = 0;
+  for (i = 0; i < (int)dest_argc; i++) {
+    argv_strings_len[i] = strlen(dest_argv[i]);
+    argv_strings_size += argv_strings_len[i] + 1;
+  }
+  int argv_ptr_size = (dest_argc + 1) * sizeof(argv[0]);
+  char **new_argv_ptrs = (char **)malloc(argv_ptr_size);
+  memset(new_argv_ptrs, 0, argv_ptr_size);
+
+  for (i = 0; auxv[i].a_type != AT_NULL; i++) {};
+  assert(auxv[i].a_type == AT_NULL);
+  int auxv_size = (char *)&auxv[i+1] - (char *)&auxv[0];
+  char *auxv_addr = (char *)&auxv[0];
+
+  // x86_64 SysV ABI: at program entry, %rsp (the address of 'argc') must be
+  //   16-byte aligned, or ld.so/_start fault on SSE (movaps) accesses.
+  // The strings region is 16-byte aligned (see padding below) and auxv_size is
+  //   a multiple of 16 (sizeof(Elf64_auxv_t) == 16), so the only slack that can
+  //   misalign 'argc' is (env_ptr_size + argv_ptr_size + argc word).  Pad by
+  //   whatever is needed to bring that total back to a 16-byte boundary.
+  assert(auxv_size % 16 == 0);
+  int argc_align_pad =
+    (16 - ((env_ptr_size + argv_ptr_size + (int)sizeof(char *)) % 16)) % 16;
+
+  assert( (auxv_size + env_ptr_size) % 8 == 0);
+  // Total size of the copied stack image: the sum of every region written
+  //   below, listed from the high end (end marker) down to argc.
+  int dest_stack_size = sizeof(NULL)   /* end marker                    */ +
+                        env_strings_size                                   +
+                        argv_strings_size                                  +
+                        32 /* up-to-32-byte pad below the strings */       +
+                        auxv_size                                          +
+                        argc_align_pad /* keep argc/%rsp 16-byte aligned */ +
+                        env_ptr_size                                       +
+                        argv_ptr_size                                      +
+                        sizeof(char *) /* argc word */;
+
+  // Convention: the bottom of the stack is its HIGHEST address; the stack grows
+  //   toward lower addresses, so the top of the stack (the new %rsp) is the
+  //   LOWEST in-use address.  dest_stack_bottom is the bottom (highest address,
+  //   returned in *stack_bottom); dest_stack_low is the page-aligned floor of
+  //   the image.  We map the whole image plus one guard page below it:
+  //   [dest_stack_low - page, dest_stack_bottom).
+  long page = sysconf(_SC_PAGESIZE);
+  char *dest_stack_bottom =
+    (char *)ROUND_UP((unsigned long)dest_stack + dest_stack_size);
+  char *dest_stack_low = dest_stack_bottom - ROUND_UP(dest_stack_size);
+
+  // FIXME:  Consider replacing MAP_FIXED by MAP_FIXED_NOREPLACE
+  //   and then checking that:  rc2 == dest_stack_low - page
+  void *rc2 = mmap(dest_stack_low - page,
+                   dest_stack_size + page,
+                   PROT_READ|PROT_WRITE|PROT_EXEC,
+                   MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_GROWSDOWN,
+                   -1, 0);
+  if (rc2 == MAP_FAILED) { perror("mmap"); exit(1); }
+  *stack_bottom = dest_stack_bottom;   // bottom of stack = highest address
+
+/*************************************************************
+ * We have now mmap'ed the new stack.  We populate it starting at the bottom of
+ *  the stack (highest address) toward lower addresses: each region's
+ *  strings/values first, then the pointer arrays, so the pointers can refer to
+ *  strings already placed above them (at higher addresses).
+ *
+ * Layout (x86_64), listed from the top of the stack (lowest address, the new
+ *  %rsp) down to the bottom of the stack (highest address):
+ *
+ *   %rsp -> [ argc ]                       8   (MUST be 16-byte aligned)
+ *           [ argv[0] (pointer) ]          8   (program name)
+ *           [ argv[..] (pointer) ]         8 * (dest_argc-1)
+ *           [ argv[dest_argc] = NULL ]     8
+ *           [ envp[0] (pointer) ]          8
+ *           [ envp[..] (pointer) ]         8
+ *           [ envp[term] = NULL ]          8
+ *           [ auxv[0] (Elf64_auxv_t) ]    16
+ *           [ auxv[..] (Elf64_auxv_t) ]   16
+ *           [ auxv[term] = AT_NULL ]      16
+ *           [ padding ]                    0 - ~47  (argc_align_pad, plus up to
+ *                                                    32 rounded down so the
+ *                                                    strings stay 16-aligned)
+ *           [ argument ASCIIZ strings ]   >= 0
+ *           [ environment ASCIIZ str. ]   >= 0
+ *           [ end marker = NULL ]          8
+ *   dest_stack_bottom -> < bottom of stack (highest address) >
+ *
+ *************************************************************/
+
+  // Start at the bottom of the stack (dest_stack_bottom, highest address) and
+  //   write toward lower addresses.  Note this is NOT dest_stack_low: that is
+  //   the page-aligned image floor used only to position the mmap; starting
+  //   here would write the stack a full dest_stack_size below the mmap's reach.
+  char *dest_curr_stack = dest_stack_bottom;
+dbg_bottom_of_stack = dest_curr_stack;
+
+ /*****************************
+  * end marker (null)
+  *****************************/
+  dest_curr_stack -= sizeof(NULL);
+  assert(NULL == (void *)0x0);
+  memset(dest_curr_stack, 0, sizeof(NULL));
+dbg_end_marker_addr = dest_curr_stack;
+
+ /*****************************
+  * environment strings
+  *****************************/
+  dest_curr_stack -= env_strings_size;
+  for (i = 0; i < env_strings_count; i++) {
+    memcpy(dest_curr_stack, env_strings[i], env_strings_len[i]);
+    dest_curr_stack[env_strings_len[i]] = '\0';
+    // Change UH_PRELOAD to LD_PRELOAD
+    if (strstr(dest_curr_stack, "UH_PRELOAD")) {
+      dest_curr_stack[0] = 'L';
+      dest_curr_stack[1] = 'D';
+    }
+    new_env_ptrs[i] = dest_curr_stack;
+    dest_curr_stack += env_strings_len[i] + 1;
+  }
+  assert(dest_curr_stack == dest_stack_bottom - sizeof(NULL));
+  free(env_strings);
+  free(env_strings_len);
+  dest_curr_stack -= env_strings_size;
+  environ = __environ = (char **)dest_curr_stack;
+  // ld.so will probably reset environ and __environ anyway
+dbg_env_strings_addr = dest_curr_stack;
+
+ /*****************************
+  * argv strings
+  *****************************/
+  dest_curr_stack -= argv_strings_size;
+  for (i = 0; i < (int)dest_argc; i++) {
+    memcpy(dest_curr_stack, dest_argv[i], argv_strings_len[i] + 1);
+    new_argv_ptrs[i] = dest_curr_stack;
+    dest_curr_stack += argv_strings_len[i] + 1;
+  }
+  assert(dest_curr_stack == dbg_env_strings_addr);
+  free(argv_strings_len);
+  dest_curr_stack -= argv_strings_size;
+dbg_argv_strings_addr = dest_curr_stack;
+
+ /*****************************
+  * padding
+  *****************************/
+  // Note that in Intel x86_64, the stack pointer must be 16-byte aligned
+  //   in order to properly support Intel SSE instructions that operate
+  //   on 16-byte quantities (128-bit quantities).
+  // Up to 32 bytes of padding before strings
+  // And strings must be 16-byte aligned.
+  // Round down to make it 16-byte aligned (as in Linux kernel):
+  dest_curr_stack -= 32;
+  dest_curr_stack =
+           (char *)((unsigned long)dest_curr_stack | (unsigned long)0xf) - 0xf;
+
+ /*****************************
+  * auxv
+  *****************************/
+  dest_curr_stack -= auxv_size;
+  // Pad so that, after argv pointers and the argc word are laid down below,
+  //   'argc' (the new %rsp) lands on a 16-byte boundary as the ABI requires.
+  assert( (auxv_size + env_ptr_size) % 8 == 0);
+  dest_curr_stack -= argc_align_pad;
+  // Save this now, and return at end of function.  This is an OUT parameter.
+  Elf64_auxv_t *dest_auxv_ptr = (Elf64_auxv_t *)dest_curr_stack;
+  memcpy(dest_curr_stack, auxv_addr, auxv_size);
+dbg_auxv_ptr_addr = dest_curr_stack;
+
+ /*****************************
+  * environment pointers
+  *****************************/
+  dest_curr_stack -= env_ptr_size;
+  // We can't just copy from env_ptr_addr, to dest_curr_stack because
+  // env_ptr_addr is an array of pointers to the _old_ stack.  We need
+  // new_env_ptrs, an array pointing to the _new_ stack.
+  memcpy(dest_curr_stack, new_env_ptrs, env_ptr_size);
+  assert( ((char **)dest_curr_stack)[env_strings_count] == NULL );
+  free(new_env_ptrs);
+dbg_env_ptr_addr = dest_curr_stack;
+
+ /*****************************
+  * argv pointers
+  *****************************/
+  dest_curr_stack -= argv_ptr_size;
+  // As for envp[]: new_argv_ptrs points to the copies on the new stack.
+  memcpy(dest_curr_stack, new_argv_ptrs, argv_ptr_size);
+  assert( ((char **)dest_curr_stack)[dest_argc] == NULL );
+  free(new_argv_ptrs);
+dbg_argv_ptr_addr = dest_curr_stack;
+
+ /*****************************
+  * argc (top of the stack; this address becomes the new %rsp)
+  *****************************/
+  dest_curr_stack -= sizeof(char *);
+  *(long int *)dest_curr_stack = dest_argc;
+  // The new %rsp (address of argc) must be 16-byte aligned per the x86_64 ABI.
+  assert( (uint64_t)dest_curr_stack % 16 == 0 );
+dbg_argc_addr = dest_curr_stack;
+
+  // We're reseting __environ and environ now, but we shouldn't need to do this.
+  // ld.so will do this again.
+  __environ = environ = (char **)env_ptr_addr;
+
+#ifdef DEBUG
+debugStack(argc_ptr, argv_ptr);
+#endif
+  *auxv_ptr = dest_auxv_ptr;
+#ifdef STANDALONE
+printf("\nDEBUGGING:\ndest_stack_bottom (highest address): %p;\n"
+       "dest_stack_low: %p; (dest_stack_size: %d)\n"
+       "dest_curr_stack (top of stack = new rsp): %p\n",
+       dest_stack_bottom, dest_stack_low, dest_stack_size,
+       dest_curr_stack);
+#endif
+  return dest_curr_stack;
+}
+
+// FIXME:  This was copied into lower-half.cpp, and is unused here.
+//         Why didn't we simply remove the 'static' declaration?
+// Given a pointer to auxvector, parses the aux vector and patches the AT_PHDR,
+// AT_ENTRY, and AT_PHNUM entries.
+static void
+patchAuxv(Elf64_auxv_t *av, unsigned long phnum,
+          unsigned long phdr, unsigned long entry)
+{
+  for (; av->a_type != AT_NULL; ++av) {
+    switch (av->a_type) {
+      case AT_PHNUM:
+        av->a_un.a_val = phnum;
+        break;
+      case AT_PHDR:
+        av->a_un.a_val = phdr;
+        break;
+      case AT_ENTRY:
+        av->a_un.a_val = entry;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+#ifdef STANDALONE
+int main(int argc, char **argv, char **envp) {
+  fprintf(stderr, "*** deepCopyStack:  TEST 1\n");
+  char* dest_argv_orig[] = {"test_word1", "test_word2", "test_word3", NULL};
+  Elf64_auxv_t *auxv_ptr;
+  int dest_argc = sizeof(dest_argv_orig)/sizeof(dest_argv_orig[0]) - 1;
+  char *dest_stack =
+    deepCopyStack(argc, argv, (char *)&argc, (char *)&argv[0], dest_argc, dest_argv_orig, (char *)0x800000, &auxv_ptr);
+  // 5: 3+1 words in argv, and one word in argc
+  int env_padding = ((uint64_t)dest_stack + (dest_argc+2)*sizeof(char *)) % 8 / 8;
+  int i;
+  for (i = 0; envp[i] != NULL; i++) {
+    assert(strcmp(((char **)dest_stack)[(dest_argc+2)+env_padding+i], envp[i]) == 0);
+  }
+
+  fprintf(stderr, "\n*** deepCopyStack:  TEST 2\n");
+  char* dest_argv_orig2[] = {"test_word1", "test_word2", "test_word3", "test_word4", NULL};
+  dest_argc = sizeof(dest_argv_orig2)/sizeof(dest_argv_orig2[0]) - 1;
+  dest_stack =
+    deepCopyStack(argc, argv, (char *)&argc, (char *)&argv[0], dest_argc, dest_argv_orig2, (char *)0x800000, &auxv_ptr);
+  env_padding = ((uint64_t)dest_stack + (dest_argc+2)*sizeof(char *)) % 8 / 8;
+  for (i = 0; envp[i] != NULL; i++) {
+    assert(strcmp(((char **)dest_stack)[(dest_argc+2)+env_padding+i], envp[i]) == 0);
+  }
+
+  fprintf(stderr, "\n*** deepCopyStack:  dest_stack is a copy of stack.\n");
+  return 0;
+}
+#endif

@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Launches an NCCL program under DMTCP with netsplit (see ../README.md).
+
+  [srun] nccl_launch [--verbose] [DMTCP_LAUNCH_OPTIONS ...] PROGRAM [ARGS ...]
+
+The program runs as netsplit-lh's upper half: NCCL, CUDA and DMTCP in the
+checkpointed process, NCCL's network back end (aws-ofi-nccl, libfabric) in a
+lower half that a restart replaces.  Plugins, in this order (see
+upper/netsplit_dmtcp.cpp): netsplit, nccl-mana-ckpt's NCCL plugin, any
+--with-plugin given here, DMTCP's CUDA plugin.
+
+The coordinator is the one -h/-p (or DMTCP_COORD_HOST/DMTCP_COORD_PORT)
+name; it must be running (--join-coordinator).
+"""
+import os
+import shlex
+import shutil
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+NETSPLIT = os.path.dirname(HERE)
+REPO = os.path.dirname(NETSPLIT)
+DMTCP = os.environ.get("DMTCP_ROOT", os.path.join(REPO, "dmtcp"))
+
+# dmtcp_launch options that take a value.
+VALUE_OPTS = {"-i", "--interval", "-h", "--coord-host", "-p", "--coord-port", "--ckptdir",
+              "--ckpt-signal", "--with-plugin", "--tmpdir", "--coord-logfile", "--port-file"}
+
+
+def need(path):
+    if not os.path.exists(path):
+        sys.exit("nccl_launch: %s not found (build netsplit and nccl-mana-ckpt)" % path)
+    return os.path.realpath(path)
+
+
+def main():
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in VALUE_OPTS else 1
+    opts, prog = args[:i], args[i:]
+    if not prog or "--help" in opts:
+        print(__doc__)
+        sys.exit(0 if "--help" in opts else 1)
+    verbose = "--verbose" in opts
+    opts = [o for o in opts if o != "--verbose"]
+
+    target = shutil.which(prog[0])
+    if target is None:
+        sys.exit("nccl_launch: program %s not found" % prog[0])
+    prog[0] = os.path.realpath(target)
+
+    netsplit_plugin = need(os.path.join(NETSPLIT, "lib", "libnccl-net-netsplit.so"))
+    nccl_plugin = need(os.path.join(REPO, "bin", "libncclplugin.so"))
+    cuda_plugin = need(os.path.join(DMTCP, "plugin", "cuda", "libdmtcp_cuda.so"))
+    ours = {netsplit_plugin, nccl_plugin, cuda_plugin}
+
+    # Merge --with-plugin values (DMTCP keeps only the last one given).
+    extra, kept, j = [], [], 0
+    while j < len(opts):
+        if opts[j] == "--with-plugin" and j + 1 < len(opts):
+            for p in opts[j + 1].split(":"):
+                if p and os.path.realpath(p) not in ours:
+                    extra.append(os.path.realpath(p))
+            j += 2
+        else:
+            kept.append(opts[j])
+            j += 1
+    plugins = ":".join([netsplit_plugin, nccl_plugin] + extra + [cuda_plugin])
+
+    # NCCL loads the proxy as its net plugin; DMTCP has preloaded the same
+    # library, which NCCL's dlopen() then finds by its SONAME.  For the
+    # rebuild after a checkpoint, NCCL opens the default name libnccl-net.so
+    # instead, which lib/ links to the proxy.  No other libnccl-net.so may be
+    # on the upper half's path: the real one would run in the checkpointed
+    # half.  The lower half opens it by its full path (NETSPLIT_BACKEND).
+    os.environ["NCCL_NET_PLUGIN"] = "netsplit"
+    libdir = os.path.join(NETSPLIT, "lib")
+    libdirs = [d for d in os.environ.get("LD_LIBRARY_PATH", "").split(":")
+               if d and not os.path.exists(os.path.join(d, "libnccl-net.so"))]
+    os.environ["LD_LIBRARY_PATH"] = ":".join([libdir] + libdirs)
+    # RAS keeps TCP links between processes that outlive communicators.
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
+    # The CUDA checkpoint API identifies the process by its name.
+    os.environ.setdefault("DMTCP_DISABLE_PRGNAME_PREFIX", "1")
+
+    # --no-gzip: netsplit-lh restores the image itself and reads it raw.
+    cmd = [need(os.path.join(DMTCP, "bin", "dmtcp_launch")), "--kernel-loader",
+           "--join-coordinator", "--disable-dl-plugin", "--no-gzip", "--with-plugin", plugins]
+    if not verbose:
+        cmd += ["-q", "-q"]
+    cmd += kept + [need(os.path.join(NETSPLIT, "bin", "netsplit-lh"))] + prog
+    if verbose:
+        print(" ".join(shlex.quote(a) for a in cmd), flush=True)
+    os.execv(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    main()

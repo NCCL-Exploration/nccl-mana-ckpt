@@ -1,0 +1,4 @@
+# Build outputs (make -C netsplit)
+bin/
+lib/
+obj/
