@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Restarts a netsplit job from its images (see ../README.md).
+
+  [srun] nccl_restart [--verbose] [--restartdir DIR] [DMTCP_RESTART_OPTIONS ...]
+
+Each rank (PMI_RANK, PMIX_RANK or SLURM_PROCID) restores DIR/ckpt_rank_<rank>
+(DIR defaults to the current directory) into a new netsplit-lh, whose network
+back end is loaded fresh: the job may restart on other nodes or another
+network.  The coordinator is the one -h/-p (or DMTCP_COORD_HOST/PORT) name.
+"""
+import os
+import shlex
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+NETSPLIT = os.path.dirname(HERE)
+
+
+def launcher_rank():
+    for var in ("PMI_RANK", "PMIX_RANK", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK",
+                "MV2_COMM_WORLD_RANK"):
+        value = os.environ.get(var, "")
+        if value.isdigit():
+            return int(value)
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+    if "--help" in args:
+        print(__doc__)
+        sys.exit(0)
+    verbose = "--verbose" in args
+    args = [a for a in args if a != "--verbose"]
+    restart_dir = "./"
+    if "--restartdir" in args:
+        k = args.index("--restartdir")
+        if k + 1 >= len(args):
+            sys.exit("nccl_restart: --restartdir needs a directory")
+        restart_dir = args[k + 1]
+        del args[k:k + 2]
+    if not os.path.isdir(restart_dir):
+        sys.exit("nccl_restart: --restartdir %s: no such directory" % restart_dir)
+
+    rank = launcher_rank()
+    if rank is None:
+        sys.exit("nccl_restart: no rank in the environment (PMI_RANK, PMIX_RANK, SLURM_PROCID)")
+    rank_dir = os.path.join(restart_dir, "ckpt_rank_%d" % rank)
+    if not os.path.isdir(rank_dir):
+        sys.exit("nccl_restart: %s: no images for rank %d" % (rank_dir, rank))
+    # DMTCP writes each image as a .tmp file and renames it when complete.
+    if any(f.endswith(".tmp") for f in os.listdir(rank_dir)):
+        sys.exit("nccl_restart: %s has .tmp files: the checkpoint may be incomplete" % rank_dir)
+
+    # No NETSPLIT_RESERVED_FDS (header.netsplit's fds): the new lower half
+    # opens no fd before the restore (the back end loads at NCCL's rebuild),
+    # and placeholders kept on those numbers until DMTCP_EVENT_RUNNING made
+    # cuCheckpointProcessRestore() fail (CUresult 5) in the CUDA plugin's
+    # RUNNING_AFTER.  Set it by hand only to debug fd collisions.
+    os.environ.setdefault("DMTCP_DISABLE_PRGNAME_PREFIX", "1")
+
+    cmd = [os.path.join(NETSPLIT, "bin", "netsplit-lh"), "-j", "--restore"]
+    if not verbose:
+        cmd += ["-q", "-q"]
+    cmd += args + ["--restartdir", os.path.realpath(restart_dir)]
+    if verbose:
+        print(" ".join(shlex.quote(a) for a in cmd), flush=True)
+    os.execv(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    main()

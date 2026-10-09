@@ -1,0 +1,1414 @@
+#include <assert.h>
+#include <dlfcn.h>
+#include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <linux/futex.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/personality.h>
+#include <asm/prctl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <algorithm>
+#include <vector>
+
+#include "mtcp_header.h"
+#include "mem-wrapper.h"
+#include "patch-trampoline.h"
+#include "lower-half-api.h"
+#include "logging.h"
+#include "dmtcp.h"
+#include "protectedfds.h"
+#include "dmtcprestartinternal.h"
+#include "procmapsarea.h"
+// FIXME:  lower-half should be a standalone program, except where it uses
+//         mtcp_restart.  Why do we have all of these other DMTCP dependencies?
+#include "jalib.h"
+#include "jassert.h"
+#include "jconvert.h"
+#include "jfilesystem.h"
+#include "util.h"
+#include "backend.h"
+
+// netsplit-lh: the lower half of netsplit (see ../include/netsplit-api.h).
+// It is MANA's lower half (mpi-proxy-split/lower-half/lower-half.cpp) without
+// MPI and without CUDA forwarding: it loads the application as the upper half
+// at launch, restores it from a checkpoint image at restart, and holds NCCL's
+// network back end (backend.cpp), which it loads on the upper half's first
+// call.  kernel-loader.tgz (Gene Cooperman, gene@ccs.neu.edu) has upstream
+// source for many files in this dir; this file is kernel-loader.c there.
+
+// Uses ELF Format.  For background, read both of:
+//  * http://www.skyfree.org/linux/references/ELF_Format.pdf
+//  * /usr/include/elf.h
+// Here's a fun blog with a gentle introduction to ELF:
+//  * https://linux-audit.com/elf-binaries-on-linux-understanding-and-analysis/
+//  * https://www.linuxjournal.com/article/1059 (early intro from 1995)
+// The kernel code is here (not recommended for a first reading):
+//    https://github.com/torvalds/linux/blob/master/fs/binfmt_elf.c
+
+#ifdef __x86_64__
+# define eax rax
+# define ebx rbx
+# define ecx rcx
+# define edx rax
+# define ebp rbp
+# define esi rsi
+# define edi rdi
+# define esp rsp
+# define CLEAN_FOR_64_BIT(args...) CLEAN_FOR_64_BIT_HELPER(args)
+# define CLEAN_FOR_64_BIT_HELPER(args...) #args
+#elif __i386__
+# define CLEAN_FOR_64_BIT(args...) #args
+#else
+# define CLEAN_FOR_64_BIT(args...) "CLEAN_FOR_64_BIT_undefined"
+#endif
+
+#define PAGE_OFFSET(x) ((x)-ROUND_DOWN(x, PAGE_SIZE))
+#define MAX_ELF_INTERP_SZ 256
+#define LOADER_SIZE_LIMIT 0x2000000
+#define MAX_CMD_ARGV2_LENGTH 100
+#define HEAP_GUARD_SIZE 0x1000000
+// Room below the heap guard for the heap of a restarted lower half, which
+// may need a little more than at launch (see restore_heap_break()).
+#define HEAP_SLACK_SIZE 0x1000000
+
+// Lower half initialization helper functions
+void set_addr_no_randomize(char *argv[]);
+static void reserve_restart_fds();
+void create_heap_guard_page();
+void initialize_lh_info();
+void write_lh_info_addr(int restore_mode);
+
+// Restart Mode helper functions
+int parse_restore_flag(int *argc, char **argv);
+string get_restore_target_info(string restart_dir, int rank);
+void validate_checkpoint_header(RestoreTarget *t, DmtcpCkptHeader &ckpt_hdr);
+void restore_heap_break(void *saved_brk);
+void reserve_memory_areas(RestoreTarget *t, off_t &ckpt_file_pos);
+void *mmap_fixed_noreplace(void *addr, size_t length, int prot, int flags,
+                           int fd, off_t offset);
+void release_reserved_memory(RestoreTarget *t, off_t ckpt_file_pos);
+void restore_session_leadership(RestoreTarget *t);
+void restore_memory_data(RestoreTarget *t, DmtcpCkptHeader &ckpt_hdr);
+static int restoreMemoryArea(int fd, DmtcpCkptHeader *ckptHdr);
+
+// Launch Mode helper functions
+void parse_launch_arguments(int argc, char **argv, int *cmd_argc, char ***cmd_argv);
+void print_usage_and_exit(char *prog_name);
+void get_elf_interpreter(const char *cmd_path, Elf64_Addr *cmd_entry,
+                          char elf_interpreter[]);
+char *load_elf_interpreter(char elf_interpreter[],void *ld_so_addr,
+                            Elf64_Ehdr *ld_so_elf_hdr_ptr);
+char *map_elf_interpreter_load_segment(int fd, Elf64_Phdr phdr,
+                                      void *ld_so_addr);
+void prepend_elf_interpreter_to_path(char **cmd_argv, int cmd_argc, char elf_interpreter[], char *cmd_argv2[]);
+char *setup_upper_half_stack(int argc, char **argv, int cmd_argc, char **cmd_argv2,
+                      char *interp_base_address, Elf64_auxv_t **auxv_ptr, void **stack_bottom);
+// See: http://articles.manugarg.com/aboutelfauxiliaryvectors.html
+//   (but unfortunately, that's for a 32-bit system)
+char *deepCopyStack(int argc, char **argv, char *argc_ptr, char *argv_ptr,
+                    unsigned long dest_argc, char **dest_argv, char *dest_stack,
+                    Elf64_auxv_t **auxv_ptr, void **stack_bottom);
+char *create_red_zone(char *stack_addr);
+static void patchAuxv(Elf64_auxv_t *av, unsigned long phnum,
+                      unsigned long phdr, unsigned long entry);
+off_t get_symbol_offset_with_debug(const char *elf_interpreter, const char *symbol);
+off_t get_symbol_offset(const char *pathame, const char *symbol);
+
+typedef void (*PostRestartFnPtr_t)(double, int);
+
+void *ld_so_entry;
+LowerHalfInfo_t lh_info_obj;
+LowerHalfInfo_t *lh_info;
+
+#define MTCP_RESTART_BINARY "mtcp_restart"
+
+// The rank as the launcher tells it, or -1.  At restart it picks the
+// checkpoint image (ckpt_rank_<rank>).
+static int
+launcher_rank()
+{
+  const char *vars[] = { "PMI_RANK", "PMIX_RANK", "SLURM_PROCID",
+                         "OMPI_COMM_WORLD_RANK", "MV2_COMM_WORLD_RANK" };
+  for (const char *var : vars) {
+    const char *value = getenv(var);
+    if (value != NULL && value[0] != '\0') {
+      return atoi(value);
+    }
+  }
+  return -1;
+}
+
+int main(int argc, char *argv[], char *envp[]) {
+  set_addr_no_randomize(argv);
+  Elf64_Addr cmd_entry;
+  int cmd_argc = 0;
+  char **cmd_argv;
+  void * ld_so_addr = NULL;
+  Elf64_Ehdr ld_so_elf_hdr;
+  char elf_interpreter[MAX_ELF_INTERP_SZ];
+  lh_info = &lh_info_obj;
+
+  memset(lh_info, 0, sizeof(LowerHalfInfo_t));
+  unsigned long fsaddr = 0;
+  syscall(SYS_arch_prctl, ARCH_GET_FS, &fsaddr);
+  // Fill in lh_info contents
+  lh_info->fsaddr = (void*)fsaddr;
+  lh_info->fsgsbase_enabled = CheckAndEnableFsGsBase();
+  lh_info->version = NETSPLIT_API_VERSION;
+
+  int restore_mode = parse_restore_flag(&argc, argv);
+
+  // Before this lower half opens fds of its own, keep free the numbers that
+  // the restored upper half's fds take (NETSPLIT_RESERVED_FDS; see
+  // reserve_restart_fds()).  The network back end opens its fds only when the
+  // upper half first calls it (backend_load()).
+  reserve_restart_fds();
+  record_lower_half_pid();
+  int rank = -1;
+  if (restore_mode) {
+    rank = launcher_rank();
+    if (rank < 0) {
+      fprintf(stderr, "netsplit: --restore needs the rank from the launcher "
+              "(PMI_RANK, PMIX_RANK or SLURM_PROCID) to find the image\n");
+      exit(1);
+    }
+  }
+
+  // The upper half's interface to this lower half (netsplit-api.h).
+  initialize_lh_info();
+
+  // Setup arguments for the loader program (cmd); with "--restore"
+  // (parse_restore_flag(), above), pass all arguments to mtcp_restart.
+  write_lh_info_addr(restore_mode);
+
+  if (restore_mode) {
+    // RESTART MODE:
+    string image_path;
+    // Iterate over command line arguments to find restart dir
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "--restartdir") == 0) {
+        // Repace the --restartdir flags and its value to the path of the actual checkpoint image file.
+        image_path = get_restore_target_info(argv[i+1], rank);
+        argc--;
+        for (int j = i; j < argc; j++) {
+          argv[j] = argv[j + 1];
+        }
+        argv[i] = const_cast<char*>(image_path.c_str());
+        break;
+      }
+    }
+    if (image_path.empty()) {
+      fprintf(stderr, "netsplit: no checkpoint image for rank %d (give "
+              "--restartdir DIR with DIR/ckpt_rank_%d/ckpt_*.dmtcp)\n",
+              rank, rank);
+      exit(1);
+    }
+    // FIXME: Since we already convert the restart dir to a specific image
+    // file, we can use dmtcpRestart.processCkptImage() to complete the
+    // rest of the restoring process instead of having a second copy of the
+    // restoring code in this file. But the current solution diverges from
+    // the original DMTCP restore code because we need a special mmap
+    // wrapper during the restoring process. In a later patch, we should
+    // update the upper half memory management/tagging system so that we
+    // don't need the specific mmap wrapper, and we can reuse more of the
+    // DMTCP code.
+    DmtcpRestart dmtcpRestart(argc, argv, BINARY_NAME, MTCP_RESTART_BINARY);
+    RestoreTarget *t = new RestoreTarget(image_path.c_str());
+    JASSERT(t->pid() != 0);
+
+    DmtcpCkptHeader ckpt_hdr;
+    validate_checkpoint_header(t, ckpt_hdr);
+    restore_heap_break((void *)ckpt_hdr.savedBrk);
+    off_t ckpt_file_pos = 0;
+    reserve_memory_areas(t, ckpt_file_pos);
+    t->initialize();
+    release_reserved_memory(t, ckpt_file_pos);
+    restore_session_leadership(t);
+    restore_memory_data(t, ckpt_hdr);
+    init_mem_arena_after_restore();
+    create_heap_guard_page();
+    /* Everything restored, close file and finish up */
+    close(t->fd());
+
+    PostRestartFnPtr_t postRestart = (PostRestartFnPtr_t) ckpt_hdr.postRestartAddr;
+    postRestart(0, 0);
+    // The following line should not be reached.
+    assert(0);
+  } else {
+    // LAUNCH MODE:
+    sbrk(HEAP_SLACK_SIZE);
+    create_heap_guard_page();
+    parse_launch_arguments(argc, argv, &cmd_argc, &cmd_argv);
+    // set default loader address
+    if (ld_so_addr == NULL) {
+      ld_so_addr = (void*) 0x80000000;
+    }
+    // User application name not provided
+    if (cmd_argc == 0) {
+      print_usage_and_exit(argv[0]);
+    }
+
+    get_elf_interpreter(cmd_argv[0], &cmd_entry, elf_interpreter);
+
+    char *interp_base_address =
+      load_elf_interpreter(elf_interpreter, ld_so_addr, &ld_so_elf_hdr);
+    ld_so_entry = interp_base_address  + ld_so_elf_hdr.e_entry;
+
+    char *cmd_argv2[MAX_CMD_ARGV2_LENGTH];
+    prepend_elf_interpreter_to_path(cmd_argv, cmd_argc, elf_interpreter, cmd_argv2);
+
+    // Deep copy the stack and get the auxv pointer
+    Elf64_auxv_t *auxv_ptr;
+    void *stack_bottom;
+    char *dest_stack = setup_upper_half_stack(argc, argv, cmd_argc, cmd_argv2, interp_base_address, &auxv_ptr, &stack_bottom);
+
+    // -------------------------------------------------------------------------
+    // FIXME:
+    // **************************************************************************
+    // *******   elf_hdr.e_entry is pointing to lower-half instead of to ld.so
+    // *******   ld_so_entry and interp_base_address + ld_so_elf_hdr.e_entry
+    // *******     should be the same.  Eventually, rationalize this.
+    // **************************************************************************
+    //   AT_PHDR: "The address of the program headers of the executable."
+    // elf_hdr.e_phoff is offset from beginning of file.
+    patchAuxv(auxv_ptr, ld_so_elf_hdr.e_phnum,
+              (unsigned long)(interp_base_address + ld_so_elf_hdr.e_phoff),
+              (unsigned long)interp_base_address + ld_so_elf_hdr.e_entry);
+    // info->phnum, (uintptr_t)info->phdr, (uintptr_t)info->entryPoint);
+
+    // Insert trampolines for mmap and munmap
+    off_t mmap_offset =  get_symbol_offset_with_debug(elf_interpreter, "mmap");
+    off_t munmap_offset = get_symbol_offset_with_debug(elf_interpreter, "munmap");
+    patch_trampoline((void*)(interp_base_address + mmap_offset), (void*)&mmap_wrapper);
+    patch_trampoline((void*)(interp_base_address + munmap_offset), (void*)&munmap_wrapper);
+
+    // Then jump to _start, ld_so_entry, in ld.so (or call it
+    //   as fnc that never returns).
+    //   > ldso_entrypoint = getEntryPoint(ldso);
+    //   > // TODO: Clean up all the registers?
+    //   > asm volatile (CLEAN_FOR_64_BIT(mov %0, %%esp; )
+    //   >               : : "g" (newStack) : "memory");
+    //   > asm volatile ("jmp *%0" : : "g" (ld_so_entry) : "memory");
+#if defined(__i386__) || defined(__x86_64__)
+    asm volatile (CLEAN_FOR_64_BIT(mov %0, %%esp; )
+                  : : "g" (dest_stack) : "memory");
+    asm volatile ("jmp *%0" : : "g" (ld_so_entry) : "memory");
+#elif defined(__arm__)
+# warning "__arm__ not yet implemented."
+#elif defined(__aarch64__)
+    asm volatile ("mov sp, %0" : : "r" (dest_stack) );
+    asm volatile ("mov x8, %0" : : "g" (ld_so_entry) : "memory");
+    asm volatile ("br x8");
+#elif defined(__riscv)
+    asm volatile ("move sp, %0" : : "r" (dest_stack) : );
+    asm volatile ("move t0, %0" : : "g" (ld_so_entry) : "memory");
+    asm volatile ("jalr  zero, t0");
+#else
+# error "current architecture not supported"
+#endif /* if defined: __i386__ || x86_64 || __aarch64__ || __riscv */
+  }
+}
+
+// At restart, DMTCP dup2()s the upper half's fds onto their checkpointed
+// numbers after the restore, which closes any fd of this lower half at those
+// numbers.  A placeholder keeps each of those numbers (NETSPLIT_RESERVED_FDS,
+// set by nccl_restart) free of this lower half's fds; the upper half closes
+// the placeholders left over.
+static void reserve_restart_fds() {
+  const char *list = getenv("NETSPLIT_RESERVED_FDS");
+  if (list == NULL || *list == '\0') {
+    return;
+  }
+  // DMTCP takes an fd already open at one of its protected numbers for its
+  // own (e.g., jassert_init()), so neither a placeholder nor an fd of this
+  // lower half may be there: keep at least `room` numbers below them free.
+  const int room = 64;
+  std::vector<int> fds;
+  const char *p = list;
+  while (*p != '\0') {
+    char *end;
+    long fd = strtol(p, &end, 10);
+    if (end == p) {
+      break;
+    }
+    if (fd > 2 && (fd < PROTECTED_FD_START || fd > PROTECTED_FD_END) &&
+        fcntl((int)fd, F_GETFD) == -1) {
+      fds.push_back((int)fd);
+    }
+    p = (*end == ',') ? end + 1 : end;
+  }
+  if (fds.empty()) {
+    return;
+  }
+  std::sort(fds.begin(), fds.end());
+  fds.erase(std::unique(fds.begin(), fds.end()), fds.end());
+
+  int free_below = 0;
+  for (int fd = 3; fd < PROTECTED_FD_START; fd++) {
+    if (!std::binary_search(fds.begin(), fds.end(), fd) &&
+        fcntl(fd, F_GETFD) == -1) {
+      free_below++;
+    }
+  }
+  if (free_below < room) {
+    fprintf(stderr, "netsplit: WARNING: too many fds were open at checkpoint "
+            "to keep their numbers free at restart; restoring them can close "
+            "fds of the lower half.\n");
+    return;
+  }
+
+  // dup2() needs each number below the soft RLIMIT_NOFILE: raise it if
+  // needed.  After the restore, DMTCP sets the checkpointed soft limit again
+  // (rlimitfloatenv).
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+      rl.rlim_cur <= (rlim_t)fds.back()) {
+    rlim_t need = (rlim_t)fds.back() + 1 + room;
+    rl.rlim_cur = (rl.rlim_max == RLIM_INFINITY || rl.rlim_max >= need)
+                    ? need : rl.rlim_max;
+    setrlimit(RLIMIT_NOFILE, &rl);
+  }
+
+  // A memfd has an inode of its own, so closeReservedFds() closes only its
+  // copies, not, e.g., the application's fds of /dev/null.
+  int placeholder = memfd_create("netsplit-reserved-fd", MFD_CLOEXEC);
+  struct stat st;
+  if (placeholder == -1 || fstat(placeholder, &st) == -1) {
+    return;
+  }
+  lh_info->reserved_fd_dev = st.st_dev;
+  lh_info->reserved_fd_ino = st.st_ino;
+  for (int fd : fds) {
+    if (fd != placeholder) {
+      dup2(placeholder, fd);
+    }
+  }
+}
+
+/**
+ * @brief Disables address space randomization and re-executes the process.
+ *
+ * This function checks if the environment variable "NETSPLIT_FIRST_TIME" is set. If not,
+ *  it disables address space randomization by setting the ADDR_NO_RANDOMIZE
+ *  personality flag and then re-executes the process with the modified environment.
+ *  If the variable is already set, it resets it to "0".
+ *
+ * @param argv  The argument vector to be passed to execvpe() when
+ *              re-executing the process.
+ */
+void set_addr_no_randomize(char *argv[]) {
+  extern char **environ;
+  const char *first_time = "NETSPLIT_FIRST_TIME";
+  char *env = getenv(first_time);
+  if (env == NULL) {
+    setenv(first_time, "1", 1);
+    personality(ADDR_NO_RANDOMIZE);
+    execvpe(argv[0], argv, environ);
+  } else {
+    // Not unsetenv(): it would shift the environment on the stack, which the
+    // upper half's stack copies, auxv included (see deepCopyStack()).
+    env[0] = '0';
+  }
+}
+
+/**
+ * Create a guard page above the heap so that the upper half will use an arena
+ * outside of the heap.
+ */
+void create_heap_guard_page()
+{
+  // Create new heap region to be used by RTLD
+  void *lh_brk = sbrk(0);
+  //const uint64_t heapSize = HEAP_SIZE;
+  char *heap_addr = (char *)mmap(lh_brk, HEAP_GUARD_SIZE, PROT_NONE,
+      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+      -1, 0);
+  if (heap_addr == MAP_FAILED) {
+    DLOG(ERROR, "Failed to mmap region. Error: %s\n",
+        strerror(errno));
+    exit(1);
+  }
+}
+
+/**
+ * @brief Fills in the upper half's interface to this lower half.
+ *
+ * The memory arena serves the upper half's mmap() and munmap(); backend.cpp
+ * provides the network back end, the lower half's logger, the TLS pool and
+ * the CUDA stub's settings (see netsplit-api.h).
+ */
+void initialize_lh_info()
+{
+  lh_info->mmap = (void*)&mmap_wrapper;
+  lh_info->munmap = (void*)&munmap_wrapper;
+  lh_info->mmap_list_fptr = (void*)&get_mmapped_list;
+  netsplit_init_backend_info(lh_info);
+}
+
+/*
+ * @brief Writes the address of lh_info to a persistent location.
+ *
+ * This function ensures that the address of `lh_info` is stored
+ *  in a way that prevents infinite loops during launch and
+ *  accidental address changes upon restart.
+ * Restore Mode:
+ *  write the address to the file netsplit_lh_info_path() names,
+ *  /tmp/netsplit_lh_info_[hostname]_[pid].
+ * Launch Mode:
+ *  write the address to the environment variable NETSPLIT_LH_INFO_ADDR.
+ *
+ * If any file operation fails, the function logs an error and exits.
+ *
+ * @param restore_mode Non-zero value indicate restore mode,
+ *                      else launch mode
+ */
+void write_lh_info_addr(int restore_mode)
+{
+  if (restore_mode) {
+    // The upper half finds the file by this host's name and its real pid.
+    char host[256] = "";
+    gethostname(host, sizeof(host) - 1);
+    char filename[512];
+    netsplit_lh_info_path(filename, sizeof(filename), host, getpid());
+    struct stat statbuf;
+    if (stat(filename, &statbuf) == 0) {
+      unlink(filename);
+      if (stat(filename, &statbuf) == 0) {
+        fprintf(stderr, "netsplit: cannot remove the old file %s\n", filename);
+        exit(1);
+      }
+    }
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+      fprintf(stderr, "netsplit: cannot create %s: %s\n", filename, strerror(errno));
+      exit(1);
+    }
+    ssize_t rc = write(fd, &lh_info, sizeof(lh_info));
+    if (rc < static_cast<ssize_t>(sizeof(lh_info))) {
+      fprintf(stderr, "netsplit: short write to %s: %s\n", filename, strerror(errno));
+      exit(1);
+    }
+    close(fd);
+  } else {
+    char lh_info_addr_str[20];
+    snprintf(lh_info_addr_str, 20, "%p", lh_info);
+    setenv(NETSPLIT_LH_INFO_ENV, lh_info_addr_str, 1);
+  }
+}
+
+// -------------------- restart helpers
+/**
+ * @brief Parses and removes the "--restore" flag from command-line arguments.
+ *
+ * This function checks if the "--restore" flag is present in the command-line
+ *  arguments. If found, it removes the flag from the argument list and sets
+ *  the restore mode to `1`. This is required because DMTCP does not recognize
+ *  the flag, but the restart logic need to handle it.
+ *
+ * @param argc  Pointer to the number of command-line arguments.
+ * @param argv  Array of command-line arguments.
+ * @return      1 if "--restore" flag is found and removed, 0 otherwise.
+ */
+int parse_restore_flag(int *argc, char **argv)
+{
+  int restore_mode = 0;
+  // Iterate over command line arguments
+  for (int i = 1; i < *argc; i++) {
+    if (strcmp(argv[i], "--restore") == 0) {
+      restore_mode = 1;
+      // Remove the --restore flag because dmtcp does not recognize
+      // this flag.
+      (*argc)--;
+      for (int j = i; j < *argc; j++) {
+        argv[j] = argv[j + 1];
+      }
+      break;
+    }
+  }
+  return restore_mode;
+}
+
+/**
+ * @brief Retrieves the restore target based checkpoint image location.
+ *
+ * Get the full path for this process, based on its rank.
+ *
+ * @param restart_dir    Path of the restart directory.
+ * @param rank          Rank of the process, from the launcher.
+ * @return              Path to the checkpoint file.
+ */
+string get_restore_target_info(string restart_dir, int rank)
+{
+  string image_path;
+  string image_dir = restart_dir + "/ckpt_rank_" + jalib::XToString(rank) + "/";
+  vector<string> files = jalib::Filesystem::ListDirEntries(image_dir);
+  for (const string &file : files) {
+    if (Util::strStartsWith(file.c_str(), "ckpt_") &&
+        Util::strEndsWith(file.c_str(), ".dmtcp")) {
+      image_path = image_dir + file;
+    }
+  }
+  return image_path;
+}
+
+/**
+ * @brief Validate the checkpoint file header
+ *
+ * Reads and verifies the checkpoint file header to ensure it matches
+ *  the expected MTCP (Multi-Threaded Checkpointing) signature.
+ *
+ * @param t         Pointer to the RestoreTarget object representing the checkpoint.
+ * @param ckpt_hdr  Reference to the DmtcpCkptHeader struct that stores valid header.
+ */
+void validate_checkpoint_header(RestoreTarget *t, DmtcpCkptHeader &ckpt_hdr)
+{
+  ssize_t rc = read(t->fd(), &ckpt_hdr, sizeof(ckpt_hdr));
+  ASSERT_EQ(rc, static_cast<ssize_t>(sizeof(ckpt_hdr)));
+  ASSERT_EQ(string(ckpt_hdr.ckptSignature), string(DMTCP_CKPT_SIGNATURE));
+}
+
+/**
+ * @brief Sets the lower half's break to the checkpointed process's break.
+ *
+ * The heap guard and DMTCP's end-of-brk area start at that break and are
+ * restored with the upper half; DMTCP's restoreHeap() then madvise()s the
+ * end-of-brk area away.  So the heap must not reach past that break.  Ending
+ * the heap exactly there keeps the break where the upper half's libc and
+ * DMTCP saw it, and keeps the room left at launch (HEAP_SLACK_SIZE) for the
+ * next restart.
+ *
+ * @param saved_brk The break saved in the checkpoint image's header.
+ */
+void restore_heap_break(void *saved_brk)
+{
+  void *cur_brk = sbrk(0);
+  if (cur_brk > saved_brk) {
+    fprintf(stderr, "netsplit: the lower half's heap (break %p) has grown past "
+            "the break of the checkpointed process (%p)\n",
+            cur_brk, saved_brk);
+    exit(1);
+  }
+  if (cur_brk < saved_brk && brk(saved_brk) != 0) {
+    fprintf(stderr, "netsplit: cannot move the lower half's break from %p to %p: "
+            "%s\n", cur_brk, saved_brk, strerror(errno));
+    exit(1);
+  }
+}
+
+/**
+ * @brief Reserve memory regiions for process restoration.
+ *
+ * Iterates over the checkpoint file and reserves memory regions without
+ *  replacement to ensure a consistent memory layout for restoration.
+ *
+ * @param t             Pointer to the RestoreTarget object representing the checkpoint.
+ * @param ckpt_file_pos Reference to the file position within the checkpoint image.
+ */
+void reserve_memory_areas(RestoreTarget *t, off_t &ckpt_file_pos)
+{
+  ProcMapsArea area;
+  ckpt_file_pos = lseek(t->fd(), 0, SEEK_CUR);
+  while(1) {
+    ssize_t rc = read(t->fd(), &area, sizeof area);
+    assert(rc == sizeof area);
+    if (area.addr == NULL) {
+      lseek(t->fd(), ckpt_file_pos, SEEK_SET);
+      break;
+    }
+    if ((area.properties & DMTCP_ZERO_PAGE_CHILD_HEADER) == 0) {
+      void *mmapedat = mmap_fixed_noreplace(area.addr, area.size, PROT_NONE,
+                                            MAP_PRIVATE | MAP_ANONYMOUS,
+                                            0, 0);
+      if (mmapedat == MAP_FAILED) {
+        fprintf(stderr, "restore failed area.addr: %p, area.endAddr%p\n", area.addr, area.endAddr);
+        volatile int dummy = 1;
+        while (dummy);
+      }
+    }
+    if ((area.properties & DMTCP_ZERO_PAGE) == 0 &&
+        (area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) == 0) {
+      off_t seekLen = area.size;
+      if (!(area.flags & MAP_ANONYMOUS) && area.mmapFileSize > 0) {
+        seekLen =  area.mmapFileSize;
+      }
+      lseek(t->fd(), seekLen, SEEK_CUR);
+    }
+  }
+}
+
+/**
+ * @brief Releases reserved memory areas before restoring process memory.
+ *
+ * This function iterates over the reserved memory regions and unmaps
+ *  them before restoring the actual memory data.
+ *
+ * @param t             Pointer to the RestoreTarget object representing the checkpoint.
+ * @param ckpt_file_pos Reference to the file position within the checkpoint image.
+ */
+void release_reserved_memory(RestoreTarget *t, off_t ckpt_file_pos)
+{
+  ProcMapsArea area;
+  while(1) {
+    ssize_t rc = read(t->fd(), &area, sizeof area);
+    assert(rc > 0);
+    if (area.addr == NULL) {
+      lseek(t->fd(), ckpt_file_pos, SEEK_SET);
+      break;
+    }
+    if ((area.properties & DMTCP_ZERO_PAGE_CHILD_HEADER) == 0) {
+      munmap(area.addr, area.size);
+    }
+    if ((area.properties & DMTCP_ZERO_PAGE) == 0 &&
+        (area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) == 0) {
+      off_t seekLen = area.size;
+      if (!(area.flags & MAP_ANONYMOUS) && area.mmapFileSize > 0) {
+        seekLen =  area.mmapFileSize;
+      }
+      lseek(t->fd(), seekLen, SEEK_CUR);
+    }
+  }
+}
+
+/**
+ * @brief Restores session leadership if necessary.
+ *
+ * If the process was a session leader before checkpointing, this function
+ *  ensures that it regains session leadership upon restart.
+ *
+ * @param t             Pointer to the RestoreTarget object representing the checkpoint.
+ */
+void restore_session_leadership(RestoreTarget *t)
+{
+  if (t->sid() == t->pid()) {
+    if (getsid(0) != t->pid()) {
+      JWARNING(setsid() != -1)
+        (getsid(0))(JASSERT_ERRNO)
+        .Text("Failed to resotre this process as session leader.");
+    }
+  }
+}
+
+/**
+ * @brief Restores all memory regions from the checkpoint image.
+ *
+ * Restore all the memory regions from the checkpoint file
+ *  by reading and mapping them back to the memory.
+ *
+ * @param t             Pointer to the RestoreTarget object representing the checkpoint.
+ * @param ckpt_file_pos Reference to the file position within the checkpoint image.
+ */
+void restore_memory_data(RestoreTarget *t, DmtcpCkptHeader &ckpt_hdr)
+{
+  while (1) {
+    int ret = restoreMemoryArea(t->fd(), &ckpt_hdr);
+    if (ret == -1) {
+      break; /* end of ckpt image */
+    }
+  }
+}
+
+/**
+ * @brief Restores a memory area from a checkpoint file descriptor.
+ *
+ * This function is responsible for restoring a memory region that was previous
+ *  saved in a checkpoint file. It handles different types of memory areas,
+ *  including stack, heap, and anonymous regions, and ensures proper flags,
+ *  protections, and mappings are set when restoring the memory region.
+ *
+ * The function uses memory-mapping (mmap) to restore the region and adjusts
+ *  properties like protection flags, whether the region should be private or
+ *  anonymous, and whether it should be marked as zero-paged.
+ *
+ * FIXME: This function is copied from DMTCP's mtcp_restart.c
+ *  For maintenance, we should stop having two copies of the
+ *  same function. A possible plan is using "ld.so" and "mtcp_restart"
+ *  to restore the upper-half instead of using this lower-half program
+ *
+ * @param fd      The file descriptor of the checkpoint file
+ *                containing the memory data.
+ * @param ckptHdr The checkpoint header containing metadata
+ *                about the memory regions.
+ * @return        0 if sucessful, -1 if the restoration fails.
+ */
+static int restoreMemoryArea(int fd, DmtcpCkptHeader *ckptHdr)
+{
+  int imagefd;
+  void *mmappedat;
+
+  /* Read header of memory area into area; mtcp_readfile() will read header */
+  ProcMapsArea area;
+
+  int rc = read(fd, &area, sizeof area);
+  assert(rc == sizeof area);
+  if (area.addr == NULL) {
+    return -1;
+  }
+
+  if (area.name[0] && strstr(area.name, "[heap]")
+      && (VA)sbrk(0) != area.addr + area.size) {
+    // JWARNING(false);
+    // ("WARNING: break (%p) not equal to end of heap (%p)\n", mtcp_sys_brk(NULL), area.addr + area.size);
+  }
+
+  /* MAP_GROWSDOWN flag is required for stack region on restart to make
+   * stack grow automatically when application touches any address within the
+   * guard page region(usually, one page less then stack's start address).
+   *
+   * The end of stack is detected dynamically at checkpoint time. See
+   * prepareDmtcpCkptHeader() in threadlist.cpp and ProcessInfo::growStack()
+   * in processinfo.cpp.
+   */
+  if ((area.name[0] && area.name[0] != '/' && strstr(area.name, "stack"))
+      || (area.endAddr == (VA) ckptHdr->endOfStack)) {
+    area.flags = area.flags | MAP_GROWSDOWN;
+    JTRACE("Detected stack area")((void*)ckptHdr->endOfStack) ((void*)area.endAddr);
+  }
+
+  // We could have replaced MAP_SHARED with MAP_PRIVATE in writeckpt.cpp
+  // instead of here. But we do it this way for debugging purposes. This way,
+  // readdmtcp.sh will still be able to properly list the shared memory areas.
+  if (area.flags & MAP_SHARED) {
+    area.flags = area.flags ^ MAP_SHARED;
+    area.flags = area.flags | MAP_PRIVATE | MAP_ANONYMOUS;
+  }
+
+  /* Now mmap the data of the area into memory. */
+
+  /* CASE MAPPED AS ZERO PAGE: */
+  if ((area.properties & DMTCP_ZERO_PAGE) != 0) {
+    JTRACE("restoring zero-paged anonymous area, %p bytes at %p\n") (area.size) ((void*)area.addr);
+    // A zero-page run of a larger area was mapped by its parent header.  A
+    // zero-page header without one is a whole area: DMTCP saves nscd's
+    // shared databases that way (writeckpt.cpp), as zero pages that make
+    // glibc ask nscd for a new mapping.  Map it, or glibc's handle points
+    // to unmapped memory after a restart and the first nscd lookup (e.g. a
+    // getaddrinfo() in NCCL's teardown at the next checkpoint) faults.
+    if ((area.properties & DMTCP_ZERO_PAGE_CHILD_HEADER) == 0) {
+      mmappedat = restore_mmap(area.addr, area.size, area.prot | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      JASSERT(mmappedat == area.addr) (area.name) ((void*)area.addr) (JASSERT_ERRNO);
+    }
+    // Just restore write-protection if needed.
+    if (!(area.prot & PROT_WRITE)) {
+      JASSERT(mprotect(area.addr, area.size, area.prot) == 0);
+    }
+  }
+
+  /* CASE MAP_ANONYMOUS (usually implies MAP_PRIVATE):
+   * For anonymous areas, the checkpoint file contains the memory contents
+   * directly.  So mmap an anonymous area and read the file into it.
+   * If file exists, turn off MAP_ANONYMOUS: standard private map
+   */
+  else {
+    /* If there is a filename there, though, pretend like we're mapping
+     * to it so a new /proc/self/maps will show a filename there like with
+     * original process.  We only need read-only access because we don't
+     * want to ever write the file.
+     */
+
+    if ((area.properties & DMTCP_ZERO_PAGE_CHILD_HEADER) == 0) {
+      // MMAP only if it's not a child header.
+      imagefd = -1;
+      if (area.name[0] == '/') { /* If not null string, not [stack] or [vdso] */
+        imagefd = open(area.name, O_RDONLY, 0);
+        if (imagefd >= 0) {
+          /* If the current file size is smaller than the original, we map
+           * the region as private anonymous. Note that with this we lose
+           * the name of the region but most applications may not care.
+           */
+          off_t curr_size = lseek(imagefd, 0, SEEK_END);
+          JASSERT(curr_size != -1);
+          if ((static_cast<size_t>(curr_size) < area.size + area.offset) &&
+              (area.prot & PROT_WRITE)) {
+            JTRACE("restoring non-anonymous area %s as anonymous: %p bytes at %p\n")
+                  (area.name) (area.size) ((void*)area.addr);
+            close(imagefd);
+            imagefd = -1;
+            area.offset = 0;
+            area.flags |= MAP_ANONYMOUS;
+          }
+        }
+      }
+
+      if (area.flags & MAP_ANONYMOUS) {
+        JTRACE("restoring anonymous area, %p bytes at %p\n")
+              (area.size) ((void*)area.addr);
+      } else {
+        JTRACE("restoring to non-anonymous area,"
+                " %p bytes at %p from %s + 0x%X\n") (area.size) ((void*)area.addr) (area.name) (area.offset);
+      }
+
+      /* Create the memory area */
+
+      // If the region is marked as private but without a backing file (i.e.,
+      // the file was deleted on ckpt), restore it as MAP_ANONYMOUS.
+      // TODO: handle huge pages by detecting and passing MAP_HUGETLB in flags.
+      if (imagefd == -1 && (area.flags & MAP_PRIVATE)) {
+        area.flags |= MAP_ANONYMOUS;
+      }
+
+      /* POSIX says mmap would unmap old memory.  Munmap never fails if args
+      * are valid.  Can we unmap vdso and vsyscall in Linux?  Used to use
+      * mtcp_safemmap here to check for address conflicts.
+      */
+      // An area that was not writable is writable here only to be filled
+      // in: don't charge it against the commit limit, which a large
+      // PROT_NONE reservation (the upper half's heap) would exceed.
+      int flags = area.flags;
+      if (!(area.prot & PROT_WRITE)) {
+        flags |= MAP_NORESERVE;
+      }
+      mmappedat = restore_mmap(area.addr, area.size, area.prot | PROT_WRITE,
+                               flags, imagefd, area.offset);
+
+      if (mmappedat != area.addr) {
+        fprintf(stderr, "restore failed area.addr: %p, area.endAddr%p\n", area.addr, area.endAddr);
+        volatile int dummy;
+        while (dummy);
+      }
+      JASSERT(mmappedat == area.addr);
+
+      /* Close image file (fd only gets in the way) */
+      if (imagefd >= 0) {
+        close(imagefd);
+      }
+    }
+
+    if ((area.properties & DMTCP_ZERO_PAGE_PARENT_HEADER) == 0) {
+      // Parent header doesn't have any follow on data.
+
+      /* This mmapfile after prev. mmap is okay; use same args again.
+       *  Posix says prev. map will be munmapped.
+       */
+
+      /* ANALYZE THE CONDITION FOR DOING mmapfile MORE CAREFULLY. */
+      if (area.mmapFileSize > 0 && area.name[0] == '/') {
+        JTRACE("restoring memory region %p of %p bytes at %p\n") (area.mmapFileSize) (area.size) ((void*)area.addr);
+        ssize_t rc = 0;
+        int count = 0;
+        do {
+          rc = read(fd, area.addr + count, area.mmapFileSize - count);
+          count += rc;
+        } while (rc > 0 && count < area.mmapFileSize);
+        JASSERT(count == area.mmapFileSize);
+      } else {
+        size_t rc = 0, count = 0;
+        do {
+          rc = read(fd, area.addr + count, area.size - count);
+          count += rc;
+        } while (rc > 0 && count < area.size);
+        if (count != area.size) {
+          volatile int dummy = 1;
+          while (dummy);
+        }
+        JASSERT(count == area.size);
+      }
+
+      if (!(area.prot & PROT_WRITE)) {
+        JASSERT(mprotect(area.addr, area.size, area.prot) == 0);
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * @brief Parses command-line arguments for the user application.
+ * Extracts the command-line arguments meant for the upper half (user application)
+ *  by processing flags such as `-h` and determining where the loader program's
+ *  arguments begin.
+ *
+ * @param argc      Number of command-line arguments.
+ * @param argv      Array of command-line arguments.
+ * @param cmd_argc  Pointer to store the number of arguments for the user application.
+ * @param cmd_argv  Pointer to store the argument array for the user application.
+ */
+void parse_launch_arguments(int argc, char **argv, int *cmd_argc, char ***cmd_argv)
+{
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-h") == 0) {
+     print_usage_and_exit(argv[0]);
+    } else {
+      // Break at the first argument of the loader program (the program name)
+      *cmd_argc = argc - i;
+      *cmd_argv = argv + i;
+      break;
+    }
+  }
+}
+
+/**
+ * @brief Prints usage instructions and exits the program.
+ *
+ * Displays a message explaining the correct usage of the program and
+ * then exits with an error code.
+ *
+ * @param prog_name  Name of the executable.
+ */
+void print_usage_and_exit(char *prog_name)
+{
+  fprintf(stderr, "USAGE:  %s [-a load_address] <command_line>\n", prog_name);
+  fprintf(stderr, "  (load_address is typically a multiple of 0x200000)\n");
+  exit(1);
+}
+
+/**
+ *
+ * @brief Opens the ELF executable to extract ELF interpreter and entry point from an ELF binary.
+ *
+ * This function reads the ELF header and program headers of the given file descriptor
+ *  to retrieve the entry point of the executable and the path to its interpreter (e.g., ld.so).
+ *  It ensures the file is a valid 64-bit ELF binary and locates the PT_INTERP segment.
+ *
+ * @param cmd_path        Path to executable file.
+ * @param cmd_entry       Pointer to store the entry point of the ELF binary.
+ * @param elf_interpreter Buffer to store the path of the ELF interpreter (ld.so)
+ */
+void get_elf_interpreter(const char *cmd_path, Elf64_Addr *cmd_entry,
+                         char elf_interpreter[])
+{
+  unsigned char e_ident[EI_NIDENT];
+  int fd = open(cmd_path, O_RDONLY);
+  if (fd < 0) {
+    perror("Failed to open ELF executable");
+    exit(1);
+  }
+
+  ssize_t rc = read(fd, e_ident, sizeof(e_ident));
+  assert(rc == sizeof(e_ident));
+  assert(strncmp((char *)e_ident, ELFMAG, strlen(ELFMAG)) == 0);
+  // FIXME:  Add support for 32-bit ELF later
+  assert(e_ident[EI_CLASS] == ELFCLASS64);
+
+  // Reset fd to beginning and parse file header
+  lseek(fd, 0, SEEK_SET);
+  Elf64_Ehdr elf_hdr;
+  rc = read(fd, &elf_hdr, sizeof(elf_hdr));
+  assert(rc == sizeof(elf_hdr));
+  *cmd_entry = elf_hdr.e_entry;
+
+  // Find ELF interpreter
+  int phoff = elf_hdr.e_phoff;
+  lseek(fd, phoff, SEEK_SET);
+  Elf64_Phdr phdr;
+  int i;
+  for (i = 0; ; i++) {
+    assert(i < elf_hdr.e_phnum);
+    rc = read(fd, &phdr, sizeof(phdr)); // Read consecutive program headers
+    if (phdr.p_type == PT_INTERP) break;
+  }
+  lseek(fd, phdr.p_offset, SEEK_SET); // Point to beginning of elf interpreter
+  assert(phdr.p_filesz < MAX_ELF_INTERP_SZ);
+  rc = read(fd, elf_interpreter, phdr.p_filesz);
+  assert(rc == static_cast<ssize_t>(phdr.p_filesz));
+  close(fd);
+}
+
+/**
+ * @brief Loads the ELF interpreter into memory.
+ *
+ * This function opens the specified ELF interpreter (e.g., dynamic linker `ld.so`),
+ *  verifies that it is a valid 64-bit ELF binary, and maps its loadable segments
+ *  into memory at the specified address. It also extracts the ELF header
+ *  information for further use.
+ *
+ * @param elf_interpreter   Path to the ELF interpreter binary (e.g., "/lib64/ld-linux-x86-64.so.2").
+ * @param ld_so_addr        Address where the ELF inetrpreter should be loaded.
+ * @param ld_so_elf_hdr_ptr Pointer to an `ELF64_Ehdr` struct to store the ELF header.
+ * @return                  A pointer to the base address where the ELF interpreter is loaded.
+ */
+char *load_elf_interpreter(char elf_interpreter[],
+                           void *ld_so_addr, Elf64_Ehdr *ld_so_elf_hdr_ptr)
+{
+  unsigned char e_ident[EI_NIDENT];
+  int fd;
+  int rc;
+
+  fd = open(elf_interpreter, O_RDONLY);
+  rc = read(fd, e_ident, sizeof(e_ident));
+  assert(rc == sizeof(e_ident));
+  assert(strncmp((char *)e_ident, ELFMAG, sizeof(ELFMAG)-1) == 0);
+  // FIXME:  Add support for 32-bit ELF later
+  assert(e_ident[EI_CLASS] == ELFCLASS64);
+
+  // Reset fd to beginning and parse file header
+  lseek(fd, 0, SEEK_SET);
+  Elf64_Ehdr elf_hdr;
+  rc = read(fd, &elf_hdr, sizeof(elf_hdr));
+  assert(rc == sizeof(elf_hdr));
+
+  // Find ELF interpreter
+  int phoff = elf_hdr.e_phoff;
+  Elf64_Phdr phdr;
+  int i;
+  char *interp_base_address = NULL;
+  lseek(fd, phoff, SEEK_SET);
+  for (i = 0; i < elf_hdr.e_phnum; i++ ) {
+    rc = read(fd, &phdr, sizeof(phdr)); // Read consecutive program headers
+    if (phdr.p_type == PT_LOAD) {
+      // PT_LOAD is the only type of loadable segment for ld.so
+      interp_base_address = map_elf_interpreter_load_segment(fd, phdr,
+                                                             ld_so_addr);
+    }
+  }
+
+  assert(interp_base_address);
+  *ld_so_elf_hdr_ptr = elf_hdr;
+  close(fd);
+  return interp_base_address;
+}
+
+/**
+ * @brief Maps a loadable segment of the ELF interpreter into memory.
+ *
+ * This function maps a `PT_LOAD` segment of the ELF interpreter (e.g., `ld.so`)
+ *  into memory, ensuring proper page alignment and protection flags. It handles
+ *  the mapping of both the `data` and `bss` sections, zeroing out any uninitialized
+ *  memory as required by the ELF format. The first segment determines
+ *  the base address of `ld.so`, while subsequent segments are mapped relative to it.
+ *
+ * @param fd          File descriptor of the ELF interpreter.
+ * @param phdr        ELF program header describing the segment.
+ * @param ld_so_addr  Base address where `ld.so` should be loaded
+ *                    (only relevant for first segment).
+ * @return            Base address of the mapped ELF interpretter.
+ *
+ */
+char * map_elf_interpreter_load_segment(int fd, Elf64_Phdr phdr,
+                                      void *ld_so_addr) {
+  static char *base_address = NULL; // is NULL on call to first LOAD segment
+  static int first_time = 1;
+  int prot = PROT_NONE;
+  if (phdr.p_flags & PF_R)
+    prot |= PROT_READ;
+  if (phdr.p_flags & PF_W)
+    prot |= PROT_WRITE;
+  if (phdr.p_flags & PF_X)
+    prot |= PROT_EXEC;
+  assert(phdr.p_memsz >= phdr.p_filesz);
+  // NOTE:  man mmap says:
+  // For a file that is not a  multiple  of  the  page  size,  the
+  // remaining memory is zeroed when mapped, and writes to that region
+  // are not written out to the file.
+  void *rc2;
+  // Check ELF Format constraint:
+  if (phdr.p_align > 1) {
+    assert(phdr.p_vaddr % phdr.p_align == phdr.p_offset % phdr.p_align);
+  }
+  // Desired memory layout to be created by mmap():
+  //   addr: base_addr + phdr.p_vaddr - PAGE_OFFSET(phdr.p_vaddr)
+  //         [ mmap requires that addr be a multiple of pagesize ]
+  //   len:  phdr.p_memsz + PAGE_OFFSET(phdr.p_vaddr)
+  //        [ Add PAGE_OFFSET(phdr.p_vaddr) to compensate terms in addr/offset ]
+  //   offset: phdr.p_offset - PAGE_OFFSET(phdr.p_offset)
+  //         [ mmap requires that offset be a multiple of pagesize ]
+  // NOTE:
+  //   mapped data segment:  FROM: addr
+  //                         TO: base_addr + phdr.p_vaddr + phdr.p_memsz
+  //   The data segment splits into a data section and a bss section:
+  //     data section: FROM:  addr
+  //                   TO: base_addr + phdr.p_vaddr + phdr.p_filesz
+  //     bss section:  FROM:  base_addr + phdr.p_vaddr + phdr.p_filesz
+  //                   TO: base_addr + phdr.p_vaddr + phdr.p_memsz
+  //   After mapping in bss section, must zero it out.  We will directly
+  //     zero out the bss using memset() after mapping in data+bss.
+  //     This works because we use MAP_PRIVATE (and not MAP_SHARED).
+  //     'man mmap' says:
+  //       "If MAP_PRIVATE is specified, modifications to the mapped data
+  //        by the calling process shall be visible only to the calling
+  //        process and shall not change the underlying object."
+  // NOTE:  base_address is 0 for first load segment of ld.so
+
+  // To satisfy the page-aligned constraints of mmap, an ELF object
+  //   should guarantee that the page offsets of p_vaddr and p_offset are equal.
+  assert(PAGE_OFFSET(phdr.p_vaddr) == PAGE_OFFSET(phdr.p_offset));
+
+  // NOTE:  We want base_addr + phdr.p_vaddr to correspond to
+  //   phdr.p_offset in the backing file.  The above assertions imply that:
+  //   ROUND_DOWN(base_addr + phdr.p_vaddr) should correspond to
+  //      ROUND_DOWN(phdr.p_offset).
+  //   Since base_addr is already a pagesize multiple,
+  //     we have:  ROUND_DOWN(base_addr + phdr.p_vaddr) ==
+  //               base_addr + ROUND_DOWN(phdr.p_vaddr)
+  //   If we choose these as addr and offset in the call to mmap(),
+  //     then we must compensate in len, by adding to len:
+  //       (phdr.p_vaddr - ROUND_DOWN(phdr.p_vaddr)) [PAGE_OFFSET(phdr.p_vaddr)]
+  //   This yields the following parameters for mmap():
+  unsigned long addr = (first_time ?
+                        (unsigned long)ld_so_addr + ROUND_DOWN(phdr.p_vaddr, PAGE_SIZE) :
+                        (unsigned long)base_address + ROUND_DOWN(phdr.p_vaddr, PAGE_SIZE));
+  // addr was rounded down, above.  To compensate, we round up here by a
+  //   fractional page for phdr.p_vaddr.
+  unsigned long len = phdr.p_memsz + PAGE_OFFSET(phdr.p_vaddr);
+  unsigned long offset = ROUND_DOWN(phdr.p_offset, PAGE_SIZE);
+
+  // NOTE:
+  //   As an optimized alternative, we could map the data segment with two
+  //       mmap calls, similarly to what the kernel does.  In that case,
+  //       we would not need a separate call to memset() to zero out the bss,
+  //       and the kernel would label the bss as anonymous (rather
+  //       than label all of data+bss with the ld.so file).
+  //     The first call maps in the data section using a len of phdr.p_filesz
+  //       mmap will map in the remaining fraction of a page and make the
+  //       fractional page act as MAP_ANONYMOUS (zeroed out)
+  //     The second call maps in the remaining part of the bss section,
+  //       using a len of phdr.p_memsz - phdr.p_filesz
+  //       This is done with MAP_ANONYMOUS so that mmap will zero it out.
+
+  // FIXME:  On first load segment, we should map 0x400000 (2*phdr.p_align),
+  //         and then unmap the unused portions later after all the
+  //         LOAD segments are mapped.  This is what ld.so would do.
+  if (first_time && ld_so_addr == NULL) {
+    rc2 = mmap_wrapper((void *)addr, len, prot, MAP_PRIVATE, fd, offset);
+  } else {
+    assert((char *)addr+len >=
+           (char *)base_address + phdr.p_vaddr + phdr.p_memsz);
+    rc2 = mmap_wrapper((void *)addr, len, prot, MAP_PRIVATE|MAP_FIXED, fd, offset);
+  }
+  if (rc2 == MAP_FAILED) {
+    perror("mmap"); exit(1);
+  }
+  // Required by ELF Format:
+  //   memory between rc2+phdr.p_filesz and rc2+phdr.p_memsz must be zeroed out.
+  //   The second LOAD segment of ld.so is a data segment with
+  //   phdr.p_memsiz > phdr.p_filesz, and this difference is the bss section.
+  // Required by 'man mmap':
+  //   For a mapping from addr to addr+len, if this is not a  multiple
+  //   of  the  page  size,  then the fractional remaining portion of
+  //   the memory i ge s zeroed when mapped, and writes to that region
+  //   are not written out to the file.
+  if (phdr.p_memsz > phdr.p_filesz) {
+    assert((char *)addr+len == base_address + phdr.p_vaddr + phdr.p_memsz);
+    // Everything up to phdr.p_filesz is the data section until the bss.
+    // The memory to be zeroed out, below, corresponds to the bss section.
+    memset((char *)base_address + phdr.p_vaddr + phdr.p_filesz, '\0',
+           phdr.p_memsz - phdr.p_filesz);
+
+    // Next, we zero out the memory beyond the bss section that is still
+    // on the same memory page.  This is needed due to a design bug
+    // in glibc ld.so as of glibc-2.27.  The Linux kernel implementation
+    // of the ELF loader uses two mmap calls for loading the data segment,
+    // instead of our own strategy of one mmap call and one memset as above.
+    // The second mmap call by the kernel uses MAP_ANONYMOUS, which has
+    // the side effect of zeroing out all memory on any page containing part
+    // of the bss.  The glibc ld.so code chooses to depend directly on this
+    // accident of kernel implementation that zeroes out additional memory,
+    // even though this goes beyond the specs in the ELF manual.
+    char *endBSS = (char *)base_address + phdr.p_vaddr + phdr.p_memsz;
+    memset(endBSS, '\0', (char *)ROUND_UP(endBSS, PAGE_SIZE) - endBSS);
+  }
+
+  if (first_time) {
+    first_time = 0;
+    base_address = (char*) rc2;
+  }
+  return base_address;
+}
+
+/**
+ * @brief Prepares the argument list by prepending the ELF interpreter.
+ *
+ * This function constructs a new argument list where the ELF interpreter (ld.so)
+ *  is placed before the user application's arguments.
+ *
+ * @param cmd_argv        Original argument list of User-application.
+ * @param cmd_argc        Number of original arguments.
+ * @param elf_interpreter Path to ELF interpreter (ld.so).
+ * @param cmd_argv2       Output array of stored modified argument list.
+ *
+ */
+void prepend_elf_interpreter_to_path(char **cmd_argv, int cmd_argc, char elf_interpreter[], char *cmd_argv2[])
+{
+  int i;
+  assert(cmd_argc + 1 < MAX_CMD_ARGV2_LENGTH);
+  // Prepend the ELF interpreter
+  cmd_argv2[0] = strdup(elf_interpreter);
+  // Copy exsisting arguments
+  for (i = 0; i < cmd_argc; i++) {
+    cmd_argv2[i+1] = cmd_argv[i];
+  }
+  cmd_argv2[i+1] = NULL;
+}
+
+/**
+ * @brief Sets up the stack by deep copying it and defining auxiliary values.
+ *
+ * This function ensures a proper stack setup for user-application in
+ *  the upper half process (refer: split processes architecture), calculate
+ *  stack limits, and applies necessary memory protections.
+ *
+ * @param argc                Number of arguments.
+ * @param argv                Argument list.
+ * @param cmd_argc            Modified argument count.
+ * @param cmd_argv2           Modified argument list with ELF interpreter.
+ * @param interp_base_address Base address of the loaded ELF interpreter.
+ * @param auxv_ptr            Output pointer to store auxiliary vector.
+ * @param stack_bottom        Output pointer to store stack bottom address.
+ * @return                    Pointer to the new stack location.
+ */
+char *setup_upper_half_stack(int argc, char **argv, int cmd_argc, char **cmd_argv2,
+                      char *interp_base_address, Elf64_auxv_t **auxv_ptr, void **stack_bottom)
+{
+  // Get stack's size limit. We need to leave enough space between the loader
+    // and the initial top of the stack. This also helps us to decide which segments
+    // are upper half stack at checkpoint time.
+    struct rlimit rlim;
+    getrlimit(RLIMIT_STACK, &rlim);
+
+    // Check for the edge case where soft limit for rlimit stack is
+    // set to RLIM_INFINITY (which is -1) failing the 16-bit layout check.
+    if(rlim.rlim_cur == RLIM_INFINITY){
+      // FIXME: putting in a placeholder value for now as 16MB
+      // This size is chosen to provide good distance between
+      //  library segments and red zone, as well as red zone and UH-stack.
+      rlim.rlim_cur = 0x1000000;
+    }
+
+    /*
+     * NOTE: In some systems, rlimit_cur for stack can be as small as 8KB.
+     *  Yet mapping a bigger stack(calculated below) for UH goes unnoticed by kernel,
+     *  becasue UH stack is not recognized by kernel as 'stack', thus
+     *    no kernel errors are thrown.
+     *
+     * FIXME:Should add check that interp_base_address + 0x2000000 not already mapped
+     *  Or else, could use newer MAP_FIXED_NOREPLACE in mmap of deepCopyStack.
+     *
+     * LOADER_SIZE_LIMIT is set to 0x2000000 to avoid conflict with
+     *    ld.so address space in UH.
+     * Seen on MPICH-3.3.2 on Discovery (login/ssh node) CentOS-7 and Dekaksi Ubuntu-server.
+     */
+    char *dest_stack = deepCopyStack(argc, argv, (char *)&argc, (char *)&argv[0],
+                                    cmd_argc+1, cmd_argv2,
+                                    interp_base_address + rlim.rlim_cur + LOADER_SIZE_LIMIT,
+                                    auxv_ptr, stack_bottom);
+    lh_info->uh_stack_start = (char*) ROUND_DOWN(interp_base_address + LOADER_SIZE_LIMIT, PAGE_SIZE);
+    lh_info->uh_stack_end = (char*) ROUND_UP(*stack_bottom, PAGE_SIZE);
+
+    /*
+     * Creating a red zone for UH stack for detecting
+     *  collision  with ld.so library segments.
+     * The red zone will be created (rlim.rlim_cur + PAGE_SIZE) size
+     *  above the lh_info->uh_stack_start position, so that recorded
+     *  lh_info->uh_stack_start still falls in the stack region.
+     */
+    if (create_red_zone(lh_info->uh_stack_start - rlim.rlim_cur) == NULL) {
+      perror("red zone");
+      exit(1);
+    }
+
+    init_mem_arena((char*) ROUND_UP(lh_info->uh_stack_end + PAGE_SIZE, PAGE_SIZE));
+
+    return dest_stack;
+}
+
+/**
+ * @brief Creates a red-zone below the user-space stack to detect collisions.
+ *
+ * This function reserves a memory page directly below the given stack address
+ *  and sets its protection to `PROT_NONE`, making it inaccessible. This ensures
+ *  that any stack overflow or unintended memory access will trigger a segmentation
+ *  fault, allowing for reliable detection of stack collisions with `ld.so`.
+ *
+ * @param stack_addr  The base address of the user-space stack.
+ * @return            A popinter to the allocated red-zone,
+ *                    or NULL on failure
+ */
+char *create_red_zone(char *stack_addr)
+{
+  char* red_zone = (char *)mmap_wrapper(
+      stack_addr - PAGE_SIZE,    //one page long red-zone
+      PAGE_SIZE,
+      PROT_NONE,
+      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_GROWSDOWN,
+      -1,
+      0);
+
+  if (red_zone == MAP_FAILED) {
+    perror("red zone");
+    return NULL;
+  }
+  return red_zone;
+}
+
+/**
+ * @brief Updates specific entries in the auxiliary vector.
+ *
+ * This function iterates over the auxiliary vector (`auxv`) and updates the
+ *  values of `AT_PHDR`, `AT_ENTRY`, and `AT_PHNUM` to match the given parameters.
+ *  These entries are crucial for dynamic linking, as they specify the program
+ *  header table location, entry point, and number of program headers, respectively.
+ *
+ * @param av  Pointer to the auxiliary vector.
+ * @param phnum Number of program headers.
+ * @param phdr  Address of the program header table.
+ * @param entry Entry point address of the ELF executable.
+ */
+static void
+patchAuxv(Elf64_auxv_t *av, unsigned long phnum,
+          unsigned long phdr, unsigned long entry)
+{
+  for (; av->a_type != AT_NULL; ++av) {
+    switch (av->a_type) {
+      case AT_PHNUM:
+        av->a_un.a_val = phnum;
+        break;
+      case AT_PHDR:
+        av->a_un.a_val = phdr;
+        break;
+      case AT_ENTRY:
+        av->a_un.a_val = entry;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/**
+ * @brief Retrieves the offset of a symbol in an ELF interpreter,
+ *        checking debug paths if necessary.
+ *
+ * This function first attempts to locate the given symbol within the
+ *  specified ELF interpreter. If the symbol is not found, it checks
+ *  for a debug version of the ELF binary under `/usr/lib/debug`
+ *  (as commonly used in Debian-based systems). If the debug version
+ *  exists, it attempts to locate the symbol in th efile instead.
+ *
+ * @param elf_interpreter Path to the ELF interpreter binary.
+ * @param symbol          Name  of the symbol whose offset is to be retrieved.
+ * @return                The offset of the symbol within the ELF binary. The
+ *                        function asserts if the symbol is found.
+ */
+off_t get_symbol_offset_with_debug(const char *elf_interpreter, const char *symbol)
+{
+  off_t offset = get_symbol_offset(elf_interpreter, symbol);
+  if (!offset) {
+    char buf[256] = "/usr/lib/debug";
+    buf[sizeof(buf)-1] = '\0';
+
+    ssize_t rc = 0;
+    rc = readlink(elf_interpreter, buf + strlen(buf), sizeof(buf) - strlen(buf) - 1);
+    if (rc != -1 && access(buf, F_OK) == 0) {
+      // Debian family (Ubuntu, etc.) use this scheme to store debug symbols.
+      //   http://sourceware.org/gdb/onlinedocs/gdb/Separate-Debug-Files.html
+      fprintf(stderr, "Debug symbols for interpreter in: %s\n", buf);
+    }
+    offset = get_symbol_offset(buf, symbol); // elf interpreter debug path
+  }
+  assert(offset);
+  return offset;
+}
