@@ -194,14 +194,50 @@ probe lumped together.
   for any memory of a restored process, even with a GDRCopy handle opened
   after the restore. This is the error NCCL reported in all three designs
   ("NET/OFI Unable to register memory ... RC: 22").
-- **GDRCopy pins persistently** (job 59585324, nid200484):
-  - gdrdrv 2.5 reports `GDR_ATTR_USE_PERSISTENT_MAPPING` = 1.
-  - The NIC's pins of the same restored memory work. The NIC pins with the
-    traditional P2P API (with a free callback) or dma-buf.
-  - So a gdrdrv loaded with `use_persistent_mapping=0` (a module parameter)
-    would likely pin restored memory too. That needs root to try.
-  - NVIDIA lists RDMA among the CUDA checkpoint's unsupported features, so
-    neither kind of pin after a restore is a documented guarantee.
+- **Why the pin fails: NVIDIA's P2P pin API, not GDRCopy** (jobs 59585324,
+  59606626 and 59606939; sources: gdrcopy v2.5, open-gpu-kernel-modules
+  580.178.04, HPE shs-cxi-driver):
+  - gdrdrv pins with `nvidia_p2p_get_pages_persistent()`
+    (`GDR_ATTR_USE_PERSISTENT_MAPPING` = 1). The `EINVAL` comes from that call:
+    gdrdrv's only other `EINVAL` is a page-size check that cannot fail, since
+    the driver always reports 64 KiB pages.
+  - Given no P2P token, the driver finds the memory through its third-party
+    P2P registry (`RmP2PGetInfoWithoutToken`, `src/nvidia/src/kernel/gpu/bus/p2p.c`):
+    an `NV50_THIRD_PARTY_P2P` object whose creator's PID is the caller's, a VA
+    space registered in it, and a registered video-memory range containing
+    the address (`NV503C_CTRL_CMD_REGISTER_VA_SPACE`, `..._REGISTER_VIDMEM`).
+    CUDA's user-mode driver creates and fills these. A miss is
+    `NV_ERR_OBJECT_NOT_FOUND`, which `nv-p2p.c` maps to `EINVAL`.
+  - The non-persistent API without a token (`nvidia_p2p_get_pages(0, 0, ...)`)
+    does the same lookup. So a gdrdrv loaded with `use_persistent_mapping=0`
+    would most likely fail the same way. The legacy token query
+    (`cuPointerGetAttribute(CU_POINTER_ATTRIBUTE_P2P_TOKENS)`) succeeds after
+    the restore but returns token 0, and the pins still fail (`gdr_pin -t`).
+  - The NIC fails the same way when it uses this API. The CXI driver pins
+    with `nvidia_p2p_get_pages_persistent()` too (`nv_p2p_persistent=Y`).
+    With libfabric's dma-buf use off (`FI_HMEM_CUDA_USE_DMABUF=0`), every
+    registration of the restored process fails with `EINVAL`, old and new
+    buffers alike. The NIC registrations that worked after a restore all
+    went through dma-buf, which is exported from CUDA's own memory handles
+    and never consults the registry.
+  - What crosses the checkpoint does not matter (`tests/gdr_pin.sh`,
+    `gdr_pin -m`). Every pin is released before the checkpoint, and after the
+    restore every pin fails, for buffers allocated before and after the
+    restore (`cudaMalloc` and `cuMemCreate`):
+    - `keep`: the GDRCopy handle stays open across the checkpoint;
+    - `closed`: it is closed before the checkpoint and reopened after;
+    - `fresh`: GDRCopy is first opened after the restore, as in a restarted
+      netsplit lower half.
+  - So after `cuCheckpointProcessRestore`, the process's memory is missing
+    from the third-party P2P registry, even memory allocated after the
+    restore. The kernel module has no checkpoint-specific code; the restore
+    is the closed user-mode driver's, and it evidently does not re-create
+    that registration. NVIDIA lists RDMA among the CUDA checkpoint's
+    unsupported features.
+  - Ways around it: dma-buf, which works after a restore for the NIC; for
+    CPU mappings, GDRCopy's dma-buf mmap backend (no gdrdrv), which needs
+    CUDA driver 13.3 or newer, so not on Perlmutter (see the next item); or a
+    fix in NVIDIA's restore path.
 - **No dma-buf stand-in for GDRCopy.** `mmap()` of a CUDA dma-buf
   (`cuMemGetHandleForAddressRange`) fails with error 524 (ENOTSUPP),
   read-write or read-only:
@@ -500,9 +536,11 @@ call at all.
     copies wait on a driver lock that an application thread holds (see
     "Stress test"); fixing it needs GDRCopy or a copy that bypasses the
     driver;
-  - small point-to-point messages are slower without GDRCopy. Persistent
-    pinning is the likely cause of GDRCopy's failure, so asking NERSC for
-    gdrdrv with `use_persistent_mapping=0` on a test node is the next step;
+  - small point-to-point messages are slower without GDRCopy. GDRCopy
+    fails because a restored process is missing from NVIDIA's third-party
+    P2P registry ("GDR after a checkpoint"), which a gdrdrv module setting
+    cannot fix; GDRCopy's dma-buf backend (CUDA driver 13.3 or newer) or a
+    fix in NVIDIA's restore path could;
   - 2x4 and 4x4 have not been run with GDR yet.
 
   `NETSPLIT_GDR=1` passes the back end's pointer support through, but on its

@@ -51,6 +51,7 @@ case=(
     "fi-hmem-cuda FI_HMEM_CUDA_USE_DMABUF=1"
     "fi-hmem-cuda-nogdrcopy FI_HMEM_CUDA_USE_DMABUF=1 FI_HMEM_CUDA_USE_GDRCOPY=0"
     "fi-hmem-system FI_HMEM=system"
+    "fi-hmem-cuda-nodmabuf-nogdrcopy FI_HMEM_CUDA_USE_DMABUF=0 FI_HMEM_CUDA_USE_GDRCOPY=0"
 )
 for c in "${case[@]}"; do
     # shellcheck disable=SC2086
