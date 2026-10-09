@@ -9,5 +9,6 @@ libcudart.so.13 {
     netsplit_stub_set_thread_device;
     netsplit_stub_add_device_range;
     netsplit_stub_remove_device_range;
+    netsplit_fwd_attach;
   local: *;
 };

@@ -10,8 +10,10 @@
  * The lower half fills a NetsplitInfo and tells the upper half where it is:
  * at launch through NETSPLIT_LH_INFO_ADDR, at restart through the file
  * netsplit_lh_info_path().  Every function pointer here is lower-half code:
- * call it with a lower-half FS (TLS), see the comment of each, and never pass
- * an upper-half function pointer down (it would run on the wrong TLS).
+ * call it with a lower-half FS (TLS), see the comment of each.  The only
+ * upper-half function pointers that go down are those of 'cuda_fn', which the
+ * lower half's CUDA forwarders call after switching to the calling thread's
+ * upper-half FS; never pass any other (it would run on the wrong TLS).
  *
  * The first fields are those of MANA's LowerHalfInfo that the loader and the
  * memory arena use, in the same order.
@@ -28,7 +30,7 @@
 extern "C" {
 #endif
 
-#define NETSPLIT_API_VERSION 1
+#define NETSPLIT_API_VERSION 2
 #define NETSPLIT_LH_INFO_ENV "NETSPLIT_LH_INFO_ADDR"
 
 typedef char *VA;
@@ -37,6 +39,50 @@ typedef struct __MmapInfo {
     char *addr;
     size_t len;
 } MmapInfo_t;
+
+/* A lower-half TLS borrowed by an upper-half thread, and that thread's own
+ * FS (the proxy's table; lhfs 0 marks a free entry). */
+typedef struct NetsplitFsPair {
+    volatile unsigned long lhfs, uhfs;
+} NetsplitFsPair;
+
+/* The upper-half CUDA driver functions that the lower half's forwarders
+ * (stub/cuda_fwd.c) call: libfabric's own driver calls, and those its runtime
+ * calls are built on.  X(index name, exported symbol). */
+#define NETSPLIT_CUDA_FUNCTIONS(X)                                                        \
+    X(CTX_GET_CURRENT, cuCtxGetCurrent)                                                   \
+    X(CTX_SET_CURRENT, cuCtxSetCurrent)                                                   \
+    X(CTX_GET_DEVICE, cuCtxGetDevice)                                                     \
+    X(DEVICE_PRIMARY_CTX_RETAIN, cuDevicePrimaryCtxRetain)                                \
+    X(DEVICE_GET_COUNT, cuDeviceGetCount)                                                 \
+    X(DEVICE_GET, cuDeviceGet)                                                            \
+    X(DEVICE_GET_ATTRIBUTE, cuDeviceGetAttribute)                                         \
+    X(DEVICE_CAN_ACCESS_PEER, cuDeviceCanAccessPeer)                                      \
+    X(GET_ERROR_NAME, cuGetErrorName)                                                     \
+    X(GET_ERROR_STRING, cuGetErrorString)                                                 \
+    X(POINTER_GET_ATTRIBUTE, cuPointerGetAttribute)                                       \
+    X(POINTER_GET_ATTRIBUTES, cuPointerGetAttributes)                                     \
+    X(POINTER_SET_ATTRIBUTE, cuPointerSetAttribute)                                       \
+    X(MEM_GET_ADDRESS_RANGE, cuMemGetAddressRange_v2)                                     \
+    X(MEM_GET_HANDLE_FOR_ADDRESS_RANGE, cuMemGetHandleForAddressRange)                    \
+    X(MEMCPY_ASYNC, cuMemcpyAsync)                                                        \
+    X(MEMCPY_HTOD_ASYNC, cuMemcpyHtoDAsync_v2)                                            \
+    X(MEMCPY_DTOH_ASYNC, cuMemcpyDtoHAsync_v2)                                            \
+    X(MEM_HOST_ALLOC, cuMemHostAlloc)                                                     \
+    X(STREAM_CREATE, cuStreamCreate)                                                      \
+    X(STREAM_SYNCHRONIZE, cuStreamSynchronize)                                            \
+    X(MEM_ALLOC, cuMemAlloc_v2)                                                           \
+    X(MEM_FREE, cuMemFree_v2)                                                             \
+    X(MEM_HOST_REGISTER, cuMemHostRegister_v2)                                            \
+    X(MEM_HOST_UNREGISTER, cuMemHostUnregister)                                           \
+    X(IPC_GET_MEM_HANDLE, cuIpcGetMemHandle)                                              \
+    X(IPC_OPEN_MEM_HANDLE, cuIpcOpenMemHandle_v2)                                         \
+    X(IPC_CLOSE_MEM_HANDLE, cuIpcCloseMemHandle)                                          \
+    X(FLUSH_GPU_DIRECT_RDMA_WRITES, cuFlushGPUDirectRDMAWrites)
+
+#define NETSPLIT_CU_INDEX(idx, sym) NS_CU_##idx,
+enum { NETSPLIT_CUDA_FUNCTIONS(NETSPLIT_CU_INDEX) NS_CU_COUNT };
+#undef NETSPLIT_CU_INDEX
 
 typedef struct NetsplitInfo {
     /* ---- MANA's LowerHalfInfo, minus MPI ---- */
@@ -87,6 +133,25 @@ typedef struct NetsplitInfo {
     void (*stub_set_thread_device)(int dev);
     int (*stub_add_device_range)(void *ptr, size_t size, int dev);
     void (*stub_remove_device_range)(void *ptr);
+
+    /* GPUDirect RDMA (NETSPLIT_GDR=1), set by the upper half before
+     * backend_load().  The back end then gets CUDA through forwarders
+     * (stub/cuda_fwd.c) instead of static answers: each switches to the
+     * calling thread's upper-half FS, found in 'fs_map', and calls the upper
+     * half's driver through 'cuda_fn'.  Only threads that entered through
+     * the proxy are in 'fs_map'; a call from any other thread fails. */
+    int gdr;
+    NetsplitFsPair *fs_map;
+    int fs_map_len;
+    void *cuda_fn[NS_CU_COUNT];
+    /* Made by the proxy before backend_load(), while no NCCL kernel runs, for
+     * the forwarders' copies: a CUcontext, a non-blocking CUstream of it and
+     * a pinned host buffer of 'fwd_bounce_size' bytes.  Making them later, in
+     * the middle of NCCL's traffic, can block in the driver. */
+    void *fwd_ctx;
+    void *fwd_stream;
+    void *fwd_bounce;
+    size_t fwd_bounce_size;
 } NetsplitInfo_t;
 
 /* The file through which a restarted lower half publishes its NetsplitInfo:

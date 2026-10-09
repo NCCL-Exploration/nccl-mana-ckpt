@@ -6,7 +6,8 @@
  * Everything here runs on a lower-half TLS: backend_load(), tls_acquire()
  * and tls_release() on the lower half's main TLS (lh_info->fsaddr), with the
  * upper half's lock held; the logger on whatever borrowed TLS the back end
- * runs on.  None of it calls upper-half code.
+ * runs on.  None of it calls upper-half code; with GPUDirect RDMA, the CUDA
+ * forwarders it loads do (stub/cuda_fwd.h).
  */
 
 #ifndef _GNU_SOURCE
@@ -87,6 +88,7 @@ lh_logger(ncclDebugLogLevel level, unsigned long flags, const char *file,
 // ---------------------------------------------------------------- back end
 
 static void *g_stub = NULL;
+static void *g_fwd[3] = { NULL, NULL, NULL };
 static void *g_backend = NULL;
 static char g_error[1024];
 
@@ -128,20 +130,87 @@ fail(const char *what, const char *detail)
   return -1;
 }
 
+// Calls netsplit_fwd_attach(lh_info) in a stand-in library, if it has it.
+static void
+fwd_attach(void *lib)
+{
+  void (*attach)(NetsplitInfo_t *) =
+    (void (*)(NetsplitInfo_t *))dlsym(lib, "netsplit_fwd_attach");
+  if (attach != NULL) {
+    attach(lh_info);
+  }
+}
+
+// GPUDirect RDMA: loads libfabric's CUDA stand-ins (stub/cuda_fwd.c) from
+// the stub's directory, RTLD_GLOBAL, so that libfabric's dlopen() of
+// libcuda.so.1, libcudart.so and libnvidia-ml.so.1 finds them by SONAME
+// instead of loading a second CUDA driver.
+static int
+load_forwarders(const char *stub)
+{
+  static const char *names[3] = { "libns_cuda_fwd.so", "libns_cudart_fwd.so",
+                                  "libns_nvml_fwd.so" };
+  char dir[PATH_MAX];
+  snprintf(dir, sizeof(dir), "%s", stub);
+  char *slash = strrchr(dir, '/');
+  if (slash == NULL) {
+    return fail("cannot find the CUDA forwarders next to", stub);
+  }
+  *slash = 0;
+  for (int i = 0; i < 3; i++) {
+    if (g_fwd[i] != NULL) {
+      continue;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+    g_fwd[i] = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (g_fwd[i] == NULL) {
+      return fail("cannot load a CUDA forwarder", dlerror());
+    }
+    fwd_attach(g_fwd[i]);
+  }
+  return 0;
+}
+
 // Loads the CUDA stub, then the back end.  The stub goes first and
 // RTLD_GLOBAL: aws-ofi-nccl has DT_NEEDED libcudart.so.13 with versioned
 // symbols, which then resolve to the stub's (same SONAME and version node).
-// libfabric would otherwise dlopen() the real CUDA libraries for its device
-// memory support and start a second CUDA instance in the process; netsplit
-// stages network traffic through host memory, so FI_HMEM=system keeps it to
-// host memory unless the user set FI_HMEM.  Idempotent.
+//
+// Host staging (the default): libfabric would otherwise dlopen() the real
+// CUDA libraries for its device memory support and start a second CUDA
+// instance in the process, so FI_HMEM=system keeps it to host memory unless
+// the user set FI_HMEM.
+//
+// GPUDirect RDMA (lh_info->gdr, set by the proxy): libfabric keeps its CUDA
+// support, through the forwarders, with two settings unless the user set
+// them:
+// - FI_HMEM_CUDA_USE_GDRCOPY=0: GDRCopy cannot pin the memory of a process
+//   that the CUDA checkpoint restored (tests/gdr_pin.c); without it, the
+//   forwarders' cudaMemcpy does libfabric's copies into GPU memory.
+// - FI_CXI_RDZV_EAGER_SIZE=0: no eager data on rendezvous messages, so a
+//   message that arrives before its receive leaves nothing to copy into GPU
+//   memory.  With the CXI default, those copies (each a cudaMemcpy and a
+//   stream sync, not GDRCopy's CPU stores) held bw at ~9 GB/s; without them
+//   netsplit matches native GDR (RESULTS.md, "GDR in netsplit").
+// libfabric's cache of CUDA registrations stays on: NCCL with aws-ofi-nccl
+// hangs without it, natively too (FI_MR_CUDA_CACHE_MONITOR_ENABLED=0).  A
+// registration cached across a checkpoint would look valid while the NIC
+// writes elsewhere (tests/gdr_probe.c), but NCCL frees its network buffers
+// before every checkpoint, the cache's CUDA monitor drops entries of freed
+// buffers, and a restart starts with a new lower half and an empty cache.
+// Idempotent.
 static int
 backend_load(void)
 {
   if (lh_info->net != NULL) {
     return 0;
   }
-  setenv("FI_HMEM", "system", 0);
+  if (lh_info->gdr) {
+    setenv("FI_HMEM_CUDA_USE_GDRCOPY", "0", 0);
+    setenv("FI_CXI_RDZV_EAGER_SIZE", "0", 0);
+  } else {
+    setenv("FI_HMEM", "system", 0);
+  }
 
   if (g_stub == NULL) {
     char stub[PATH_MAX];
@@ -167,6 +236,10 @@ backend_load(void)
     if (lh_info->stub_set_ndev == NULL ||
         lh_info->stub_set_thread_device == NULL) {
       return fail("the CUDA stub lacks netsplit_stub_*", stub);
+    }
+    fwd_attach(g_stub);
+    if (lh_info->gdr && load_forwarders(stub) != 0) {
+      return -1;
     }
   }
 
@@ -313,4 +386,12 @@ netsplit_init_backend_info(LowerHalfInfo_t *info)
   info->stub_set_thread_device = NULL;
   info->stub_add_device_range = NULL;
   info->stub_remove_device_range = NULL;
+  info->gdr = 0;
+  info->fs_map = NULL;
+  info->fs_map_len = 0;
+  memset(info->cuda_fn, 0, sizeof(info->cuda_fn));
+  info->fwd_ctx = NULL;
+  info->fwd_stream = NULL;
+  info->fwd_bounce = NULL;
+  info->fwd_bounce_size = 0;
 }

@@ -6,8 +6,12 @@
  *   cudaGetDeviceCount   the count the upper half reported
  *   cudaGetDevice        the calling NCCL thread's device
  *   cudaPointerGetAttributes  host memory, unless the proxy registered the
- *                        range as device memory (phase 2)
+ *                        range as device memory
  *   cudaDeviceFlushGPUDirectRDMAWrites  no-op while GPUDirect RDMA is off
+ *
+ * With GPUDirect RDMA (NETSPLIT_GDR=1, after netsplit_fwd_attach()), the last
+ * two ask the upper half's driver instead (cuda_fwd.h): NCCL hands the back
+ * end GPU buffers, and the flush must reach the GPU.
  *
  * The proxy sets the values through netsplit_stub_set_*() (lower half, via
  * the call table).  Until then, NETSPLIT_NDEV and NETSPLIT_DEV (or
@@ -16,6 +20,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "cuda_fwd.h"
 
 typedef int cudaError_t; /* cudaSuccess = 0, cudaErrorInvalidValue = 1 */
 
@@ -83,10 +89,36 @@ cudaError_t cudaGetDevice(int *device) {
     return 0;
 }
 
+/* GPUDirect RDMA: the driver's answer; 0 if it has one. */
+static int real_pointer_attributes(struct cudaPointerAttributes *attr, const void *ptr) {
+    CUpointer_attribute query[3] = {CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                    CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+                                    CU_POINTER_ATTRIBUTE_IS_MANAGED};
+    unsigned int memtype = 0, managed = 0;
+    int ordinal = -2;
+    void *data[3] = {&memtype, &ordinal, &managed};
+    unsigned long lh = fwd_enter("cudaPointerGetAttributes");
+    if (lh == 0)
+        return -1;
+    CUresult r = REAL(POINTER_GET_ATTRIBUTES, cuPointerGetAttributes)(3, query, data,
+                                                                      (CUdeviceptr)ptr);
+    fwd_leave(lh);
+    /* Memory unknown to CUDA: success with memory type 0. */
+    if (r != CUDA_SUCCESS || memtype == 0)
+        return -1;
+    attr->type = managed ? 3 : memtype == CU_MEMORYTYPE_DEVICE ? 2 : 1;
+    attr->device = ordinal;
+    attr->devicePointer = attr->type != 1 ? (void *)ptr : NULL;
+    attr->hostPointer = attr->type != 2 ? (void *)ptr : NULL;
+    return 0;
+}
+
 cudaError_t cudaPointerGetAttributes(struct cudaPointerAttributes *attr, const void *ptr) {
     if (attr == NULL)
         return 1;
     memset(attr, 0, sizeof(*attr));
+    if (fwd_on() && real_pointer_attributes(attr, ptr) == 0)
+        return 0;
     for (int i = 0; i < g_nranges; i++) {
         if ((uintptr_t)ptr >= g_ranges[i].lo && (uintptr_t)ptr < g_ranges[i].hi) {
             attr->type = 2;
@@ -101,8 +133,10 @@ cudaError_t cudaPointerGetAttributes(struct cudaPointerAttributes *attr, const v
     return 0;
 }
 
+/* The runtime's target and scope values are the driver's. */
 cudaError_t cudaDeviceFlushGPUDirectRDMAWrites(int target, int scope) {
-    (void)target;
-    (void)scope;
-    return 0;
+    if (!fwd_on())
+        return 0;
+    FORWARD(cudaError_t, FLUSH_GPU_DIRECT_RDMA_WRITES, cuFlushGPUDirectRDMAWrites,
+            (CUflushGPUDirectRDMAWritesTarget)target, (CUflushGPUDirectRDMAWritesScope)scope);
 }
