@@ -7,11 +7,18 @@ Perlmutter, against NCCL without checkpointing.
 **Setup.** Two GPU nodes per job: 4 A100s and 4 Slingshot-11 NICs (CXI) each.
 
 - Software: NCCL 2.29.2-cu13, aws-ofi-nccl 1.6.0 through net API v6,
-  libfabric 2.3.1, CUDA 13.2, driver 595.91.07, nccl-mana-ckpt 6b1c912 plus
-  `netsplit/`.
+  libfabric 2.3.1, CUDA 13.2, nccl-mana-ckpt 6b1c912 plus `netsplit/`.
+- Driver: not recorded for jobs 59571523 to 59576795. Node nid200437 (job
+  59579060) runs 580.178.04 with CUDA 13.2's compatibility `libcuda`. An
+  earlier version of this file gave 595.91.07, which is the version of the
+  `cuda-checkpoint` tool, not of the driver.
 - Programs: `nccl_bench` (no MPI) and NAS IS class B over NCCL.
 - Layouts are NODESxGPUS-PER-NODE with one rank per GPU.
-- Jobs: 59571523 (phase 0), 59574333 and 59576795 (phase 1).
+- Jobs:
+  - 59571523 (phase 0);
+  - 59574333 and 59576795 (phase 1);
+  - 59579060 and 59582340 (GDR probes);
+  - 59583126 and 59584050 (GDR in netsplit, and the host-staged regression).
 - Raw logs: `$SCRATCH/netsplit-runs/<job>-<tag>/`, one `summary.txt` per
   driver run (`tests/run_ns.sh`).
 
@@ -26,21 +33,27 @@ Perlmutter, against NCCL without checkpointing.
 - **The split costs nothing measurable.** Without a checkpoint, netsplit is
   within 4% of NCCL with GPUDirect RDMA (GDR) off at every message size, from
   8 B to 64 MiB.
-- **All of the cost against production NCCL is host staging.** GDR cannot
-  survive a CUDA checkpoint on this system (phase 0b), so traffic is staged
-  through host memory. Against NCCL with GDR:
+- **All of the cost against production NCCL is host staging** (the default
+  mode). Against NCCL with GDR:
   - up to 64 KiB: allreduce is 4–16% slower (up to 6 µs). bw is 1–13%
     faster and alltoall is 2–17% faster, because GDR is slower there;
   - from 1 MiB: 78–83% of bandwidth;
   - for a 64 MiB message: about twice the time for allreduce (2.1x) and
     alltoall (1.9x).
+- **GDR mode (`NETSPLIT_GDR=1`) matches native GDR and checkpoints.**
+  - Through CUDA forwarding in the lower half, bw 2x1 and allreduce, alltoall
+    and IS at 2x2 pass resume and restart with GDRDMA, and so does a restart
+    on another node.
+  - Without a checkpoint it runs at native GDR speed (0.94–1.03), except for
+    point-to-point messages of 2 KiB or less (0.54–0.65; see "GDR in
+    netsplit").
 
 ## Phase 0: can the back end run alone?
 
 | Test | Result |
 |---|---|
 | 0a: aws-ofi-nccl driven through ncclNet v6 by a CUDA-free program, with only the CUDA stub | Passes on 1 and 2 nodes: 200 x 4 MiB at 21.6 GB/s, the same as with the real CUDA runtime. The only CUDA library mapped is the stub. |
-| 0b: register GPU memory with the NIC after `cuCheckpointProcessRestore` | Fails for dma-buf and peer memory (`cxil_map` returns -22). Phase 2 (GDR) is dropped. |
+| 0b: register GPU memory with the NIC after `cuCheckpointProcessRestore` | Fails for dma-buf and peer memory. Phase 2 (GDR) was dropped on this result, but the failing step is GDRCopy's pin, not the NIC's (see "GDR after a checkpoint"). |
 
 ## Checkpoint, resume and restart
 
@@ -147,6 +160,214 @@ In the ratio columns, more than 1 means netsplit is faster.
 - **Small alltoall messages are slower with GDR.** At 8 B, NCCL with GDR
   takes 46 µs, against 39 µs with GDR off, so netsplit is ahead there.
 
+## GDR after a checkpoint
+
+`tests/gdr_probe.c` (driver `tests/gdr_probe.sh`) and `tests/gdr_pin.c` were
+run on job 59579060 (one node, nid200437). They separate what the earlier
+probe lumped together.
+
+- Each probe is a plain CUDA program that `cuda-checkpoint --toggle`
+  checkpoints and restores in place: no NCCL and no DMTCP.
+- After the restore, the probe registers GPU memory with libfabric and checks
+  each successful registration with a loopback transfer into the buffer. It
+  tries:
+  - a buffer allocated before the checkpoint;
+  - new `cudaMalloc` and `cuMemCreate` (RDMA-capable) buffers;
+  - a buffer in a new context;
+  - memory owned by a helper process that is never checkpointed.
+- libfabric's registration cache is off (`FI_MR_CACHE_MAX_COUNT=0`), so every
+  result is a real registration.
+
+| After the restore | libfabric default | `FI_HMEM_CUDA_USE_GDRCOPY=0` |
+|---|---|---|
+| Register any GPU memory (peer memory or dma-buf) | `EINVAL`: `gdr_pin_buffer` fails | ok, and the NIC's writes land correctly |
+| The helper's own memory, in its own domain | ok | ok |
+| GDRCopy pin (`gdr_pin`), handle from before or new | `EINVAL`, for old and new buffers | |
+
+- **The NIC can use GPU memory after a CUDA checkpoint.** What fails is
+  GDRCopy's pin, which libfabric makes for every CUDA registration. It fails
+  for any memory of a restored process, even with a GDRCopy handle opened
+  after the restore. This is the error NCCL reported in all three designs
+  ("NET/OFI Unable to register memory ... RC: 22").
+- **With the registration cache on**, a buffer registered before the
+  checkpoint seems to register again after the restore, but the NIC's writes
+  land elsewhere. That is silent data corruption.
+- **libfabric needs GDRCopy at run time.** Without it, a small message that
+  arrives before its receive is copied into GPU memory with `cudaMemcpy` plus
+  `cudaDeviceSynchronize` (`hmem_cuda.c`). That waits for NCCL's kernel, which
+  waits for the proxy thread doing the copy. NCCL with GDR and
+  `FI_HMEM_CUDA_USE_GDRCOPY=0` hangs even natively (stack captured).
+- **`tests/fi_cudart_shim.c` removes the deadlock natively.** It is a
+  preloaded `libcudart.so` that, for callers inside libfabric only, copies on
+  a private non-blocking stream and waits for that stream.
+  - With it, the 1x2 allreduce over OFI with GDR and no GDRCopy passes
+    natively: 121 µs at 1 MiB, the same as with GDRCopy.
+  - Under DMTCP it hung at first, with or without a checkpoint. The cause is
+    DMTCP's dl plugin (`dmtcp/src/plugin/dl/dlwrappers.cpp`). Its `dlopen`
+    wrapper turns libfabric's `dlopen("libcudart.so")` into full paths built
+    from `LD_LIBRARY_PATH`, which bypasses the lookup by SONAME that finds the
+    preloaded shim. So libfabric got the real runtime, and its
+    `cudaDeviceSynchronize`, back. `dmtcp_launch --disable-dl-plugin` fixes
+    it; netsplit's `nccl_launch` already passes that option.
+- **With `FI_HMEM=system`**, as in netsplit's lower half, libfabric cannot
+  register GPU memory at all, not even a dma-buf.
+
+**GDR across a checkpoint works with the single-process plugin.** Job 59582340
+(nid200276, driver 580 with CUDA 13.2's compatibility `libcuda`) ran
+`tests/report`'s `nccl_allreduce` at 1x2 with the network forced and these
+settings:
+
+- `NCCL_PROFILE=gdr NET_PROFILE=ofi`;
+- `FI_HMEM_CUDA_USE_GDRCOPY=0`;
+- the shim in `LD_PRELOAD`;
+- `dmtcp_launch --disable-dl-plugin` (through a copy of `launch_rank.sh`).
+
+NCCL logs `via NET/AWS Libfabric/N/GDRDMA` before the checkpoint and again
+after the rebuild.
+
+| Mode | Passed | us_at_max (1 MiB), GDR | Same, host staging (no GDR, no shim) |
+|---|---|---|---|
+| checkpoint-resume | 4 of 4 | 279–328 | 616 |
+| checkpoint-restart | 4 of 4 | 280 | 535 |
+
+- us_at_max is the benchmark's average latency at its largest size, in a run
+  that includes the checkpoint. Compare it only within this table.
+- These are restarts on the same node. The single-process plugin still
+  cannot restart a multi-node job over OFI.
+
+For netsplit this means GDR needs libfabric's CUDA support in the lower half.
+That is the runtime calls listed in `fi_cudart_shim.c` plus the driver calls
+in libfabric's CUDA layer, forwarded to the upper half's single CUDA driver,
+with the private-stream copy and GDRCopy off. Those calls run only on NCCL
+threads that entered through the proxy.
+
+## GDR in netsplit
+
+`NETSPLIT_GDR=1` turns it on:
+
+- The lower half loads `stub/cuda_fwd.c`, built as `libcuda.so.1`,
+  `libcudart.so` and `libnvidia-ml.so.1`. Each call runs the upper half's
+  driver on the calling NCCL thread's own TLS, found in the proxy's table.
+- libfabric's runtime calls are rebuilt on the driver API. Its host-memory
+  pinning is refused.
+- Its copies between host and GPU memory go through a pinned bounce buffer, on
+  a private stream. The proxy makes both before the back end starts.
+- The stub forwards aws-ofi-nccl's pointer query and flush.
+- Two libfabric settings change: GDRCopy is off, and rendezvous messages carry
+  no eager data (`FI_CXI_RDZV_EAGER_SIZE=0`).
+
+**Checkpoints.** Job 59584050 (nid200360 and nid200361), with the final
+settings:
+
+| Mode | Program, layout | Passed |
+|---|---|---|
+| resume, restart | bw 2x1 | 4 of 4, 4 of 4 |
+| resume, restart | allreduce 2x2 | 2 of 2, 2 of 2 |
+| resume, restart | alltoall 2x2 | 2 of 2, 2 of 2 |
+| resume, restart | IS 2x2 | 1 of 1, 2 of 2 |
+| restart, other node | allreduce 1x2, network forced | 2 of 2 |
+
+These counts include the runs made after the bounce-buffer fix, before
+`FI_CXI_RDZV_EAGER_SIZE=0` became the default. NCCL logs
+`via NET/AWS Libfabric/N/GDRDMA` before every checkpoint and again after every
+rebuild.
+
+**The bw checkpoint hang, fixed.** The first version hung every bw checkpoint
+(job 59583126).
+
+- **What was stuck.** Stacks with every library's symbols (DMTCP's
+  `load-symbols-library-all`, then addresses resolved through the process's
+  maps) showed three threads:
+  - the checkpoint thread in `cudaStreamSynchronize`, waiting for NCCL's
+    queued work;
+  - the application's main thread in a synchronous `cudaMemcpy` into pageable
+    host memory, waiting for NCCL's kernel;
+  - on one rank, NCCL's proxy thread blocked on a futex in the same part of
+    the driver, inside a forwarded copy of libfabric's pageable buffer.
+- **The cause.** The driver serializes pageable copies through its staging
+  buffers, so the proxy's copy waited behind the main thread's. The main
+  thread waited for the kernel, which waited for the proxy.
+- **The fix.** The forwarders copy through a pinned bounce buffer. Making that
+  buffer lazily, in the middle of NCCL's traffic, blocked the same way (a
+  plain launch hung), so the proxy makes it, with the private stream, before
+  `backend_load()`.
+
+**Tuning: no eager data on rendezvous messages.** A message that arrives
+before its receive is posted leaves its eager part in a host buffer. Without
+GDRCopy, that part is copied into GPU memory with a DMA and a stream sync
+instead of CPU stores. Perlmutter's module sets `FI_CXI_RDZV_THRESHOLD=0`,
+which libfabric raises to 192 bytes, so almost every message is rendezvous
+with an eager part. Netsplit GDR launches with each setting, at 64 MiB (job
+59584050, `tune`):
+
+| Setting | bw 2x1 | alltoall 2x2 | allreduce 2x2 |
+|---|---|---|---|
+| none (before) | 8.4 GB/s | 15.7 ms | 2.71 ms |
+| `FI_CXI_RDZV_EAGER_SIZE=0` | 23.4 GB/s | 7.4 ms | 2.79 ms |
+| `NCCL_P2P_NET_CHUNKSIZE=2097152` | 23.4 GB/s | 7.1 ms | |
+| both | 23.5 GB/s | 7.7 ms | |
+| `NCCL_BUFFSIZE=16777216` | | | 2.68 ms |
+
+- At 1 MiB, bw is 8.5, 16.1, 12.6 and 19.4 GB/s with these settings.
+- At 64 KiB, allreduce takes 77 µs and 57 µs, before and with eager size 0.
+- The lower half now sets `FI_CXI_RDZV_EAGER_SIZE=0` in GDR mode.
+
+**Performance without a checkpoint**, with the final settings, against native
+NCCL with GDR on the same nodes (job 59584050, `perf2`, one run each):
+
+`bw` 2x1 (MB/s)
+
+| Size | NCCL, GDR | netsplit, GDR | netsplit vs NCCL | netsplit, host staging (job 59574333) |
+|---:|---:|---:|---:|---:|
+| 8 B | 0.6 | 0.3 | 0.57 | 0.5 |
+| 1 KiB | 75.0 | 43.2 | 0.58 | 67.1 |
+| 64 KiB | 2611.3 | 2645.8 | 1.01 | 2195.3 |
+| 1 MiB | 15958.4 | 16016.6 | 1.00 | 12044.5 |
+| 4 MiB | 21040.2 | 21133.1 | 1.00 | 16127.4 |
+| 16 MiB | 22800.6 | 22907.2 | 1.00 | 17600.4 |
+| 64 MiB | 23343.1 | 23396.7 | 1.00 | 17777.9 |
+
+
+`allreduce` 2x2 (µs)
+
+| Size | NCCL, GDR | netsplit, GDR | netsplit vs NCCL | netsplit, host staging (job 59574333) |
+|---:|---:|---:|---:|---:|
+| 8 B | 24.7 | 25.3 | 0.98 | 29.3 |
+| 1 KiB | 26.4 | 26.7 | 0.99 | 32.3 |
+| 64 KiB | 55.0 | 56.6 | 0.97 | 69.1 |
+| 1 MiB | 193.5 | 195.6 | 0.99 | 258.8 |
+| 4 MiB | 232.9 | 232.7 | 1.00 | 384.3 |
+| 16 MiB | 720.5 | 739.4 | 0.97 | 1454.0 |
+| 64 MiB | 2707.6 | 2760.6 | 0.98 | 5746.3 |
+
+
+`alltoall` 2x2 (µs)
+
+| Size | NCCL, GDR | netsplit, GDR | netsplit vs NCCL | netsplit, host staging (job 59574333) |
+|---:|---:|---:|---:|---:|
+| 8 B | 45.0 | 70.2 | 0.64 | 39.9 |
+| 1 KiB | 43.3 | 45.1 | 0.96 | 40.1 |
+| 64 KiB | 62.7 | 63.1 | 0.99 | 65.7 |
+| 1 MiB | 173.4 | 179.2 | 0.97 | 269.0 |
+| 4 MiB | 510.4 | 527.4 | 0.97 | 912.8 |
+| 16 MiB | 1800.3 | 1908.7 | 0.94 | 3448.9 |
+| 64 MiB | 6981.9 | 7352.2 | 0.95 | 13694.5 |
+
+- **netsplit with GDR matches native GDR**, except for small point-to-point
+  messages:
+  - bw: 0.99–1.02 from 4 KiB;
+  - allreduce: 0.96–1.03 at every size;
+  - alltoall: 0.94–1.00 from 256-byte blocks.
+- **Small point-to-point messages are slower**: bw 0.54–0.58 up to 2 KiB, and
+  alltoall 0.62–0.65 up to 128-byte blocks. Messages under 192 bytes are
+  always eager, so an early one still costs a DMA and a stream sync where
+  GDRCopy would take CPU stores.
+- **The host-staged column** is from job 59574333, other nodes.
+
+**Also found:** `FI_MR_CUDA_CACHE_MONITOR_ENABLED=0` (no cache of CUDA
+registrations) hangs NCCL with aws-ofi-nccl across nodes, natively too. The
+lower half leaves the cache on.
+
 ## Fixed during phase 1
 
 - **Restart on another node.** NCCL computes some host state once per process
@@ -177,8 +398,8 @@ In the ratio columns, more than 1 means netsplit is faster.
 
 - **`cuCheckpointProcessRestore` sometimes fails** with 304
   (`CUDA_ERROR_OPERATING_SYSTEM`) in DMTCP's CUDA plugin (`cuda-ckpt.cpp:287`).
-  - It happened in 4 of about 40 restarts, always on one rank only: bw 2x1
-    twice, IS 1x2 on another node, and a one-rank restart.
+  - It happened in 5 of about 70 restarts, always on one rank only: bw 2x1
+    three times, IS 1x2 on another node, and a one-rank restart.
   - Not an address collision with the new lower half: with
     `NETSPLIT_SAVE_MAPS=1`, the failing rank's `/proc/self/maps` at
     DMTCP_EVENT_RESTART is identical to a passing run's, apart from DMTCP's
@@ -191,9 +412,13 @@ In the ratio columns, more than 1 means netsplit is faster.
       failure rate;
     - wait longer between the kill and the restart;
     - log the driver's fds at restore.
-- **The first alltoall 2x2 runs failed** before any of today's fixes: 1 resume
-  hung and 1 restart exited with code 99. Neither was reproduced in later
-  runs, and DMTCP's error log was not collected then.
+- **alltoall 2x2 sometimes hangs after the rebuild** with host staging: all
+  ranks finish rebuilding, then make no progress.
+  - It happened in the first run (a resume), before any of today's fixes,
+    and again in the regression run of job 59584050 (a restart). One more
+    restart in the first run exited with code 99, before DMTCP's errors were
+    logged.
+  - That is 3 of about 15 alltoall 2x2 runs; no stacks yet.
 - **The coordinator refused one checkpoint request** ("computation not in
   running state") in the final alltoall 2x2 restart run. The program then ran
   to `validation PASSED`.
@@ -208,6 +433,9 @@ In the ratio columns, more than 1 means netsplit is faster.
   - several communicators, communicator churn and `ncclCommSplit`;
   - PyTorch DDP;
   - repeated performance runs.
-- **GDR before the first checkpoint.** The proxy could pass GDR support
-  through until the first checkpoint (`NETSPLIT_GDR=1` does it for a whole
-  run). That would only help jobs that run long before they first checkpoint.
+- **GDR in netsplit:**
+  - small point-to-point messages are slower without GDRCopy;
+  - 2x4 and 4x4 have not been run with GDR yet.
+
+  `NETSPLIT_GDR=1` passes the back end's pointer support through, but on its
+  own it cannot work: the lower half's libfabric has no CUDA.

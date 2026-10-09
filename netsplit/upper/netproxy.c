@@ -7,8 +7,9 @@
  *   (lh_info->tls_acquire) and keeps it until it exits (a pthread key
  *   destructor returns it).  So no two threads share a lower-half TLS, and
  *   the pool is reused.
- * - No upper-half function pointer goes down: the back end logs through the
- *   lower half's own logger, and its CUDA calls go to the lower half's stub.
+ * - No upper-half function pointer goes down, except the CUDA driver's for
+ *   GPUDirect RDMA (below): the back end logs through the lower half's own
+ *   logger, and its CUDA calls go to the lower half's stub.
  * - Every back-end handle (comms, memory registrations, requests) belongs to
  *   a communicator, and the checkpoint plugin destroys every communicator
  *   before the checkpoint: the proxy counts them (netproxy_live_handles())
@@ -16,10 +17,14 @@
  * - An epoch counts lower halves: a restart starts a new one
  *   (netproxy_restart()), whose back end must be loaded and initialized
  *   again, and whose TLS each thread borrows again.
- * - Phase 1 (host staging): getProperties reports host memory only, so NCCL
- *   never hands a GPU pointer to the network.  GPU memory cannot be
- *   registered with the NIC after a CUDA checkpoint on this system (netsplit
- *   phase 0b).  NETSPLIT_GDR=1 passes the back end's pointer support through.
+ * - Host staging (the default): getProperties reports host memory only, so
+ *   NCCL never hands a GPU pointer to the network, and the back end needs no
+ *   CUDA.
+ * - GPUDirect RDMA (NETSPLIT_GDR=1): the back end's pointer support passes
+ *   through, and libfabric gets CUDA through the lower half's forwarders
+ *   (stub/cuda_fwd.c), which run this half's driver on the calling thread's
+ *   own TLS.  The proxy gives them the driver's functions (lh_info->cuda_fn)
+ *   and its table of borrowed TLS (lh_info->fs_map).
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -47,11 +52,10 @@ static __thread unsigned t_epoch;
 static pthread_key_t g_tls_key;
 static pthread_once_t g_key_once = PTHREAD_ONCE_INIT;
 
-/* lower-half FS -> upper-half FS, for the signal wrappers (no TLS needed). */
+/* lower-half FS -> upper-half FS, for the signal wrappers and the lower
+ * half's CUDA forwarders (no TLS needed). */
 #define MAX_TLS_MAP 1024
-static struct {
-    volatile unsigned long lhfs, uhfs;
-} g_tls_map[MAX_TLS_MAP];
+static NetsplitFsPair g_tls_map[MAX_TLS_MAP];
 
 /* Live back-end handles. */
 static long g_n_listen, g_n_send, g_n_recv, g_n_mr, g_n_req;
@@ -196,6 +200,50 @@ static int upper_device_count(void) {
     return -1;
 }
 
+static int gdr_passthrough(void);
+
+/* GPUDirect RDMA: what the lower half's CUDA forwarders need, before
+ * backend_load().  0 on success. */
+static int gdr_setup(void) {
+    void *h = dlopen("libcuda.so.1", RTLD_NOW | RTLD_NOLOAD);
+    if (h == NULL) {
+        LOG(NCCL_LOG_WARN, "netsplit: NETSPLIT_GDR=1 but no CUDA driver in the upper half");
+        return -1;
+    }
+#define NETSPLIT_CU_LOOKUP(idx, sym)                                                      \
+    lh_info->cuda_fn[NS_CU_##idx] = dlsym(h, #sym);                                       \
+    if (lh_info->cuda_fn[NS_CU_##idx] == NULL)                                            \
+        LOG(NCCL_LOG_WARN, "netsplit: the CUDA driver has no %s", #sym);
+    NETSPLIT_CUDA_FUNCTIONS(NETSPLIT_CU_LOOKUP)
+#undef NETSPLIT_CU_LOOKUP
+    lh_info->fs_map = g_tls_map;
+    lh_info->fs_map_len = MAX_TLS_MAP;
+    /* The forwarders' stream and pinned bounce buffer, for this thread's
+     * context (NCCL's device), now: see netsplit-api.h.  Each restart makes
+     * a new pair; the old one (4 MiB) stays allocated. */
+    int (*ctx_get_current)(void **) = (int (*)(void **))lh_info->cuda_fn[NS_CU_CTX_GET_CURRENT];
+    int (*stream_create)(void **, unsigned) =
+        (int (*)(void **, unsigned))lh_info->cuda_fn[NS_CU_STREAM_CREATE];
+    int (*host_alloc)(void **, size_t, unsigned) =
+        (int (*)(void **, size_t, unsigned))lh_info->cuda_fn[NS_CU_MEM_HOST_ALLOC];
+    void *ctx = NULL, *stream = NULL, *bounce = NULL;
+    const size_t bounce_size = 4UL << 20;
+    if (ctx_get_current != NULL && stream_create != NULL && host_alloc != NULL &&
+        ctx_get_current(&ctx) == 0 && ctx != NULL &&
+        stream_create(&stream, 1 /* CU_STREAM_NON_BLOCKING */) == 0 &&
+        host_alloc(&bounce, bounce_size, 0) == 0) {
+        lh_info->fwd_ctx = ctx;
+        lh_info->fwd_stream = stream;
+        lh_info->fwd_bounce = bounce;
+        lh_info->fwd_bounce_size = bounce_size;
+    } else {
+        LOG(NCCL_LOG_WARN, "netsplit: no CUDA context yet for the forwarders' copies; "
+                           "they will make their own");
+    }
+    lh_info->gdr = 1;
+    return 0;
+}
+
 /* Loads and initializes the back end of the current epoch, once.  g_init_lock
  * serializes this; g_lock only guards the lower half's main TLS, which
  * backend_load() runs on and thread_lhfs() takes for tls_acquire(). */
@@ -212,12 +260,20 @@ static ncclResult_t ensure_backend(void) {
     if (g_loaded_epoch != g_epoch) {
         unsigned long uh = ns_getfs();
         int ndev = upper_device_count();
+        if (gdr_passthrough() && gdr_setup() != 0) {
+            pthread_mutex_unlock(&g_init_lock);
+            return ncclSystemError;
+        }
         pthread_mutex_lock(&g_lock);
+        /* backend_load() runs on the lower half's main TLS: map it to this
+         * thread for the forwarders while it does. */
+        map_set((unsigned long)lh_info->fsaddr, uh);
         ns_setfs((unsigned long)lh_info->fsaddr);
         int rc = lh_info->backend_load();
         if (rc == 0 && ndev >= 0 && lh_info->stub_set_ndev != NULL)
             lh_info->stub_set_ndev(ndev);
         ns_setfs(uh);
+        map_clear((unsigned long)lh_info->fsaddr);
         pthread_mutex_unlock(&g_lock);
         if (rc != 0) {
             pthread_mutex_unlock(&g_init_lock);
