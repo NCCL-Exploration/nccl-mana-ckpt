@@ -286,9 +286,11 @@ nccl-mana-ckpt/
 
 `src/libncclplugin.c` registers DMTCP event hooks:
 
-- `DMTCP_EVENT_PRESUSPEND`: mark checkpoint pending, synchronize tracked CUDA
-  streams when needed, drain in-flight P2P messages, and coordinate sequence
-  progress across ranks before checkpoint.
+- `DMTCP_EVENT_PRESUSPEND`: mark checkpoint pending, coordinate collective
+  sequence progress and point-to-point counters across ranks (a rank that owes
+  a peer a send or receive runs until it posts it, so pending transfers
+  complete with their real data), synchronize tracked CUDA streams, drain
+  whatever is still unmatched, and destroy the communicators.
 - `DMTCP_EVENT_RESUME`: clear checkpoint state after a checkpoint and reset
   wrapper/in-flight tracking for continued execution.
 - `DMTCP_EVENT_RESTART`: reset runtime state after restart while preserving

@@ -24,7 +24,7 @@
 
 #define MAX_STREAMS 64
 #define POLL_US 200
-#define MAX_CHASE_ROUNDS 32
+#define MAX_CHASE_ROUNDS 32 /* consensus rounds in which nobody waited for progress */
 
 static cudaStream_t g_active_streams[MAX_STREAMS];
 static int g_num_streams = 0;
@@ -137,8 +137,15 @@ static void key_uid(char *buf, const vcomm_t *v) {
     KEYF(buf, "C/%s/%u/id", hex, g_epoch);
 }
 
-static void key_round(char *buf, int round) {
-    KEYF(buf, "R/%u/%d/unsettled", g_epoch, round);
+/* One rank's p2p counters on one comm: sent_to[] then recvd_from[]. */
+static void key_p2p_blob(char *buf, const vcomm_t *v, int rank) {
+    char hex[VCOMM_IDENT_HEX];
+    vcomm_ident_hex(v->ident, hex);
+    KEYF(buf, "C/%s/%u/q/%d", hex, g_epoch, rank);
+}
+
+static void key_round(char *buf, int round, const char *what) {
+    KEYF(buf, "R/%u/%d/%s", g_epoch, round, what);
 }
 
 /* ── epoch agreement ──────────────────────────────────────────────── */
@@ -149,61 +156,219 @@ static void key_round(char *buf, int round) {
  * would otherwise show up as an unexplainable non-convergence; this turns it
  * into a printed line.
  *
- * A shortfall is also the normal symptom of a DMTCP peer that does not load this
- * plugin (a launcher process, say). That configuration cannot work anyway -- the
- * barriers below need every peer -- so this reports rather than aborts.
+ * A peer that does not load this plugin (a launcher process, say) never reaches
+ * the barrier, so the checkpoint hangs here; that configuration cannot work
+ * anyway, since every barrier below needs every peer.
+ *
+ * This used to compare the votes with dmtcp_get_coordinator_status()'s peer
+ * count, but that call takes DMTCP's wrapper lock exclusively while the
+ * application is running. It deadlocked twice in tests/multi/p2p_pending.cu:
+ * against a thread blocked in a rank pair's first ncclRecv (which holds the
+ * lock shared until the peer joins, and the gate holds the peer), and, called
+ * after the quiesce, against a CUDA thread that held the dynamic loader's lock
+ * while waiting for the wrapper lock, which the status call's dlsym() needed.
  */
 static void epoch_vote(void) {
     char key[KVDB_KEY_MAX];
     char barrier[64];
-    int num_peers = 0, is_running = 0;
-    int64_t votes;
 
     KEYF(key, "R/%u/votes", g_epoch);
     dmtcp_kvdb_incr(key, 1);
 
     snprintf(barrier, sizeof(barrier), "nccl-mana/%u/epoch-vote", g_epoch);
     dmtcp_global_barrier(barrier);
-
-    dmtcp_get_coordinator_status(&num_peers, &is_running);
-    votes = dmtcp_kvdb_get(key);
-    if (votes != (int64_t)num_peers) {
-        fprintf(stderr,
-                "[NCCL PLUGIN] epoch %u: %ld of %d peers voted. Peers not running this\n"
-                "              plugin cannot participate in its barriers.\n",
-                g_epoch, (long)votes, num_peers);
-        fflush(stderr);
-    }
 }
 
-/* ── collective sequence consensus ────────────────────────────────── */
+/* ── checkpoint cut: collectives and point-to-point ───────────────── */
 
 /*
  * Drive every communicator to a consistent cut.
  *
- * Each round: read peers' published targets, let this rank's application threads
- * catch up to them, then publish our own sequence and report whether we are
- * settled. Repeat until no rank anywhere was unsettled.
+ * Each round: read peers' published positions, let this rank's application
+ * threads catch up to them, then publish our own position and report whether we
+ * are settled. Repeat until no rank anywhere was unsettled.
+ *
+ * A position has two parts:
+ *  - per communicator, its collective sequence number, MAX-accumulated into one
+ *    key;
+ *  - per communicator and rank, one blob with that rank's cumulative p2p byte
+ *    counters (sent_to[], then recvd_from[]). NCCL has no wildcard receive, and
+ *    a pair's sends and receives match in posting order, so the counters say
+ *    exactly which operations still lack their counterpart. A rank whose counter
+ *    is below what its peer has posted owes that peer an operation.
+ * A rank that is behind on either passes the gate (nccl_gate_closed_locked), and
+ * its application keeps running until it has caught up, while every other
+ * rank's threads wait at the gate. So a receive whose send is not posted yet, or
+ * the reverse, completes with its real data before the checkpoint, and the drain
+ * finds nothing to do.
  *
  * Rounds are needed because catching up on one communicator can require issuing
  * collectives on another -- cc_complex does 1 AllReduce on comm_world, 2 on
  * comm_A and 1 on comm_B per iteration, so a rank told to advance comm_A may hit
- * comm_B first and overshoot its target. The overshoot is published in the next
- * round and the cut simply moves forward; targets are monotone, so this is the
- * fixpoint iteration of a monotone function and terminates.
+ * comm_B first and overshoot its target -- and because posting a send can
+ * require receiving from a third rank first. The overshoot is published in the
+ * next round and the cut simply moves forward; targets are monotone, so this is
+ * the fixpoint iteration of a monotone function and terminates.
  *
- * One MAX-accumulated key per communicator replaces the old per-rank key plus
- * enumeration, which also removes the question of whose rank space the enumerated
- * index lived in.
+ * Catching up takes as long as the application computes before its next NCCL
+ * call, so each round waits for this rank's threads for one bounded slice, then
+ * publishes and votes anyway. Waiting until caught up instead would deadlock a
+ * rank whose catch-up blocks on a receive its peer cannot know about: the peer
+ * learns of it only from this rank's next publication.
+ *
+ * Point-to-point catch-up gives up after NCCL_PLUGIN_P2P_WAIT seconds (default
+ * P2P_WAIT_DEFAULT_S) of waiting; the drain then completes what is left, which
+ * hands a pending receive zeros, and says so. Collective catch-up waits as long
+ * as it takes, as before; only rounds in which nobody waited count against
+ * MAX_CHASE_ROUNDS.
  */
+#define SLICE_MIN_MS 10
+#define SLICE_MAX_MS 1000
+#define P2P_WAIT_DEFAULT_S 300
+#define REPORT_EVERY_MS 30000
+
+static int g_p2p_chase;                       /* p2p catch-up active in this checkpoint */
+static int64_t g_p2p_blob[2 * VCOMM_MAX_RANKS];
+static int64_t g_p2p_start[MAX_VCOMMS][2];    /* bytes sent / received when it began */
+
+static int p2p_npeers(const vcomm_t *v) {
+    return v->nranks < VCOMM_MAX_RANKS ? v->nranks : VCOMM_MAX_RANKS;
+}
+
+static int64_t p2p_total(const int64_t *a, int n) {
+    int64_t s = 0;
+    int i;
+    for (i = 0; i < n; i++)
+        s += a[i];
+    return s;
+}
+
+static long p2p_wait_ms(void) {
+    const char *s = getenv("NCCL_PLUGIN_P2P_WAIT");
+    char *end;
+    long v;
+    if (s == NULL || *s == '\0')
+        return P2P_WAIT_DEFAULT_S * 1000L;
+    v = strtol(s, &end, 10);
+    if (*end != '\0' || v < 0) {
+        fprintf(stderr, "[NCCL PLUGIN] NCCL_PLUGIN_P2P_WAIT=%s is not a number of seconds;"
+                        " using %d\n",
+                s, P2P_WAIT_DEFAULT_S);
+        fflush(stderr);
+        return P2P_WAIT_DEFAULT_S * 1000L;
+    }
+    return v * 1000L;
+}
+
+static long ms_since(const struct timeval *t0) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return (t.tv_sec - t0->tv_sec) * 1000L + (t.tv_usec - t0->tv_usec) / 1000L;
+}
+
+/* Publish this rank's p2p counters on one communicator. Caller holds the seq
+ * lock, so they cannot change between this and the settled test. */
+static void publish_p2p_blob(const vcomm_t *v) {
+    char key[KVDB_KEY_MAX];
+    int n = p2p_npeers(v);
+    memcpy(g_p2p_blob, v->sent_to, n * sizeof(int64_t));
+    memcpy(g_p2p_blob + n, v->recvd_from, n * sizeof(int64_t));
+    key_p2p_blob(key, v, v->rank);
+    if (!dmtcp_kvdb_set_blob(key, g_p2p_blob, 2 * n * sizeof(int64_t))) {
+        fprintf(stderr, "[NCCL PLUGIN] cannot publish p2p counters (%s)\n", key);
+        fflush(stderr);
+    }
+}
+
+/* Read each peer's side of every pair into this rank's targets. A peer that has
+ * not published yet keeps its target unknown (-1). Caller holds the seq lock. */
+static void read_p2p_targets(vcomm_t *v) {
+    char key[KVDB_KEY_MAX];
+    int n = p2p_npeers(v), peer;
+    for (peer = 0; peer < n; peer++) {
+        if (peer == v->rank)
+            continue;
+        key_p2p_blob(key, v, peer);
+        if (dmtcp_kvdb_get_blob(key, g_p2p_blob, 2 * n * sizeof(int64_t))) {
+            v->send_target[peer] = g_p2p_blob[n + v->rank]; /* peer's recvd_from[us] */
+            v->recv_target[peer] = g_p2p_blob[v->rank];     /* peer's sent_to[us] */
+        }
+    }
+}
+
+/* 1 if this rank still owes progress: a collective below its target, or (while
+ * the catch-up is on) an unmatched p2p operation of a peer. Caller holds the
+ * seq lock. */
+static int behind_locked(const int *order, int n, int *p2p_owed) {
+    int i, behind = 0;
+    *p2p_owed = 0;
+    for (i = 0; i < n; i++) {
+        vcomm_t *v = &g_vcomms[order[i]];
+        if (v->target >= 0 && v->seq < v->target)
+            behind = 1;
+        if (g_p2p_chase && v->origin == VCOMM_REMOTE && vcomm_p2p_owes(v))
+            behind = *p2p_owed = 1;
+    }
+    return behind;
+}
+
+/* What this rank still owes, for a hung or abandoned catch-up. */
+static void report_owed(const char *why) {
+    int order[MAX_VCOMMS];
+    int n, i, peer;
+    nccl_seq_lock();
+    n = vcomm_order(order);
+    for (i = 0; i < n; i++) {
+        vcomm_t *v = &g_vcomms[order[i]];
+        char hex[VCOMM_IDENT_HEX];
+        if (v->origin != VCOMM_REMOTE)
+            continue;
+        vcomm_ident_hex(v->ident, hex);
+        if (v->target >= 0 && v->seq < v->target)
+            fprintf(stderr, "[NCCL PLUGIN] %s: comm %s rank %d/%d is at collective %ld of %ld\n",
+                    why, hex, v->rank, v->nranks, (long)v->seq, (long)v->target);
+        for (peer = 0; peer < p2p_npeers(v); peer++) {
+            if (peer == v->rank)
+                continue;
+            if (v->send_target[peer] > v->sent_to[peer])
+                fprintf(stderr,
+                        "[NCCL PLUGIN] %s: comm %s rank %d owes peer %d sends of %ld B"
+                        " (its receives are posted)\n",
+                        why, hex, v->rank, peer, (long)(v->send_target[peer] - v->sent_to[peer]));
+            if (v->recv_target[peer] > v->recvd_from[peer])
+                fprintf(stderr,
+                        "[NCCL PLUGIN] %s: comm %s rank %d owes peer %d receives of %ld B"
+                        " (its sends are posted)\n",
+                        why, hex, v->rank, peer,
+                        (long)(v->recv_target[peer] - v->recvd_from[peer]));
+        }
+    }
+    nccl_seq_unlock();
+    fflush(stderr);
+}
+
 static void sequence_consensus(void) {
     char key[KVDB_KEY_MAX];
     char barrier[80];
     int order[MAX_VCOMMS];
-    int round;
+    int round, chase_rounds = 0, announced = 0;
+    long slice_ms = SLICE_MIN_MS, waited_ms = 0, p2p_waited_ms = 0, reported_ms = 0;
+    long p2p_limit_ms = p2p_wait_ms();
+    int n, i;
 
-    for (round = 0; round < MAX_CHASE_ROUNDS; round++) {
-        int n, i, settled;
+    g_p2p_chase = p2p_limit_ms > 0;
+    nccl_seq_lock();
+    for (i = 0; i < MAX_VCOMMS; i++) {
+        vcomm_t *v = &g_vcomms[i];
+        g_p2p_start[i][0] = p2p_total(v->sent_to, VCOMM_MAX_RANKS);
+        g_p2p_start[i][1] = p2p_total(v->recvd_from, VCOMM_MAX_RANKS);
+    }
+    nccl_seq_unlock();
+
+    for (round = 0;; round++) {
+        int settled, behind, p2p_owed;
+        int64_t unsettled, waiting, p2p_waiting;
+        struct timeval t0;
 
         /* 1. Adopt peers' targets. */
         nccl_seq_lock();
@@ -222,30 +387,32 @@ static void sequence_consensus(void) {
              * legitimate sequence of 0 is distinguishable from a missing key. */
             if (published > 0 && published - 1 > v->target)
                 v->target = published - 1;
+            if (g_p2p_chase)
+                read_p2p_targets(v);
         }
+        behind = behind_locked(order, n, &p2p_owed);
         nccl_seq_unlock();
+        if (p2p_owed && !announced) {
+            printf("[NCCL Plugin] rank %d: point-to-point operations of peers are waiting for"
+                   " this rank; letting the application post their counterparts\n",
+                   g_my_rank);
+            fflush(stdout);
+            announced = 1;
+        }
 
-        /* 2. Wait for our own application threads to reach those targets. The
-         *    gate lets them through precisely while some comm is behind. */
-        for (;;) {
-            int behind = 0;
-            nccl_seq_lock();
-            for (i = 0; i < n; i++) {
-                vcomm_t *v = &g_vcomms[order[i]];
-                if (v->target >= 0 && v->seq < v->target) {
-                    behind = 1;
-                    break;
-                }
-            }
-            nccl_seq_unlock();
-            if (!behind)
-                break;
+        /* 2. Let our own application threads catch up -- for one slice at most.
+         *    The gate lets them through precisely while this rank is behind. */
+        gettimeofday(&t0, NULL);
+        while ((behind || nccl_activity() != 0) && ms_since(&t0) < slice_ms) {
             usleep(POLL_US);
+            nccl_seq_lock();
+            behind = behind_locked(order, n, &p2p_owed);
+            nccl_seq_unlock();
         }
 
         /* 3. Publish, and decide "settled" under the same lock -- otherwise a
-         *    thread can slip one more collective through between the decision
-         *    and the barrier, leaving an enqueued collective unmatched. */
+         *    thread can slip one more operation through between the decision
+         *    and the barrier, leaving it unmatched. */
         nccl_seq_lock();
         settled = 1;
         for (i = 0; i < n; i++) {
@@ -256,36 +423,101 @@ static void sequence_consensus(void) {
             dmtcp_kvdb_max(key, v->seq + 1);
             if (v->target < 0 || v->seq != v->target)
                 settled = 0;
+            if (g_p2p_chase) {
+                publish_p2p_blob(v);
+                if (!vcomm_p2p_balanced(v))
+                    settled = 0;
+            }
         }
+        /* A thread inside a call or an open group region can still post. */
+        if (nccl_activity() != 0)
+            settled = 0;
+        behind = behind_locked(order, n, &p2p_owed);
         nccl_seq_unlock();
 
         /* 4. Global vote. Reached unconditionally by every peer, including one
          *    holding no communicators at all, so the barrier always releases. */
-        key_round(key, round);
+        key_round(key, round, "unsettled");
         dmtcp_kvdb_incr(key, settled ? 0 : 1);
+        key_round(key, round, "waiting");
+        dmtcp_kvdb_incr(key, behind ? 1 : 0);
+        key_round(key, round, "p2p");
+        dmtcp_kvdb_incr(key, p2p_owed ? 1 : 0);
         snprintf(barrier, sizeof(barrier), "nccl-mana/%u/round/%d", g_epoch, round);
         dmtcp_global_barrier(barrier);
 
-        if (dmtcp_kvdb_get(key) == 0) {
+        key_round(key, round, "unsettled");
+        unsettled = dmtcp_kvdb_get(key);
+        key_round(key, round, "waiting");
+        waiting = dmtcp_kvdb_get(key);
+        key_round(key, round, "p2p");
+        p2p_waiting = dmtcp_kvdb_get(key);
+
+        if (unsettled == 0) {
+            int64_t sent = 0, recvd = 0;
+            nccl_seq_lock();
+            for (i = 0; i < MAX_VCOMMS; i++) {
+                sent += p2p_total(g_vcomms[i].sent_to, VCOMM_MAX_RANKS) - g_p2p_start[i][0];
+                recvd += p2p_total(g_vcomms[i].recvd_from, VCOMM_MAX_RANKS) - g_p2p_start[i][1];
+            }
+            nccl_seq_unlock();
             printf("[NCCL Plugin] rank %d: sequence consensus converged in %d round(s)\n",
                    g_my_rank, round + 1);
+            if (sent > 0 || recvd > 0)
+                printf("[NCCL Plugin] rank %d: posted %ld B of sends and %ld B of receives"
+                       " while catching up\n",
+                       g_my_rank, (long)sent, (long)recvd);
             fflush(stdout);
             return;
+        }
+
+        /* Every rank reads the same votes, so every decision below agrees. */
+        if (waiting > 0) {
+            waited_ms += slice_ms;
+            if (p2p_waiting > 0)
+                p2p_waited_ms += slice_ms;
+            if (slice_ms < SLICE_MAX_MS)
+                slice_ms = slice_ms * 2 < SLICE_MAX_MS ? slice_ms * 2 : SLICE_MAX_MS;
+        } else if (++chase_rounds >= MAX_CHASE_ROUNDS) {
+            break;
+        }
+
+        if (g_p2p_chase && p2p_waited_ms >= p2p_limit_ms) {
+            /* The application did not post the counterparts in time. Stop
+             * waiting for them; the drain completes what is left. */
+            if (p2p_owed)
+                report_owed("p2p catch-up abandoned");
+            nccl_seq_lock();
+            for (i = 0; i < MAX_VCOMMS; i++)
+                if (g_vcomms[i].origin != VCOMM_FREE)
+                    vcomm_reset_p2p_targets(&g_vcomms[i]);
+            g_p2p_chase = 0;
+            nccl_seq_unlock();
+            if (g_my_rank <= 0) {
+                fprintf(stderr,
+                        "[NCCL PLUGIN] WARNING: point-to-point operations still lacked their"
+                        " counterparts after %ld s (NCCL_PLUGIN_P2P_WAIT); the drain completes"
+                        " them, and a pending receive gets zeros instead of its data\n",
+                        p2p_waited_ms / 1000);
+                fflush(stderr);
+            }
+        } else if (behind && waited_ms - reported_ms >= REPORT_EVERY_MS) {
+            reported_ms = waited_ms;
+            report_owed("checkpoint still waiting");
         }
     }
 
     fprintf(stderr, "[NCCL PLUGIN] sequence consensus did not converge in %d rounds:\n",
             MAX_CHASE_ROUNDS);
-    {
-        int n = vcomm_order(order), i;
-        for (i = 0; i < n; i++) {
-            vcomm_t *v = &g_vcomms[order[i]];
-            char hex[VCOMM_IDENT_HEX];
-            vcomm_ident_hex(v->ident, hex);
-            fprintf(stderr, "              comm %s rank %d/%d seq %ld target %ld\n", hex, v->rank,
-                    v->nranks, (long)v->seq, (long)v->target);
-        }
+    n = vcomm_order(order);
+    for (i = 0; i < n; i++) {
+        vcomm_t *v = &g_vcomms[order[i]];
+        char hex[VCOMM_IDENT_HEX];
+        vcomm_ident_hex(v->ident, hex);
+        fprintf(stderr, "              comm %s rank %d/%d seq %ld target %ld\n", hex, v->rank,
+                v->nranks, (long)v->seq, (long)v->target);
     }
+    report_owed("no convergence");
     fflush(stderr);
     abort();
 }
@@ -420,17 +652,22 @@ static void drain_comm(vcomm_t *v) {
             /* The peer already enqueued a matching recv. It has to be satisfied
              * or the communicator cannot be destroyed.
              *
-             * NOTE: the payload is zero-filled, so the peer's buffer receives
-             * zeros rather than the data its application expected. That is a
-             * pre-existing gap, not something introduced here: satisfying it
-             * correctly needs the sender's real buffer, which by definition was
-             * never handed to NCCL. */
+             * The payload is zero-filled, so the peer's buffer receives zeros
+             * rather than the data its application expected: the real data was
+             * never handed to NCCL. sequence_consensus() normally prevents this
+             * by letting this rank's application post the send first; getting
+             * here means that catch-up gave up (NCCL_PLUGIN_P2P_WAIT). */
             void *dev_buf = NULL;
             size_t bytes = (size_t)owed_out;
 
             printf("[NCCL Drain] comm rank %d: draining send of %zu bytes to %d\n", v->rank, bytes,
                    peer);
+            fprintf(stderr,
+                    "[NCCL PLUGIN] WARNING: comm rank %d: peer %d's pending receive of %zu bytes"
+                    " gets zeros, not the data this rank had yet to send\n",
+                    v->rank, peer, bytes);
             fflush(stdout);
+            fflush(stderr);
 
             CUDA_CHECK(cudaMalloc(&dev_buf, bytes));
             CUDA_CHECK(cudaMemset(dev_buf, 0, bytes));
@@ -533,7 +770,7 @@ static void checkpoint(void) {
      */
     epoch_vote();
 
-    /* Freeze the collective frontier at a consistent cut. */
+    /* Freeze the collective and point-to-point frontier at a consistent cut. */
     sequence_consensus();
 
     /* From here the checkpoint thread is the only submitter. */
@@ -542,7 +779,9 @@ static void checkpoint(void) {
     if (vcomm_live_count() > 0)
         pre_init_cuda();
 
-    /* Snapshot p2p state, then drain against it. */
+    /* Snapshot p2p state, then drain against it. After the consensus every pair
+     * is balanced and the drain finds nothing, unless the p2p catch-up gave up;
+     * a "[NCCL Drain]" line otherwise means the cut was not consistent. */
     publish_p2p_counters();
     snprintf(barrier, sizeof(barrier), "nccl-mana/%u/p2p-published", g_epoch);
     dmtcp_global_barrier(barrier);

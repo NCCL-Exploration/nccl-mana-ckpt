@@ -258,6 +258,11 @@ int nccl_gate_closed_locked(void) {
          * frontier must freeze the instant a checkpoint is requested. */
         if (v->target >= 0 && v->seq < v->target)
             return 0; /* this rank still owes progress somewhere */
+        /* A peer has posted a send or receive that this rank has not matched
+         * yet: let the application run until it posts the counterpart, so the
+         * transfer completes with its real data before the checkpoint. */
+        if (v->origin == VCOMM_REMOTE && vcomm_p2p_owes(v))
+            return 0;
     }
     /* No live comm means no frontier to freeze, and the call this thread is
      * about to make is a creation rendezvous. Holding it deadlocks against a

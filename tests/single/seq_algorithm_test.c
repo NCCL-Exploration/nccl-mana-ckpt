@@ -222,6 +222,66 @@ static int test_reset_reopens(void) {
     return 0;
 }
 
+/*
+ * Point-to-point catch-up: a peer has posted a receive (or a send) this rank has
+ * not matched. The rank owes it the counterpart, so the gate must let its
+ * threads through until the counters reach what the peer posted -- and hold
+ * them once every pair is balanced.
+ */
+static int test_p2p_debt(void) {
+    vcomm_t *v;
+
+    registry_clear();
+    ckpt_pending = 1;
+    v = add_comm(1, 4, 4);
+    CHECK(v != NULL);
+    v->nranks = 3;
+
+    /* Collectives at target, no p2p target known yet: held. */
+    CHECK(gate_closed());
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(!vcomm_p2p_balanced(v)); /* unknown targets are not "balanced" */
+
+    /* Peer 1 posted a 4 KiB receive from us; we have sent nothing: let through. */
+    v->send_target[1] = 4096;
+    v->recv_target[1] = 0;
+    v->send_target[2] = 0;
+    v->recv_target[2] = 0;
+    CHECK(vcomm_p2p_owes(v));
+    CHECK(!gate_closed());
+
+    /* The application posts the send: balanced, held. */
+    v->sent_to[1] = 4096;
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(vcomm_p2p_balanced(v));
+    CHECK(gate_closed());
+
+    /* Peer 2 sent 1 KiB we have not received: let through until we post it. */
+    v->recv_target[2] = 1024;
+    CHECK(!gate_closed());
+    v->recvd_from[2] = 1024;
+    CHECK(gate_closed());
+
+    /* We are ahead of a peer (it owes us): not our debt, so held, but not
+     * balanced either -- the consensus waits for the peer. */
+    v->sent_to[2] = 512;
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(!vcomm_p2p_balanced(v));
+    CHECK(gate_closed());
+
+    /* What a give-up and resume()/restart() do: targets forgotten, gate held. */
+    vcomm_reset_p2p_targets(v);
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(gate_closed());
+    v->send_target[1] = 1 << 20;
+    vcomm_reset_seq();
+    CHECK(v->send_target[1] == -1 && v->recv_target[1] == -1);
+    CHECK(v->sent_to[1] == 4096); /* cumulative counters are kept */
+
+    printf("p2p debt opens the gate until the counterpart is posted: PASS\n");
+    return 0;
+}
+
 static int test_activity_starts_idle(void) {
     /* The quiesce waits on this before the drain posts anything. */
     CHECK(nccl_activity() == 0);
@@ -241,6 +301,8 @@ int main(void) {
     if (test_empty_registry())
         return 1;
     if (test_reset_reopens())
+        return 1;
+    if (test_p2p_debt())
         return 1;
     if (test_activity_starts_idle())
         return 1;
