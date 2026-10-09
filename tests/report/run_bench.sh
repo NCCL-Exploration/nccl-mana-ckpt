@@ -6,7 +6,7 @@
 #
 # bench: is | pytorch | nccl_latency | nccl_bw | nccl_bibw | nccl_allreduce |
 #        nccl_allgather | nccl_bcast | nccl_reduce | nccl_reduce_scatter | nccl_alltoall |
-#        p2p_recv_first | p2p_recv_first_cold | p2p_send_first | p2p_chain | p2p_relay
+#        p2p_recv_first | p2p_recv_first_cold | p2p_send_first | p2p_chain | p2p_relay | p2p_multi
 #        (tests/multi/p2p_pending.cu: a checkpoint while a send or receive lacks its
 #        counterpart; run them with CKPT_DELAY=1, as tests/multi/run_p2p_pending.sh does)
 # Every rank is a plain srun task; no MPI is involved anywhere.
