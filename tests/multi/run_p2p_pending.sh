@@ -12,7 +12,7 @@
 # CASES: "bench:mode:NNxGPN" separated by spaces (default: every scenario at
 # one node with the plugin, and recv-first, chain and relay across nodes with
 # netsplit, each with resume and restart). bench is p2p_recv_first,
-# p2p_recv_first_cold, p2p_send_first, p2p_chain or p2p_relay (the scenarios
+# p2p_recv_first_cold, p2p_send_first, p2p_chain, p2p_relay or p2p_multi (the scenarios
 # of tests/multi/p2p_pending.cu); mode is ckpt_resume, ckpt_restart
 # (single-process plugin) or ns_resume, ns_restart (netsplit).
 #
@@ -21,6 +21,11 @@
 # line appears: the checkpoint waited for the missing operation instead of
 # completing the other side with a dummy message. Results go to
 # $SCRATCH/nccl-ckpt-report/p2p-pending-<job>/ (summary.txt, runs/).
+#
+# NCCL_PLUGIN_P2P_WAIT=5 (shorter than the 20 s window) tests the fallback
+# instead; expect drained > 0 there, so read the logs rather than the verdict:
+# send-first passes (the drained message is replayed), recv-first completes
+# the checkpoint and its receiver gets zeros, with a WARNING.
 #
 # DMTCP_PLUGINS=<libncclplugin.so>:<libdmtcp_cuda.so> runs the plugin modes
 # with another build of the plugin (absolute paths), e.g. the previous one, to
@@ -44,7 +49,8 @@ p2p_relay:ckpt_resume:1x3 p2p_relay:ckpt_restart:1x3
 p2p_recv_first:ns_resume:2x1 p2p_recv_first:ns_restart:2x1
 p2p_recv_first_cold:ns_resume:2x1
 p2p_chain:ns_resume:3x1 p2p_chain:ns_restart:3x1
-p2p_relay:ns_resume:3x1 p2p_relay:ns_restart:3x1}"
+p2p_relay:ns_resume:3x1 p2p_relay:ns_restart:3x1
+p2p_multi:ckpt_resume:1x4 p2p_multi:ns_restart:2x4}"
 
 source "$REPORT/common.sh"
 use_job_nodes

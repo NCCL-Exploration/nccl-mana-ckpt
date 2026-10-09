@@ -14,11 +14,14 @@
  * sleeps for WINDOW_S seconds (default 20) before its own operation. So the
  * checkpoint always finds an operation whose counterpart is not posted yet.
  *
- * NCCL connects a pair of ranks at their first send or receive, and that call
- * blocks until the peer joins. So every scenario except recv-first-cold first
- * exchanges one message with both ring neighbours: afterwards ncclSend and
- * ncclRecv only enqueue work and return, and the pending operation sits on
- * the GPU with no thread inside NCCL.
+ * NCCL connects ranks at their first send or receive, and at a communicator's
+ * first collective, and that call blocks until the peers join. So every
+ * scenario except recv-first-cold first exchanges one message with both ring
+ * neighbours and runs one allreduce: afterwards ncclSend, ncclRecv and
+ * ncclAllReduce only enqueue work and return, and the pending operation sits
+ * on the GPU with no thread inside NCCL. (Without the allreduce, multi hangs
+ * at 2x4 even with no checkpoint: rank 0's first allreduce waits for rank 1,
+ * which waits for rank 0's send.)
  *
  * Scenarios:
  *   recv-first  Rank 1 posts ncclRecv from rank 0; rank 0 sends after the
@@ -40,6 +43,15 @@
  *               is only needed once rank 1 has posted the receive, so the
  *               checkpoint has to learn about that receive while it is
  *               already waiting for rank 1. Needs 3 or more ranks.
+ *   multi       Two communicators: the world and a split of it in which
+ *               ranks 0 and 1 form one group. Rank 1 posts ncclRecv from rank
+ *               0 on the split; the other ranks post an ncclAllReduce on the
+ *               world. Rank 0 sleeps through the window, then joins the
+ *               allreduce and sends on the split, on another stream. So the
+ *               checkpoint must let rank 0 catch up on a collective of one
+ *               communicator and a send of the other, and rank 1, blocked in
+ *               CUDA until that send arrives, catch up on the allreduce after.
+ *               Needs 4 or more ranks.
  *
  * Every received buffer must hold its sender's values (element i of a message
  * from rank s is 1000 * (s + 1) + i). Then an ncclAllReduce checks that the
@@ -173,8 +185,9 @@ static void in_window(void) { printf("[p2p] rank %d in window\n", g_rank); }
 
 /* Connect every rank with both ring neighbours, in both directions, with
  * messages of the size the scenarios use. */
-static void warm_up(ncclComm_t comm, cudaStream_t s, float *buf, float *tmp) {
-    int next = (g_rank + 1) % g_nranks, prev = (g_rank + g_nranks - 1) % g_nranks;
+static void warm_up(ncclComm_t comm, int rank, int nranks, cudaStream_t s, float *buf,
+                    float *tmp) {
+    int next = (rank + 1) % nranks, prev = (rank + nranks - 1) % nranks;
     NCCL_CHECK(ncclGroupStart());
     NCCL_CHECK(ncclSend(buf, NELEMS, ncclFloat, next, comm, s));
     NCCL_CHECK(ncclRecv(tmp, NELEMS, ncclFloat, prev, comm, s));
@@ -186,17 +199,36 @@ static void warm_up(ncclComm_t comm, cudaStream_t s, float *buf, float *tmp) {
     CUDA_CHECK(cudaStreamSynchronize(s));
 }
 
+/* Sum of rank + 1 over the communicator; returns 1 if the result is right. */
+static int allreduce_check(ncclComm_t comm, int rank, int nranks, cudaStream_t s, float *red,
+                           const char *what) {
+    float mine = (float)(rank + 1), sum = 0;
+    float want = (float)nranks * (nranks + 1) / 2;
+    CUDA_CHECK(cudaMemcpy(red, &mine, sizeof(float), cudaMemcpyHostToDevice));
+    NCCL_CHECK(ncclAllReduce(red, red, 1, ncclFloat, ncclSum, comm, s));
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(&sum, red, sizeof(float), cudaMemcpyDeviceToHost));
+    if (sum != want) {
+        printf("[p2p] rank %d: FAIL %s gave %g, want %g\n", g_rank, what, sum, want);
+        return 0;
+    }
+    return 1;
+}
+
 int main(int argc, char **argv) {
     const char *scenario, *id_path;
     int window, ok = 1, ndev = 0;
     ncclUniqueId id;
-    ncclComm_t comm;
-    cudaStream_t s;
-    float *buf, *red;
+    ncclComm_t comm, sub = NULL;
+    int sub_rank = 0, sub_n = 1;
+    cudaStream_t s, s2 = NULL;
+    float *buf, *red, *red2 = NULL;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc < 3) {
-        fprintf(stderr, "usage: %s recv-first|recv-first-cold|send-first|chain|relay ID_FILE [WINDOW_S]\n",
+        fprintf(stderr,
+                "usage: %s recv-first|recv-first-cold|send-first|chain|relay|multi ID_FILE"
+                " [WINDOW_S]\n",
                 argv[0]);
         return 2;
     }
@@ -206,10 +238,14 @@ int main(int argc, char **argv) {
 
     g_rank = env_int("RANK", "SLURM_PROCID", 0);
     g_nranks = env_int("WORLD_SIZE", "SLURM_NTASKS", 1);
-    if (g_nranks < 2 || ((!strcmp(scenario, "chain") || !strcmp(scenario, "relay")) && g_nranks < 3)) {
-        fprintf(stderr, "[p2p] %s needs %d or more ranks\n", scenario,
-                strcmp(scenario, "chain") && strcmp(scenario, "relay") ? 2 : 3);
-        return 2;
+    {
+        int need = !strcmp(scenario, "multi")                                     ? 4
+                   : (!strcmp(scenario, "chain") || !strcmp(scenario, "relay")) ? 3
+                                                                                : 2;
+        if (g_nranks < need) {
+            fprintf(stderr, "[p2p] %s needs %d or more ranks\n", scenario, need);
+            return 2;
+        }
     }
     CUDA_CHECK(cudaGetDeviceCount(&ndev));
     CUDA_CHECK(cudaSetDevice(env_int("LOCAL_RANK", "SLURM_LOCALID", 0) % ndev));
@@ -226,7 +262,19 @@ int main(int argc, char **argv) {
     if (strcmp(scenario, "recv-first-cold") != 0) {
         float *tmp;
         CUDA_CHECK(cudaMalloc((void **)&tmp, NELEMS * sizeof(float)));
-        warm_up(comm, s, buf, tmp);
+        warm_up(comm, g_rank, g_nranks, s, buf, tmp);
+        if (!allreduce_check(comm, g_rank, g_nranks, s, red, "warm-up allreduce"))
+            return 1;
+        if (!strcmp(scenario, "multi")) {
+            NCCL_CHECK(ncclCommSplit(comm, g_rank < 2 ? 0 : 1, g_rank, &sub, NULL));
+            NCCL_CHECK(ncclCommUserRank(sub, &sub_rank));
+            NCCL_CHECK(ncclCommCount(sub, &sub_n));
+            CUDA_CHECK(cudaStreamCreate(&s2));
+            CUDA_CHECK(cudaMalloc((void **)&red2, sizeof(float)));
+            warm_up(sub, sub_rank, sub_n, s2, buf, tmp);
+            if (!allreduce_check(sub, sub_rank, sub_n, s2, red, "warm-up split allreduce"))
+                return 1;
+        }
         CUDA_CHECK(cudaFree(tmp));
     }
 
@@ -320,6 +368,30 @@ int main(int argc, char **argv) {
                 CUDA_CHECK(cudaStreamSynchronize(s));
             }
         }
+    } else if (!strcmp(scenario, "multi")) {
+        /* Sub-communicator ranks: rank 0 and rank 1 are 0 and 1 in theirs. */
+        if (g_rank == 0) {
+            fill(buf, 0);
+            in_window();
+            sleep(window);
+            /* Separate streams: the send must not queue behind the allreduce,
+             * which cannot finish before rank 1 has received. */
+            NCCL_CHECK(ncclAllReduce(red2, red2, 1, ncclFloat, ncclSum, comm, s));
+            NCCL_CHECK(ncclSend(buf, NELEMS, ncclFloat, 1, sub, s2));
+            CUDA_CHECK(cudaStreamSynchronize(s2));
+            CUDA_CHECK(cudaStreamSynchronize(s));
+        } else if (g_rank == 1) {
+            NCCL_CHECK(ncclRecv(buf, NELEMS, ncclFloat, 0, sub, s2));
+            in_window();
+            CUDA_CHECK(cudaStreamSynchronize(s2));
+            ok = check(buf, 0, "multi recv");
+            NCCL_CHECK(ncclAllReduce(red2, red2, 1, ncclFloat, ncclSum, comm, s));
+            CUDA_CHECK(cudaStreamSynchronize(s));
+        } else {
+            in_window();
+            NCCL_CHECK(ncclAllReduce(red2, red2, 1, ncclFloat, ncclSum, comm, s));
+            CUDA_CHECK(cudaStreamSynchronize(s));
+        }
     } else {
         fprintf(stderr, "[p2p] unknown scenario %s\n", scenario);
         return 2;
@@ -330,22 +402,20 @@ int main(int argc, char **argv) {
      * the scenario: a sender whose message NCCL buffered eagerly runs ahead, and
      * it must not exit while the checkpoint is still waiting for its peer (the
      * gate holds it at its next NCCL call, but not at ncclCommDestroy). */
-    for (int pass = 0; pass < 2; pass++) {
-        float mine = (float)(g_rank + 1), sum = 0;
-        float want = (float)g_nranks * (g_nranks + 1) / 2;
-        CUDA_CHECK(cudaMemcpy(red, &mine, sizeof(float), cudaMemcpyHostToDevice));
-        NCCL_CHECK(ncclAllReduce(red, red, 1, ncclFloat, ncclSum, comm, s));
-        CUDA_CHECK(cudaStreamSynchronize(s));
-        CUDA_CHECK(cudaMemcpy(&sum, red, sizeof(float), cudaMemcpyDeviceToHost));
-        if (sum != want) {
-            printf("[p2p] rank %d: FAIL allreduce gave %g, want %g\n", g_rank, sum, want);
+    if (sub != NULL && !allreduce_check(sub, sub_rank, sub_n, s2, red, "split allreduce"))
+        ok = 0;
+    for (int pass = 0; pass < 2; pass++)
+        if (!allreduce_check(comm, g_rank, g_nranks, s, red, "allreduce"))
             ok = 0;
-        }
-    }
 
     CUDA_CHECK(cudaFree(buf));
     CUDA_CHECK(cudaFree(red));
     CUDA_CHECK(cudaStreamDestroy(s));
+    if (sub != NULL) {
+        CUDA_CHECK(cudaFree(red2));
+        CUDA_CHECK(cudaStreamDestroy(s2));
+        NCCL_CHECK(ncclCommDestroy(sub));
+    }
     NCCL_CHECK(ncclCommDestroy(comm));
     free(g_host);
     if (!ok)
