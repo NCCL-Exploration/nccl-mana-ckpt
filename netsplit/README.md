@@ -109,7 +109,11 @@ Two data paths:
   another node passes, and so does a second checkpoint and restart. Without a
   checkpoint, netsplit is within 4% of NCCL with GDR off. All of the cost
   against production NCCL (GDR on) comes from host staging.
-- GPUDirect RDMA (`NETSPLIT_GDR=1`):
+- Stress test (2 nodes, same-node restarts): host staging passed 16 of 16
+  cases (`nccl_bench` collectives, bw, NAS IS and PyTorch DDP), with 64
+  checkpoints and 24 restarts.
+- GPUDirect RDMA (`NETSPLIT_GDR=1`) is experimental. PyTorch DDP deadlocks in
+  it (RESULTS.md, "Stress test"). Otherwise:
   - bw 2x1 and allreduce, alltoall and IS at 2x2 pass resume and restart
     with GDRDMA, and so does a restart on another node;
   - without a checkpoint it runs at native GDR speed, except for

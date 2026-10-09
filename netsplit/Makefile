@@ -99,7 +99,8 @@ $(BIN)/gdr_probe: tests/gdr_probe.c | $(BIN)
 	  -L$(FABRIC_HOME)/lib64 -lfabric -Wl,-rpath,$(FABRIC_HOME)/lib64
 
 $(BIN)/gdr_pin: tests/gdr_pin.c | $(BIN)
-	gcc -O2 -g $(WARN) -I$(CUDA_HOME)/include -o $@ $< -L$(CUDA_HOME)/lib64 -lcudart -lgdrapi
+	gcc -O2 -g $(WARN) -I$(CUDA_HOME)/include -o $@ $< \
+	  -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs -lcudart -lcuda -lgdrapi
 
 $(LIB)/fi-shim/libcudart.so: tests/fi_cudart_shim.c
 	mkdir -p $(dir $@)

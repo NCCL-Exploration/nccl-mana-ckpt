@@ -17,7 +17,7 @@ Perlmutter, against NCCL without checkpointing.
 - Jobs:
   - 59571523 (phase 0);
   - 59574333 and 59576795 (phase 1);
-  - 59579060 and 59582340 (GDR probes);
+  - 59579060, 59582340 and 59585324 (GDR probes);
   - 59583126 and 59584050 (GDR in netsplit, and the host-staged regression).
 - Raw logs: `$SCRATCH/netsplit-runs/<job>-<tag>/`, one `summary.txt` per
   driver run (`tests/run_ns.sh`).
@@ -40,7 +40,12 @@ Perlmutter, against NCCL without checkpointing.
   - from 1 MiB: 78–83% of bandwidth;
   - for a 64 MiB message: about twice the time for allreduce (2.1x) and
     alltoall (1.9x).
-- **GDR mode (`NETSPLIT_GDR=1`) matches native GDR and checkpoints.**
+- **The stress test passed with host staging:** 16 of 16 cases, 64
+  checkpoints and 24 restarts. That includes PyTorch DDP at 2x4 (see "Stress
+  test").
+- **GDR mode (`NETSPLIT_GDR=1`) matches native GDR and checkpoints, but not
+  with PyTorch.** PyTorch DDP deadlocks between NCCL's proxy thread and the
+  application thread inside the CUDA driver, with or without a checkpoint.
   - Through CUDA forwarding in the lower half, bw 2x1 and allreduce, alltoall
     and IS at 2x2 pass resume and restart with GDRDMA, and so does a restart
     on another node.
@@ -189,6 +194,21 @@ probe lumped together.
   for any memory of a restored process, even with a GDRCopy handle opened
   after the restore. This is the error NCCL reported in all three designs
   ("NET/OFI Unable to register memory ... RC: 22").
+- **GDRCopy pins persistently** (job 59585324, nid200484):
+  - gdrdrv 2.5 reports `GDR_ATTR_USE_PERSISTENT_MAPPING` = 1.
+  - The NIC's pins of the same restored memory work. The NIC pins with the
+    traditional P2P API (with a free callback) or dma-buf.
+  - So a gdrdrv loaded with `use_persistent_mapping=0` (a module parameter)
+    would likely pin restored memory too. That needs root to try.
+  - NVIDIA lists RDMA among the CUDA checkpoint's unsupported features, so
+    neither kind of pin after a restore is a documented guarantee.
+- **No dma-buf stand-in for GDRCopy.** `mmap()` of a CUDA dma-buf
+  (`cuMemGetHandleForAddressRange`) fails with error 524 (ENOTSUPP),
+  read-write or read-only:
+  - for `cudaMalloc` and `cuMemCreate` memory alike;
+  - before the checkpoint as well as after.
+
+  NVIDIA's exporter does not support CPU mappings.
 - **With the registration cache on**, a buffer registered before the
   checkpoint seems to register again after the restore, but the NIC's writes
   land elsewhere. That is silent data corruption.
@@ -368,6 +388,48 @@ NCCL with GDR on the same nodes (job 59584050, `perf2`, one run each):
 registrations) hangs NCCL with aws-ofi-nccl across nodes, natively too. The
 lower half leaves the cache on.
 
+## Stress test (2 nodes)
+
+Job 59585527 (nid200388 and nid200389), with `tests/run_ns.sh` and every
+restart on the nodes that took the checkpoint. Each workload ran twice:
+- `resume5`: 5 checkpoints in one run, each followed by progress;
+- `restart3`: 3 generations of checkpoint, kill and restart.
+
+The workloads were `nccl_bench` allreduce, alltoall, allgather,
+reduce_scatter and bcast at 2x4, bw at 2x1, NAS IS class B at 2x4, and
+PyTorch DDP at 2x4 (`pytorch_minimal_test.py`, launched by Slurm with no MPI
+or torchrun; `tests/rank_env.sh` sets its rank variables).
+
+| Data path | Cases passed | Checkpoints | Restarts |
+|---|---|---|---|
+| Host staging | 16 of 16 | 64 of 64 | 24 of 24 |
+| GDR | 13 of 16 | 56 of 56 | 20 of 21 |
+
+- Checkpoints took 3.8–4.8 s for `nccl_bench` and IS at 2x4, 2.8–3.5 s for
+  bw at 2x1, and 8.9–10.7 s for PyTorch.
+- Restarts took 2.6–9.2 s.
+
+**GDR failures:**
+- **bw 2x1, third restart of a chain:** CUDA restore error 304 (see "Open").
+- **PyTorch, both cases: a deadlock.** The forwarders cannot fix it.
+  - It happens before any checkpoint too: one reproduction hung in the first
+    training step.
+  - Stacks: on one rank, NCCL's proxy thread is in libfabric's copy of an
+    early small message into GPU memory, which goes through the forwarders'
+    `cudaMemcpy` to `cuMemcpyHtoDAsync`. Inside the driver it is blocked on
+    `pthread_rwlock_rdlock`.
+  - Meanwhile Python's main thread is inside a driver call, waiting for
+    NCCL's kernel. That kernel waits for the proxy.
+  - A device-to-device copy from a GPU-mapped bounce buffer blocks the same
+    way, so the lock covers more than host-to-device copies. The code keeps
+    the pinned host-to-device copy.
+  - GDRCopy avoids the problem because its copies are CPU stores that never
+    call the driver. Until GDRCopy works after a restore (see "GDR after a
+    checkpoint"), GDR mode is not safe for PyTorch.
+
+Host staging passed every case, PyTorch included: its back end makes no CUDA
+call at all.
+
 ## Fixed during phase 1
 
 - **Restart on another node.** NCCL computes some host state once per process
@@ -434,7 +496,13 @@ lower half leaves the cache on.
   - PyTorch DDP;
   - repeated performance runs.
 - **GDR in netsplit:**
-  - small point-to-point messages are slower without GDRCopy;
+  - PyTorch DDP deadlocks in GDR mode, because the proxy thread's CUDA
+    copies wait on a driver lock that an application thread holds (see
+    "Stress test"); fixing it needs GDRCopy or a copy that bypasses the
+    driver;
+  - small point-to-point messages are slower without GDRCopy. Persistent
+    pinning is the likely cause of GDRCopy's failure, so asking NERSC for
+    gdrdrv with `use_persistent_mapping=0` on a test node is the next step;
   - 2x4 and 4x4 have not been run with GDR yet.
 
   `NETSPLIT_GDR=1` passes the back end's pointer support through, but on its
