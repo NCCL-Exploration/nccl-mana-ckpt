@@ -64,6 +64,7 @@ vcomm_status_t vcomm_new(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_
             memcpy(v->ident, ident, VCOMM_IDENT_LEN);
             v->clique = -1;
             v->target = -1;
+            vcomm_reset_p2p_targets(v);
             v->real = NULL;
             *out = v;
             st = VCOMM_OK;
@@ -122,8 +123,45 @@ void vcomm_reset_seq(void) {
         if (g_vcomms[i].origin != VCOMM_FREE) {
             g_vcomms[i].seq = 0;
             g_vcomms[i].target = -1;
+            vcomm_reset_p2p_targets(&g_vcomms[i]);
         }
     }
+}
+
+void vcomm_reset_p2p_targets(vcomm_t *v) {
+    int peer;
+    for (peer = 0; peer < VCOMM_MAX_RANKS; peer++) {
+        v->send_target[peer] = -1;
+        v->recv_target[peer] = -1;
+    }
+}
+
+/* Peers at or beyond VCOMM_MAX_RANKS are not counted (see peer_ok in the
+ * wrappers), so they are not part of the boundary either. */
+static int p2p_peers(const vcomm_t *v) {
+    return v->nranks < VCOMM_MAX_RANKS ? v->nranks : VCOMM_MAX_RANKS;
+}
+
+int vcomm_p2p_owes(const vcomm_t *v) {
+    int peer, n = p2p_peers(v);
+    for (peer = 0; peer < n; peer++) {
+        if (peer == v->rank)
+            continue;
+        if (v->send_target[peer] > v->sent_to[peer] || v->recv_target[peer] > v->recvd_from[peer])
+            return 1;
+    }
+    return 0;
+}
+
+int vcomm_p2p_balanced(const vcomm_t *v) {
+    int peer, n = p2p_peers(v);
+    for (peer = 0; peer < n; peer++) {
+        if (peer == v->rank)
+            continue;
+        if (v->send_target[peer] != v->sent_to[peer] || v->recv_target[peer] != v->recvd_from[peer])
+            return 0;
+    }
+    return 1;
 }
 
 /* ── identity ─────────────────────────────────────────────────────── */

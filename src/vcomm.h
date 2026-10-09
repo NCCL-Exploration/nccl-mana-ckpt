@@ -105,6 +105,13 @@ typedef struct {
     int64_t sent_to[VCOMM_MAX_RANKS];
     int64_t recvd_from[VCOMM_MAX_RANKS];
 
+    /* --- p2p checkpoint boundary: the peer's side of each pair, as last read
+     *     during the consensus; -1 until read. A counter below its target means
+     *     the peer has posted an operation this rank has not matched yet, and the
+     *     gate lets this rank's threads run until they post it. --- */
+    int64_t send_target[VCOMM_MAX_RANKS]; /* bytes the peer has posted to receive from us */
+    int64_t recv_target[VCOMM_MAX_RANKS]; /* bytes the peer has posted to send to us */
+
     /* --- the only field that goes stale across a checkpoint. NULL while torn
      *     down or mid-rebuild; published last so readers never see a
      *     half-built entry. --- */
@@ -150,8 +157,20 @@ int vcomm_live_count(void);
  */
 int vcomm_order(int order[MAX_VCOMMS]);
 
-/* seq = 0, target = -1 on every live entry. Identity is NOT touched. */
+/* seq = 0, target = -1 and p2p targets = -1 on every live entry. Identity is
+ * NOT touched, and neither are the cumulative p2p counters. */
 void vcomm_reset_seq(void);
+
+/* Forget the p2p targets of one entry (all -1). */
+void vcomm_reset_p2p_targets(vcomm_t *v);
+
+/* 1 if some peer has posted an operation that this rank has not matched: a
+ * counter is below its (known) target. */
+int vcomm_p2p_owes(const vcomm_t *v);
+
+/* 1 if every peer's targets are known and equal this rank's counters, i.e.
+ * every point-to-point operation on this comm has its counterpart posted. */
+int vcomm_p2p_balanced(const vcomm_t *v);
 
 /* --- identity derivation (MurmurHash3-x64-128) --- */
 
