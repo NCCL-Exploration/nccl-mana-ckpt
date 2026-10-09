@@ -1,14 +1,14 @@
 #!/bin/bash
 # Build everything the campaign needs. Safe to run on a login node.
 #
-#   tests/report/build.sh [dmtcp] [plugin] [is] [ncclbench] [check]   (default: all)
+#   tests/report/build.sh [dmtcp] [plugin] [is] [ncclbench] [p2ppending] [check]   (default: all)
 #
 # Binaries go to $RESULTS_ROOT/bin (on $SCRATCH). Nothing links MPI.
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 : "${IS_CLASSES:=B C}"
-STEPS=${*:-dmtcp plugin is ncclbench check}
+STEPS=${*:-dmtcp plugin is ncclbench p2ppending check}
 mkdir -p "$BIN_DIR" "$RESULTS_ROOT/build"
 
 for step in $STEPS; do
@@ -49,10 +49,18 @@ for step in $STEPS; do
             if ldd "$NCCL_BENCH" | grep -qi mpi; then echo "nccl_bench links MPI" >&2; exit 1; fi
         )
         ;;
+    p2ppending)
+        (
+            load_modules nccl
+            nvcc -O2 -arch=sm_80 -Xcompiler -Wall -I"$NCCL_HOME/include" -L"$NCCL_HOME/lib" \
+                -Xlinker -rpath="$NCCL_HOME/lib" -o "$P2P_PENDING" \
+                "$REPO_ROOT/tests/multi/p2p_pending.cu" -lnccl
+        )
+        ;;
     check)
         ok=1
         for f in "$DMTCP_LAUNCH" "$DMTCP_ROOT/plugin/cuda/libdmtcp_cuda.so" \
-            "$REPO_ROOT/bin/libncclplugin.so" "$NCCL_BENCH"; do
+            "$REPO_ROOT/bin/libncclplugin.so" "$NCCL_BENCH" "$P2P_PENDING"; do
             [ -e "$f" ] || { echo "MISSING $f"; ok=0; }
         done
         for c in $IS_CLASSES; do [ -x "$BIN_DIR/is_nccl_$c" ] || { echo "MISSING is_nccl_$c"; ok=0; }; done

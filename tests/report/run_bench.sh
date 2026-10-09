@@ -5,7 +5,10 @@
 #   run_bench.sh <bench> <mode> <nodes> <gpus_per_node> <rep>
 #
 # bench: is | pytorch | nccl_latency | nccl_bw | nccl_bibw | nccl_allreduce |
-#        nccl_allgather | nccl_bcast | nccl_reduce | nccl_reduce_scatter | nccl_alltoall
+#        nccl_allgather | nccl_bcast | nccl_reduce | nccl_reduce_scatter | nccl_alltoall |
+#        p2p_recv_first | p2p_recv_first_cold | p2p_send_first | p2p_chain | p2p_relay
+#        (tests/multi/p2p_pending.cu: a checkpoint while a send or receive lacks its
+#        counterpart; run them with CKPT_DELAY=1, as tests/multi/run_p2p_pending.sh does)
 # Every rank is a plain srun task; no MPI is involved anywhere.
 # mode:  native       no DMTCP, NCCL_PROFILE/NET_PROFILE  (baseline)
 #        native_ref   no DMTCP, NCCL/module defaults      (production reference)
@@ -102,6 +105,13 @@ nccl_*)
     READY_RE='^# Size|^# progress'
     OK_RE='validation PASSED'
     ;;
+p2p_*)
+    load_modules nccl
+    scenario=${BENCH#p2p_}
+    CMD=("$P2P_PENDING" "${scenario//_/-}" "$RUN/p2p_id.bin" "$P2P_WINDOW_S")
+    READY_RE='^\[p2p\] rank [0-9]+ in window' READY_N=$NR
+    OK_RE='PASS p2p_pending' OK_N=$NR
+    ;;
 *) echo "unknown bench $BENCH" >&2; exit 2 ;;
 esac
 apply_nccl_profile "$prof" "$net" || exit 2
@@ -135,7 +145,7 @@ RLAUNCHER=restart
     if [ "$LAUNCHER" = netsplit ]; then
         echo "NETSPLIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
     fi
-    env | grep -E '^(NCCL_|IS_|PT_|NB_|USE_LIBUV|CKPT_|NETSPLIT_|FI_)' | sort
+    env | grep -E '^(NCCL_|IS_|PT_|NB_|P2P_|USE_LIBUV|CKPT_|NETSPLIT_|FI_|DMTCP_PLUGINS)' | sort
 } >meta.env
 
 count() { grep -aEc "$1" "${@:2}" 2>/dev/null | awk -F: '{s += $NF} END {print s + 0}'; }
@@ -339,6 +349,7 @@ case "$BENCH" in
 is) WS_RE="Total number of processes: +$NR\$" ;;
 pytorch) WS_RE="^\[pt\] rank 0/$NR process group ready" ;;
 nccl_*) WS_RE="^# nccl_bench [a-z_]+: $NR ranks" ;;
+p2p_*) WS_RE="^# p2p_pending [a-z-]+: $NR ranks" ;;
 esac
 if [ "$STATUS" = ok ] && [ "$(count "$WS_RE" "${LOGS[@]}")" -lt 1 ]; then
     STATUS=fail_worldsize

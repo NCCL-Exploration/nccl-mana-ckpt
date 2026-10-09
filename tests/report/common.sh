@@ -43,6 +43,7 @@ esac
 CAMPAIGN_DIR=$RESULTS_ROOT/$CAMPAIGN
 BIN_DIR=$RESULTS_ROOT/bin
 NCCL_BENCH=$BIN_DIR/nccl_bench
+P2P_PENDING=$BIN_DIR/p2p_pending # tests/multi/p2p_pending.cu
 # Lustre striping for checkpoint directories. Empty = filesystem default
 # (Perlmutter scratch: 1 stripe, 1 MiB). Each rank writes its own image file,
 # so a stripe count > 1 only helps when single images are large (PyTorch).
@@ -108,6 +109,7 @@ NCCL_RESTART=$NS_DIR/bin/nccl_restart
 : "${NB_CKPT_SIZE:=4194304}"    # checkpoint runs: one size ...
 : "${NB_CKPT_TARGET_S:=45}"     # ... for this long
 : "${NB_PROGRESS:=200}"         # '# progress' line every N iterations
+: "${P2P_WINDOW_S:=20}"         # p2p_*: how long one side waits before its operation
 
 now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'; }
@@ -204,7 +206,10 @@ layout_ok() {
         return 1
     fi
     case "$1" in
-    nccl_latency | nccl_bw | nccl_bibw) [ "$nr" -eq 2 ] ;;
+    nccl_latency | nccl_bw | nccl_bibw | p2p_recv_first | p2p_recv_first_cold | p2p_send_first)
+        [ "$nr" -eq 2 ] ;;
+    p2p_relay) [ "$nr" -eq 3 ] ;; # a 4th rank's allreduce would let rank 1 through anyway
+    p2p_chain) [ "$nr" -ge 3 ] ;;
     is) [ $((nr & (nr - 1))) -eq 0 ] ;; # IS needs a power-of-two rank count
     *) return 0 ;;
     esac
@@ -219,6 +224,7 @@ bench_target_s() {
     pytorch:perf) echo "$PT_TARGET_S" ;;
     pytorch:ckpt) echo "$PT_CKPT_TARGET_S" ;;
     nccl_*:ckpt) echo "$NB_CKPT_TARGET_S" ;;
+    p2p_*) echo $((P2P_WINDOW_S + 10)) ;;
     nccl_*:perf)
         # A fixed iteration count has no target: only RUN_TIMEOUT applies.
         if [ -n "$NB_ITERS" ]; then echo "$RUN_TIMEOUT"; return; fi
