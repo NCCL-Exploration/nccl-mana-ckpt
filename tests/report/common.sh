@@ -13,19 +13,24 @@ REPORT_DIR=$REPO_ROOT/tests/report
 
 # --- Plan ----------------------------------------------------------------
 #   plugin    tests/report/TEST_PLAN.md: the single-process NCCL plugin
-#   netsplit  netsplit/TEST_PLAN.md: netsplit against production NCCL.  It
-#             changes the defaults below (campaign name, IS class D, NCCL
-#             module defaults, 300 s checkpoint limit) and campaign.sbatch's
-#             layouts, benchmarks and modes.
+#   netsplit  netsplit/TEST_PLAN.md: netsplit against NCCL on the same data
+#             path.  It changes the defaults below (campaign name, IS class D,
+#             NCCL's defaults with GDR off, 300 s checkpoint limit, two
+#             checkpoint delays) and campaign.sbatch's layouts, benchmarks and
+#             modes.
 : "${PLAN:=plugin}"
 case "$PLAN" in
 plugin) ;;
 netsplit)
-    : "${CAMPAIGN:=ns-$(date +%Y%m%d)}"
+    : "${CAMPAIGN:=ns2-$(date +%Y%m%d)}"
     : "${IS_CLASS:=D}"
-    : "${NCCL_PROFILE:=default}"
+    # netsplit's proxy reports host memory only, so NCCL stages every network
+    # transfer through host buffers; NCCL with GDR off takes the same path
+    # (TEST_PLAN.md §4). native_ref keeps the module defaults, GDR on.
+    : "${NCCL_PROFILE:=nogdr}"
     : "${NET_PROFILE:=ofi}"
     : "${CKPT_TIMEOUT:=300}"
+    : "${CKPT_DELAYS:=5 10}"
     ;;
 *) echo "unknown PLAN=$PLAN (plugin or netsplit)" >&2; return 1 ;;
 esac
@@ -65,13 +70,21 @@ if [ "${DMTCP_PLUGINS+set}" = set ]; then PLUGIN=$DMTCP_PLUGINS; fi
 
 # --- netsplit (the ns* modes; netsplit/README.md) ----------------------------
 # nccl_launch adds the plugins itself (netsplit, NCCL, CUDA); PLUGIN is unused.
-NS_DIR=$REPO_ROOT/netsplit
+# NETSPLIT_DIR: another netsplit tree (e.g. one whose ../bin holds another
+# nccl-mana-ckpt build), for debugging; nccl_launch loads <tree>/../bin/libncclplugin.so.
+NS_DIR=${NETSPLIT_DIR:-$REPO_ROOT/netsplit}
 NCCL_LAUNCH=$NS_DIR/bin/nccl_launch
 NCCL_RESTART=$NS_DIR/bin/nccl_restart
 
 # --- Experiment parameters -------------------------------------------------
 : "${REPS:=3}"
 : "${CKPT_DELAY:=10}"        # s after the app reports progress before checkpointing
+: "${CKPT_DELAYS:=$CKPT_DELAY}" # campaign.sbatch: each checkpoint run once per delay
+# Repeated checkpoints (modes ns_resumeN, ns_restartN; TEST_PLAN.md §5): each
+# checkpoint STRESS_CKPT_DELAY s after progress (re)starts, and the run is
+# STRESS_CYCLE_S longer for every checkpoint after the first.
+: "${STRESS_CKPT_DELAY:=5}"
+: "${STRESS_CYCLE_S:=20}"
 : "${RUN_TIMEOUT:=1800}"     # s, hard cap on any single srun step
 # Per-phase limits (netsplit/TEST_PLAN.md §7). A job still running when one
 # passes is killed, and the run is recorded as hang_<phase>.
@@ -170,18 +183,25 @@ apply_nccl_profile() {
 }
 
 # --- Modes, layouts, run lengths -------------------------------------------
-# mode_info <mode>: prints "<launcher> <kind>". launcher: native | dmtcp |
+# mode_info <mode>: prints "<launcher> <kind> <n>". launcher: native | dmtcp |
 # netsplit (launch_rank.sh's modes); kind: perf (no checkpoint) | resume |
-# restart.
+# restart; n: checkpoints in the run (resume) or generations of checkpoint,
+# kill and restart (restart), 0 for perf. A trailing number on a checkpoint
+# mode sets n: ns_resume5 takes 5 checkpoints, ns_restart3 restarts 3 times.
 mode_info() {
-    case "$1" in
-    native | native_ref) echo "native perf" ;;
-    dmtcp) echo "dmtcp perf" ;;
-    ckpt_resume) echo "dmtcp resume" ;;
-    ckpt_restart) echo "dmtcp restart" ;;
-    ns) echo "netsplit perf" ;;
-    ns_resume) echo "netsplit resume" ;;
-    ns_restart) echo "netsplit restart" ;;
+    local base=$1 n=1
+    if [[ $1 =~ ^(ckpt|ns)_(resume|restart)([0-9]+)$ ]]; then
+        base=${1%"${BASH_REMATCH[3]}"} n=${BASH_REMATCH[3]}
+        [ "$n" -ge 1 ] || return 1
+    fi
+    case "$base" in
+    native | native_ref) echo "native perf 0" ;;
+    dmtcp) echo "dmtcp perf 0" ;;
+    ckpt_resume) echo "dmtcp resume $n" ;;
+    ckpt_restart) echo "dmtcp restart $n" ;;
+    ns) echo "netsplit perf 0" ;;
+    ns_resume) echo "netsplit resume $n" ;;
+    ns_restart) echo "netsplit restart $n" ;;
     *) return 1 ;;
     esac
 }
@@ -238,23 +258,39 @@ bench_target_s() {
     esac
 }
 
+# run_target_s <bench> <n>: a checkpoint run's target, one STRESS_CYCLE_S
+# longer for each of its n checkpoints after the first.
+run_target_s() {
+    local t
+    t=$(bench_target_s "$1" ckpt)
+    if [ "$2" -gt 1 ]; then t=$((t + ($2 - 1) * STRESS_CYCLE_S)); fi
+    echo "$t"
+}
+
 imin() { if [ "$1" -lt "$2" ]; then echo "$1"; else echo "$2"; fi; }
 
 # run_worst_case_s <bench> <mode>: the longest a run can take with every
-# phase limit reached, plus a minute for kills and cleanup.
+# phase limit reached, plus a minute for kills and cleanup. Uses the
+# CKPT_DELAY the run will get.
 run_worst_case_s() {
-    local launcher kind t w cap=$RUN_TIMEOUT
-    read -r launcher kind <<<"$(mode_info "$2")"
-    if [ "$kind" = perf ]; then t=$(bench_target_s "$1" perf); else t=$(bench_target_s "$1" ckpt); fi
+    local launcher kind n t w i cap=$RUN_TIMEOUT
+    read -r launcher kind n <<<"$(mode_info "$2")"
+    if [ "$kind" = perf ]; then t=$(bench_target_s "$1" perf); else t=$(run_target_s "$1" "$n"); fi
     case "$kind" in
     perf) w=$(imin $((STARTUP_TIMEOUT + t + HANG_GRACE_S)) "$cap") ;;
     resume)
-        w=$(imin $((STARTUP_TIMEOUT + CKPT_DELAY + CKPT_TIMEOUT + PROGRESS_TIMEOUT + t +
+        w=$(imin $((STARTUP_TIMEOUT + n * (CKPT_DELAY + CKPT_TIMEOUT + PROGRESS_TIMEOUT) + t +
             HANG_GRACE_S)) "$cap")
         ;;
     restart)
-        w=$(($(imin $((STARTUP_TIMEOUT + CKPT_DELAY + CKPT_TIMEOUT)) "$cap") +
-            $(imin $((RESTART_TIMEOUT + t + HANG_GRACE_S)) "$cap")))
+        # n + 1 job steps, each under the RUN_TIMEOUT cap: the launch up to
+        # its checkpoint, each restart up to the next checkpoint, and the last
+        # restart to completion.
+        w=$(imin $((STARTUP_TIMEOUT + CKPT_DELAY + CKPT_TIMEOUT)) "$cap")
+        for ((i = 1; i < n; i++)); do
+            w=$((w + $(imin $((RESTART_TIMEOUT + PROGRESS_TIMEOUT + CKPT_DELAY + CKPT_TIMEOUT)) "$cap")))
+        done
+        w=$((w + $(imin $((RESTART_TIMEOUT + t + HANG_GRACE_S)) "$cap")))
         ;;
     esac
     echo $((w + 60))

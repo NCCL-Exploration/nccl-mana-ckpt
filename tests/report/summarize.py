@@ -10,6 +10,11 @@ Writes, next to results.csv:
     agg_ckpt.csv      one row per (bench, scale, mode): checkpoint/restart statistics
     sizes.csv         one row per (nccl_* bench, scale, system, message size): native vs system
 
+A checkpoint run's configuration includes its checkpoint delay when the
+campaign recorded one (round 2 of netsplit/TEST_PLAN.md: "ns_resume d5").
+Runs with several checkpoints (ns_resume5, ns_restart3) also get a table from
+ckpts.csv, one row per run. The node types come from sysinfo/job*/nodes.txt.
+
 A system is what runs under checkpointing without taking a checkpoint: `dmtcp`
 (the single-process plugin, tests/report/TEST_PLAN.md) or `ns` (netsplit,
 netsplit/TEST_PLAN.md). Both compare against `native` from the same campaign.
@@ -18,7 +23,9 @@ Stdlib only, so it runs on a login node without any module.
 """
 
 import csv
+import glob
 import os
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -28,6 +35,24 @@ BW_BENCHES = {"nccl_bw", "nccl_bibw"}
 SYSTEMS = ("dmtcp", "ns")
 CKPT_MODES = ("ckpt_resume", "ckpt_restart", "ns_resume", "ns_restart")
 MODE_ORDER = ("native", "native_ref", "dmtcp", "ns") + CKPT_MODES
+CKPT_RE = re.compile(r"^(ckpt|ns)_(resume|restart)([0-9]*)$")
+
+
+def is_ckpt(mode):
+    return CKPT_RE.match(mode) is not None
+
+
+def n_ckpts(mode):
+    """Checkpoints (resume) or restarts (restart) a mode asks for."""
+    m = CKPT_RE.match(mode)
+    return int(m.group(3) or 1) if m else 0
+
+
+def cmode(r):
+    """The run's configuration within a benchmark and scale: its mode, plus the
+    checkpoint delay of a checkpoint run when the campaign recorded one."""
+    d = r.get("ckpt_delay_s") or ""
+    return f"{r['mode']} d{d}" if d and is_ckpt(r["mode"]) else r["mode"]
 
 
 def outcome(status):
@@ -40,7 +65,11 @@ def outcome(status):
 
 
 def mode_key(m):
-    return (MODE_ORDER.index(m) if m in MODE_ORDER else len(MODE_ORDER), m)
+    base, _, delay = m.partition(" d")
+    plain = CKPT_RE.match(base)
+    root = f"{plain.group(1)}_{plain.group(2)}" if plain else base
+    rank = MODE_ORDER.index(root) if root in MODE_ORDER else len(MODE_ORDER)
+    return (rank, n_ckpts(base), float(delay) if delay else 0.0, m)
 
 
 def first_error(run_dir):
@@ -129,12 +158,15 @@ def main():
             "on) and shows the cost of the checkpoint-safe NCCL settings themselves."
         )
     if "ns" in modes_present:
+        profs = sorted({r.get("nccl_profile", "") for r in rows if r["mode"] == "native"})
         intro += (
             " `ns` runs netsplit (NCCL's network back end in a lower half that is never "
-            "checkpointed, host-staged transfers) with no checkpoint; `native` is "
-            "production NCCL with the same NCCL settings (the run's `nccl_profile` and "
-            "`net_profile`)."
+            "checkpointed, host-staged transfers) with no checkpoint; `native` is NCCL with "
+            f"the same NCCL settings (profile {', '.join(profs) or '-'}, the run's "
+            "`nccl_profile` and `net_profile`)."
         )
+        if "native_ref" in modes_present:
+            intro += " `native_ref` is production NCCL (module defaults: GDR on)."
     out.append(intro + "\n")
 
     # --- Success rate --------------------------------------------------------
@@ -148,7 +180,7 @@ def main():
     out.append("|---|---|---|---|---|---|")
     tally = defaultdict(lambda: defaultdict(int))
     for r in rows:
-        tally[(r["bench"], scale_key(r), r["mode"])][outcome(r["status"])] += 1
+        tally[(r["bench"], scale_key(r), cmode(r))][outcome(r["status"])] += 1
     for key in sorted(tally, key=lambda k: (k[0], k[1], mode_key(k[2]))):
         t = tally[key]
         n = sum(t.values())
@@ -214,24 +246,26 @@ def main():
         "`resume rebuild` = communicator re-creation after a checkpoint the job survives. "
         "`restart latency` = `dmtcp_restart` (`nccl_restart` for ns_restart) until every rank "
         "has rebuilt its communicators; "
-        "`restart total` = until the job completes.\n"
+        "`restart total` = until the job completes. `restart other` = restart latency − "
+        "restart rebuild, per run: the new lower half, reading the images, the GPU restore. "
+        "Runs with several checkpoints report their means.\n"
     )
     out.append(
         "| Benchmark | Scale | Mode | success | ckpt (s) | drain (s) | cuda+write (s) | "
         "image total (GiB) | image/rank (MiB) | write (MiB/s) | resume rebuild (s) | "
-        "restart latency (s) | restart rebuild (s) | restart total (s) |"
+        "restart latency (s) | restart rebuild (s) | restart other (s) | restart total (s) |"
     )
-    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     agg_ckpt = []
     for b in benches:
         for s in scales:
-            for m in CKPT_MODES:
-                allruns = [
-                    r for r in rows if r["bench"] == b and scale_key(r) == s and r["mode"] == m
-                ]
-                if not allruns:
-                    continue
-                g = groups.get((b, s, m), [])
+            cms = sorted(
+                {cmode(r) for r in rows if r["bench"] == b and scale_key(r) == s and is_ckpt(r["mode"])},
+                key=mode_key,
+            )
+            for m in cms:
+                allruns = [r for r in rows if r["bench"] == b and scale_key(r) == s and cmode(r) == m]
+                g = [r for r in allruns if r["status"] == "ok"]
                 col = {
                     k: stats([fnum(r[k]) for r in g])
                     for k in (
@@ -252,6 +286,14 @@ def main():
                         if fnum(r["ckpt_s"]) is not None and fnum(r["nccl_drain_s"]) is not None
                     ]
                 )
+                col["restart_other_s"] = stats(
+                    [
+                        fnum(r["restart_latency_s"]) - fnum(r["restart_rebuild_s"])
+                        for r in g
+                        if fnum(r["restart_latency_s"]) is not None
+                        and fnum(r["restart_rebuild_s"]) is not None
+                    ]
+                )
                 nr = s[0] * s[1]
                 img = col["image_bytes"]
                 img_gib = img and {k: (v / 2**30 if k != "n" else v) for k, v in img.items()}
@@ -262,14 +304,16 @@ def main():
                     f"{fmt(col['cuda_write_s'], 2)} | {fmt(img_gib, 2)} | "
                     f"{fmt(img_rank, 0)} | {fmt(col['write_MBps'], 0)} | "
                     f"{fmt(col['resume_rebuild_s'])} | {fmt(col['restart_latency_s'], 2)} | "
-                    f"{fmt(col['restart_rebuild_s'])} | {fmt(col['restart_total_s'], 2)} |"
+                    f"{fmt(col['restart_rebuild_s'])} | {fmt(col['restart_other_s'], 2)} | "
+                    f"{fmt(col['restart_total_s'], 2)} |"
                 )
                 row = {
                     "bench": b,
                     "nodes": s[0],
                     "gpus_per_node": s[1],
                     "nranks": nr,
-                    "mode": m,
+                    "mode": allruns[0]["mode"],
+                    "ckpt_delay_s": allruns[0].get("ckpt_delay_s", ""),
                     "runs": len(allruns),
                     "ok": len(g),
                 }
@@ -333,6 +377,63 @@ def main():
                     size_rows.append(row)
                 out.append("")
 
+    # --- Repeated checkpoints (ckpts.csv) -----------------------------------
+    multi = [r for r in rows if n_ckpts(r["mode"]) > 1]
+    ckpts = defaultdict(list)
+    cpath = os.path.join(cdir, "ckpts.csv")
+    if multi and os.path.exists(cpath):
+        with open(cpath) as f:
+            for c in csv.DictReader(f):
+                ckpts[c["run_dir"]].append(c)
+    if multi:
+        out.append("## Repeated checkpoints\n")
+        out.append(
+            "One row per run. `done` = checkpoints (resume) or restarts (restart) completed "
+            "out of the mode's number; times are per checkpoint or restart, in order.\n"
+        )
+        out.append(
+            "| Benchmark | Scale | Mode | Status | done | ckpt (s) | NCCL (s) | restart latency (s) | "
+            "restart rebuild (s) | rounds (max) | drained |"
+        )
+        out.append("|---|---|---|---|---|---|---|---|---|---|---|")
+
+        def seq(cs, k, d=1):
+            v = [fnum(c[k]) for c in cs if fnum(c[k]) is not None]
+            return "/".join(f"{x:.{d}f}" for x in v) or "-"
+        for r in sorted(multi, key=lambda r: (r["bench"], scale_key(r), mode_key(cmode(r)), r["rep"])):
+            cs = sorted(ckpts.get(r["run_dir"], []), key=lambda c: int(c["index"]))
+            done = r.get("n_ckpt") if r["mode"].split("_")[1].startswith("resume") else r.get("n_restart")
+            out.append(
+                f"| {r['bench']} | {scale_str(scale_key(r))} | {cmode(r)} | {r['status']} | "
+                f"{done or 0}/{n_ckpts(r['mode'])} | {seq(cs, 'ckpt_s')} | {seq(cs, 'nccl_s', 2)} | "
+                f"{seq(cs, 'restart_latency_s')} | {seq(cs, 'restart_rebuild_s', 2)} | "
+                f"{r.get('rounds_max') or '-'} | {r.get('drained') or '-'} |"
+            )
+        out.append("")
+
+    # --- Hardware -----------------------------------------------------------
+    jobs = []
+    for path in sorted(glob.glob(os.path.join(cdir, "sysinfo", "job*", "nodes.txt"))):
+        hosts, gpus = [], defaultdict(int)
+        with open(path) as f:
+            lines = f.read().splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("== host: "):
+                hosts.append(line.split(": ", 1)[1])
+            m = re.match(r"^\d+, (NVIDIA [^,]+), (\d+) MiB, ([0-9.]+),", line)
+            if m:
+                gpus[f"{m.group(1)} ({int(m.group(2)) // 1024} GiB), driver {m.group(3)}"] += 1
+        jobs.append((os.path.basename(os.path.dirname(path)), hosts, gpus))
+    if jobs:
+        out.append("## Hardware\n")
+        out.append("From each job's `sysinfo/job*/nodes.txt` (every node of the job).\n")
+        out.append("| Job | Nodes | GPUs |")
+        out.append("|---|---|---|")
+        for job, hosts, gpus in jobs:
+            g = "; ".join(f"{n} x {k}" for k, n in sorted(gpus.items())) or "-"
+            out.append(f"| {job} | {len(hosts)}: {', '.join(hosts)} | {g} |")
+        out.append("")
+
     # --- Failures ----------------------------------------------------------
     bad = [r for r in rows if r["status"] != "ok"]
     if bad:
@@ -341,7 +442,7 @@ def main():
         out.append("|---|---|---|---|---|---|---|")
         for r in bad:
             out.append(
-                f"| {r['bench']} | {scale_str(scale_key(r))} | {r['mode']} | {r['rep']} | "
+                f"| {r['bench']} | {scale_str(scale_key(r))} | {cmode(r)} | {r['rep']} | "
                 f"{r['status']} | {first_error(r['run_dir']) or '-'} | {r['run_dir']} |"
             )
         out.append("")

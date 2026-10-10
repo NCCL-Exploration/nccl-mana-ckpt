@@ -35,6 +35,10 @@ restart | netsplit-restart) phase=restart ;;
 esac
 mkdir -p "$ckroot/hosts"
 echo "$(hostname) local=$LOCAL_RANK gpus=${CUDA_VISIBLE_DEVICES:-}" >"$ckroot/hosts/$phase.$RANK"
+# NETSPLIT_CUDA_LOG=1: the CUDA driver's error log (CUDA_LOG_FILE, driver
+# r575 and later), one file per rank. The driver reads it at initialization,
+# so it applies from the launch and, through the image, after a restart.
+if [ "${NETSPLIT_CUDA_LOG:-0}" = 1 ]; then export CUDA_LOG_FILE=$ckroot/cuda_log.$RANK; fi
 
 case "$mode" in
 native)

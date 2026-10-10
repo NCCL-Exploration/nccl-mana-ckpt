@@ -9,9 +9,11 @@
 #   NODES_LIST="1 2" tests/report/submit_all.sh
 #
 # PLAN=netsplit runs netsplit/TEST_PLAN.md instead: layouts 1x2 and 1x4 (1
-# node), 2x1 and 2x4 (2 nodes), 4x4 (4 nodes); modes native, ns, ns_resume,
-# ns_restart. Its smoke test runs 1x4 and 2x4 in one 2-node job, with IS
-# class D, so it also records the class D image size and checkpoint time:
+# node), 2x1 and 2x4 (2 nodes), 4x4 (4 nodes); modes native (GDR off),
+# native_ref (latency and bw at 2x1), ns, ns_resume and ns_restart at two
+# checkpoint delays, and the stress modes ns_resume5 and ns_restart3. Its
+# smoke test runs 2x1, 1x4 and 2x4 in one 2-node job, every mode once, with
+# IS class D and one stress case of each kind:
 #   PLAN=netsplit SMOKE=1 INTERACTIVE=1 tests/report/submit_all.sh
 # INTERACTIVE=1 without SMOKE runs the campaign's jobs one after another on
 # the interactive QOS (at most 4 nodes and 4 hours, 2 jobs per user), in the
@@ -31,9 +33,11 @@ export CAMPAIGN REPORT_DIR
 mkdir -p "$CAMPAIGN_DIR/slurm"
 
 if [ "${SMOKE:-0}" = 1 ] && [ "$PLAN" = netsplit ]; then
-    # Every benchmark and mode at 1x4 and 2x4, IS class D (common.sh).
-    export PLAN REPS=1 NB_MAX_SIZE=1048576 CKPT_DELAY=5 LAYOUTS="1x4 2x4"
+    # Every benchmark and mode at 2x1, 1x4 and 2x4, both checkpoint delays,
+    # IS class D (common.sh), and one stress case of each kind.
+    export PLAN REPS=1 NB_MAX_SIZE=1048576 LAYOUTS="2x1 1x4 2x4"
     export PT_TARGET_S=10 NB_SIZE_BUDGET_S=0.2 PT_CKPT_TARGET_S=25 NB_CKPT_TARGET_S=25
+    export STRESS_CASES=${STRESS_CASES-"nccl_bw:2x1 pytorch:2x4"}
     if [ "${INTERACTIVE:-0}" = 1 ]; then
         salloc -A "$ACCOUNT" -q interactive -t 01:30:00 -N 2 -C gpu --gpus-per-node=4 \
             -J ns-report-smoke srun -N 1 -n 1 --overlap bash "$REPORT_DIR/campaign.sbatch" \
@@ -70,10 +74,11 @@ if [ "$PLAN" = netsplit ]; then : "${NODES_LIST:=1 2 4}"; else : "${NODES_LIST:=
 export PLAN
 for NN in $NODES_LIST; do
     case "$PLAN:$NN" in
+    netsplit:1) GPN_LIST="2 4" T=02:30:00 ;;
     *:1) GPN_LIST="2 4" T=04:00:00 ;;
-    netsplit:2) GPN_LIST="1 4" T=03:00:00 ;;
+    netsplit:2) GPN_LIST="1 4" T=03:30:00 ;;
     *:2) GPN_LIST="1 4" T=04:00:00 ;;
-    netsplit:*) GPN_LIST="4" T=03:00:00 ;;
+    netsplit:*) GPN_LIST="4" T=02:30:00 ;;
     *) GPN_LIST="4" T=02:00:00 ;;
     esac
     if [ "${INTERACTIVE:-0}" = 1 ]; then
