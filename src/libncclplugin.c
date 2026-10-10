@@ -225,15 +225,16 @@ static void epoch_vote(void) {
  * (g_creation_pending) until it completes. Tombstones are freed once the
  * consensus converges: by then every member has destroyed the comm.
  *
- * Point-to-point catch-up gives up after NCCL_PLUGIN_P2P_WAIT seconds (default
- * P2P_WAIT_DEFAULT_S) of waiting; the drain then completes what is left, which
- * hands a pending receive zeros, and says so. Collective catch-up waits as long
- * as it takes, as before; only rounds in which nobody waited count against
- * MAX_CHASE_ROUNDS.
+ * Point-to-point catch-up waits as long as it takes, like collective catch-up,
+ * and reports every REPORT_EVERY_MS what each rank still owes. Only rounds in
+ * which nobody waited count against MAX_CHASE_ROUNDS. NCCL_PLUGIN_P2P_WAIT=N
+ * gives up after N seconds of waiting (0: no catch-up at all); the drain then
+ * completes what is left. A pending send is received into host memory and
+ * replayed, which is correct. A pending receive could only get zeros, so every
+ * rank aborts instead (refuse_zero_fill), unless NCCL_PLUGIN_P2P_ZERO_FILL=1.
  */
 #define SLICE_MIN_MS 10
 #define SLICE_MAX_MS 1000
-#define P2P_WAIT_DEFAULT_S 300
 #define REPORT_EVERY_MS 30000
 
 static int g_p2p_chase;                       /* p2p catch-up active in this checkpoint */
@@ -252,21 +253,29 @@ static int64_t p2p_total(const int64_t *a, int n) {
     return s;
 }
 
+/* NCCL_PLUGIN_P2P_WAIT in ms; -1 when unset: wait as long as it takes. */
 static long p2p_wait_ms(void) {
     const char *s = getenv("NCCL_PLUGIN_P2P_WAIT");
     char *end;
     long v;
     if (s == NULL || *s == '\0')
-        return P2P_WAIT_DEFAULT_S * 1000L;
+        return -1;
     v = strtol(s, &end, 10);
     if (*end != '\0' || v < 0) {
         fprintf(stderr, "[NCCL PLUGIN] NCCL_PLUGIN_P2P_WAIT=%s is not a number of seconds;"
-                        " using %d\n",
-                s, P2P_WAIT_DEFAULT_S);
+                        " waiting as long as it takes\n",
+                s);
         fflush(stderr);
-        return P2P_WAIT_DEFAULT_S * 1000L;
+        return -1;
     }
     return v * 1000L;
+}
+
+/* NCCL_PLUGIN_P2P_ZERO_FILL=1: complete a receive that was never matched with
+ * zeros rather than abort (refuse_zero_fill). */
+static int zero_fill_allowed(void) {
+    const char *s = getenv("NCCL_PLUGIN_P2P_ZERO_FILL");
+    return s != NULL && strcmp(s, "1") == 0;
 }
 
 static long ms_since(const struct timeval *t0) {
@@ -365,7 +374,7 @@ static void sequence_consensus(void) {
     long p2p_limit_ms = p2p_wait_ms();
     int n, i;
 
-    g_p2p_chase = p2p_limit_ms > 0;
+    g_p2p_chase = p2p_limit_ms != 0;
     nccl_seq_lock();
     for (i = 0; i < MAX_VCOMMS; i++) {
         vcomm_t *v = &g_vcomms[i];
@@ -507,9 +516,10 @@ static void sequence_consensus(void) {
             break;
         }
 
-        if (g_p2p_chase && p2p_waited_ms >= p2p_limit_ms) {
-            /* The application did not post the counterparts in time. Stop
-             * waiting for them; the drain completes what is left. */
+        if (g_p2p_chase && p2p_limit_ms >= 0 && p2p_waited_ms >= p2p_limit_ms) {
+            /* The application did not post the counterparts in the time it was
+             * given. Stop waiting for them; the drain completes what is left,
+             * or every rank aborts (refuse_zero_fill). */
             if (p2p_owed)
                 report_owed("p2p catch-up abandoned");
             nccl_seq_lock();
@@ -521,8 +531,9 @@ static void sequence_consensus(void) {
             if (g_my_rank <= 0) {
                 fprintf(stderr,
                         "[NCCL PLUGIN] WARNING: point-to-point operations still lacked their"
-                        " counterparts after %ld s (NCCL_PLUGIN_P2P_WAIT); the drain completes"
-                        " them, and a pending receive gets zeros instead of its data\n",
+                        " counterparts after %ld s (NCCL_PLUGIN_P2P_WAIT). Pending sends are"
+                        " received into host memory and replayed; a pending receive aborts the"
+                        " job unless NCCL_PLUGIN_P2P_ZERO_FILL=1\n",
                         p2p_waited_ms / 1000);
                 fflush(stderr);
             }
@@ -596,8 +607,87 @@ static void publish_p2p_counters(void) {
  * rendezvous is needed here -- which is just as well, since dmtcp_global_barrier
  * cannot synchronize a subset of peers.
  */
-static void drain_comm(vcomm_t *v) {
+/*
+ * One pair's imbalance from the counters publish_p2p_counters() wrote: owed_in
+ * bytes the peer sent that this rank has not received, owed_out bytes the peer
+ * posted to receive that this rank has not sent. Returns 0 if the peer published
+ * nothing: both keys are written before the barrier that precedes this read, so
+ * that is a protocol error, and treating it as a zero count would fabricate an
+ * imbalance.
+ */
+static int pair_owed(const vcomm_t *v, int peer, int64_t *owed_in, int64_t *owed_out) {
     char key[KVDB_KEY_MAX];
+    int64_t sent_by_peer, recvd_by_peer;
+
+    key_p2p(key, v, peer, v->rank, 's');
+    sent_by_peer = dmtcp_kvdb_get(key);
+    key_p2p(key, v, v->rank, peer, 'r');
+    recvd_by_peer = dmtcp_kvdb_get(key);
+    if (sent_by_peer == 0 || recvd_by_peer == 0)
+        return 0;
+    /* Undo the +1 publication bias. Our own side is read locally rather than
+     * round-tripped through the coordinator. */
+    *owed_in = (sent_by_peer - 1) - v->recvd_from[peer];
+    *owed_out = (recvd_by_peer - 1) - v->sent_to[peer];
+    return 1;
+}
+
+/*
+ * A receive whose send the application never posted can only be completed with
+ * zeros: its data is lost and nothing tells the application. Unless
+ * NCCL_PLUGIN_P2P_ZERO_FILL=1 asks for that, every rank aborts together, before
+ * the drain posts anything, and the ranks that owe the sends say which. The vote
+ * and barrier make the abort collective, so no rank is left in a later barrier
+ * waiting for one that died. Reached by every rank unconditionally.
+ */
+static void refuse_zero_fill(void) {
+    char key[KVDB_KEY_MAX];
+    char barrier[80];
+    int order[MAX_VCOMMS];
+    int n = vcomm_order(order), k, peer;
+    int64_t mine = 0, total;
+    int allowed = zero_fill_allowed();
+
+    for (k = 0; k < n; k++) {
+        vcomm_t *v = &g_vcomms[order[k]];
+        if (v->real == NULL || v->origin != VCOMM_REMOTE)
+            continue;
+        for (peer = 0; peer < v->nranks && peer < VCOMM_MAX_RANKS; peer++) {
+            int64_t owed_in, owed_out;
+            char hex[VCOMM_IDENT_HEX];
+            if (peer == v->rank || !pair_owed(v, peer, &owed_in, &owed_out) || owed_out <= 0)
+                continue;
+            mine++;
+            if (allowed)
+                continue; /* drain_comm() warns about each one it zero-fills */
+            vcomm_ident_hex(v->ident, hex);
+            fprintf(stderr,
+                    "[NCCL PLUGIN] ERROR: comm %s rank %d: peer %d posted a receive of %ld B"
+                    " that this rank never sent\n",
+                    hex, v->rank, peer, (long)owed_out);
+        }
+    }
+    fflush(stderr);
+
+    KEYF(key, "R/%u/unmatched-recvs", g_epoch);
+    dmtcp_kvdb_incr(key, mine);
+    snprintf(barrier, sizeof(barrier), "nccl-mana/%u/unmatched-recvs", g_epoch);
+    dmtcp_global_barrier(barrier);
+    total = dmtcp_kvdb_get(key);
+    if (total == 0 || allowed)
+        return;
+
+    fprintf(stderr,
+            "[NCCL PLUGIN] ERROR: rank %d: %ld point-to-point receive(s) in the job were never"
+            " matched by a send, and completing them would hand the application zeros.\n"
+            "              Aborting the checkpoint and the job. Set NCCL_PLUGIN_P2P_ZERO_FILL=1"
+            " to complete them with zeros instead.\n",
+            g_my_rank, (long)total);
+    fflush(stderr);
+    abort();
+}
+
+static void drain_comm(vcomm_t *v) {
     ncclComm_t real = v->real;
     int peer;
 
@@ -607,20 +697,12 @@ static void drain_comm(vcomm_t *v) {
     CUDA_CHECK(cudaSetDevice(v->cuda_dev));
 
     for (peer = 0; peer < v->nranks && peer < VCOMM_MAX_RANKS; peer++) {
-        int64_t sent_by_peer, recvd_by_peer, owed_in, owed_out;
+        int64_t owed_in, owed_out;
 
         if (peer == v->rank)
             continue;
 
-        key_p2p(key, v, peer, v->rank, 's');
-        sent_by_peer = dmtcp_kvdb_get(key);
-        key_p2p(key, v, v->rank, peer, 'r');
-        recvd_by_peer = dmtcp_kvdb_get(key);
-
-        if (sent_by_peer == 0 || recvd_by_peer == 0) {
-            /* Both were published before the barrier that precedes this read, so
-             * a raw 0 is a protocol error. Treating it as a zero count would
-             * fabricate an imbalance and drain a message that does not exist. */
+        if (!pair_owed(v, peer, &owed_in, &owed_out)) {
             char hex[VCOMM_IDENT_HEX];
             vcomm_ident_hex(v->ident, hex);
             fprintf(stderr,
@@ -630,11 +712,6 @@ static void drain_comm(vcomm_t *v) {
             fflush(stderr);
             continue;
         }
-
-        /* Undo the +1 publication bias. Our own side is read locally rather than
-         * round-tripped through the coordinator. */
-        owed_in = (sent_by_peer - 1) - v->recvd_from[peer];
-        owed_out = (recvd_by_peer - 1) - v->sent_to[peer];
 
         if (owed_in > 0) {
             /* The peer enqueued this send; consume it now and stash the payload
@@ -681,7 +758,8 @@ static void drain_comm(vcomm_t *v) {
              * rather than the data its application expected: the real data was
              * never handed to NCCL. sequence_consensus() normally prevents this
              * by letting this rank's application post the send first; getting
-             * here means that catch-up gave up (NCCL_PLUGIN_P2P_WAIT). */
+             * here means that catch-up gave up (NCCL_PLUGIN_P2P_WAIT) and
+             * NCCL_PLUGIN_P2P_ZERO_FILL=1 asked for this over an abort. */
             void *dev_buf = NULL;
             size_t bytes = (size_t)owed_out;
 
@@ -816,6 +894,7 @@ static void checkpoint(void) {
     publish_p2p_counters();
     snprintf(barrier, sizeof(barrier), "nccl-mana/%u/p2p-published", g_epoch);
     dmtcp_global_barrier(barrier);
+    refuse_zero_fill();
 
     n = vcomm_order(order);
     for (k = 0; k < n; k++)
