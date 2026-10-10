@@ -41,6 +41,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Newer entry points are wrapped only when the NCCL headers in use declare
@@ -244,6 +247,242 @@ int nccl_activity(void) {
     return __atomic_load_n(&g_nccl_activity, __ATOMIC_SEQ_CST);
 }
 
+/* ── application threads before the GPU checkpoint ────────────────── */
+
+/*
+ * DMTCP's CUDA plugin checkpoints the GPU in PRESUSPEND, right after this
+ * plugin, while the application's threads still run, and restores it in
+ * RUNNING_AFTER, after DMTCP has released them. A CUDA call from any thread in
+ * between returns CUDA_ERROR_LAUNCH_FAILED (719), and the context keeps the
+ * error through the image (netsplit/tests/ckpt_race.c). The gate holds a thread
+ * only when it calls NCCL, so a thread that computes and synchronizes between
+ * NCCL calls -- NAS IS's main thread sorts on the CPU and calls
+ * cudaDeviceSynchronize before each collective -- could still be in CUDA when
+ * the GPU was locked: 8 of 302 runs of campaign ns2-20261009 failed that way.
+ *
+ * So every thread that calls NCCL gets a record here, and before the GPU
+ * checkpoint nccl_hold_threads() waits until each one is parked at the gate.
+ * A parked thread cannot leave before the rebuild: the gate stays closed until
+ * RESUME, and wait_real() then holds it until RUNNING_AFTER has restored the
+ * GPU and rebuilt its communicator.
+ *
+ * A thread is waited for only while it is expected back: while it has been out
+ * of NCCL for less than twice its longest stretch out among its last
+ * HOLD_WINDOW to 2 * HOLD_WINDOW, plus HOLD_SLACK_MS. A thread that called NCCL
+ * only to initialize, or that stopped calling it, is not, and
+ * NCCL_PLUGIN_HOLD_WAIT bounds the whole wait. Threads that call CUDA but never
+ * NCCL are not covered.
+ *
+ * The window matters because a thread can be out only because it waits for a
+ * parked one -- PyTorch's main thread waits in backward() for the autograd
+ * thread, which is parked at an allreduce -- and is then waited for until its
+ * allowance runs out. Its allowance must follow its recent stretches, not one
+ * long stretch long ago. For the same reason a stretch that spans a checkpoint
+ * is not counted (nccl_threads_resumed()): it includes the rebuild.
+ */
+#define MAX_NCCL_THREADS 256
+#define HOLD_WINDOW 32
+#define HOLD_SLACK_MS 100
+#define HOLD_POLL_US 1000
+#define HOLD_WAIT_DEFAULT_S 60.0
+
+enum { THREAD_OUT, THREAD_IN, THREAD_PARKED };
+
+struct nccl_thread {
+    int used; /* 0 free, 2 being filled in, 1 live */
+    int state;
+    pid_t tid;
+    int64_t left_ns; /* when it last left NCCL; 0 if it never has, or not since a checkpoint */
+    /* The longest stretch out among the current HOLD_WINDOW and the previous. */
+    int64_t max_out_cur_ns;
+    int64_t max_out_prev_ns;
+    int stretches; /* in the current window */
+};
+
+static struct nccl_thread g_threads[MAX_NCCL_THREADS];
+static __thread struct nccl_thread *t_self;
+static __thread int t_depth; /* this thread's share of g_nccl_activity */
+static pthread_key_t g_thread_key;
+static pthread_once_t g_thread_once = PTHREAD_ONCE_INIT;
+
+static int64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static void thread_exited(void *p) {
+    __atomic_store_n(&((struct nccl_thread *)p)->used, 0, __ATOMIC_RELEASE);
+}
+
+static void thread_key_init(void) {
+    pthread_key_create(&g_thread_key, thread_exited);
+}
+
+/* This thread's record, made at its first NCCL call; NULL if the table is
+ * full, and the thread is then never waited for. */
+static struct nccl_thread *thread_self(void) {
+    int i;
+
+    if (t_self != NULL)
+        return t_self;
+    pthread_once(&g_thread_once, thread_key_init);
+    for (i = 0; i < MAX_NCCL_THREADS; i++) {
+        struct nccl_thread *s = &g_threads[i];
+        int expect = 0;
+        if (!__atomic_compare_exchange_n(&s->used, &expect, 2, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_RELAXED))
+            continue;
+        s->state = THREAD_OUT;
+        s->tid = (pid_t)syscall(SYS_gettid);
+        s->left_ns = 0;
+        s->max_out_cur_ns = 0;
+        s->max_out_prev_ns = 0;
+        s->stretches = 0;
+        __atomic_store_n(&s->used, 1, __ATOMIC_RELEASE);
+        pthread_setspecific(g_thread_key, s);
+        t_self = s;
+        return s;
+    }
+    return NULL;
+}
+
+/* At a gate, coming from application code: the stretch out ends here, not when
+ * the gate lets the thread through. */
+static void thread_arrive(void) {
+    struct nccl_thread *s;
+    int64_t out;
+
+    if (t_depth > 0)
+        return;
+    s = thread_self();
+    if (s == NULL || s->left_ns == 0)
+        return;
+    out = now_ns() - s->left_ns;
+    if (out > s->max_out_cur_ns)
+        s->max_out_cur_ns = out;
+    if (++s->stretches == HOLD_WINDOW) {
+        s->max_out_prev_ns = s->max_out_cur_ns;
+        s->max_out_cur_ns = 0;
+        s->stretches = 0;
+    }
+}
+
+/* How long a thread out of NCCL is still expected back. */
+static int64_t thread_allowance_ns(const struct nccl_thread *s) {
+    int64_t m = s->max_out_cur_ns > s->max_out_prev_ns ? s->max_out_cur_ns : s->max_out_prev_ns;
+    return 2 * m + (int64_t)HOLD_SLACK_MS * 1000000;
+}
+
+/* Called with g_seq_lock held, after the gate test failed. */
+static void thread_parked(void) {
+    if (t_self != NULL && t_depth == 0)
+        __atomic_store_n(&t_self->state, THREAD_PARKED, __ATOMIC_RELEASE);
+}
+
+/* Paired with every change of g_nccl_activity by this thread. */
+static void thread_in(void) {
+    if (t_depth++ == 0 && t_self != NULL)
+        __atomic_store_n(&t_self->state, THREAD_IN, __ATOMIC_RELEASE);
+}
+
+static void thread_out(void) {
+    if (--t_depth == 0 && t_self != NULL) {
+        t_self->left_ns = now_ns();
+        __atomic_store_n(&t_self->state, THREAD_OUT, __ATOMIC_RELEASE);
+    }
+}
+
+/* NCCL_PLUGIN_HOLD_WAIT in ms: how long nccl_hold_threads() may wait in all;
+ * 0 turns the hold off. */
+static long hold_wait_ms(void) {
+    const char *s = getenv("NCCL_PLUGIN_HOLD_WAIT");
+    char *end;
+    double v;
+
+    if (s == NULL || *s == '\0')
+        return (long)(HOLD_WAIT_DEFAULT_S * 1000);
+    v = strtod(s, &end);
+    if (*end != '\0' || v < 0) {
+        fprintf(stderr, "[NCCL PLUGIN] ignoring NCCL_PLUGIN_HOLD_WAIT=%s\n", s);
+        fflush(stderr);
+        return (long)(HOLD_WAIT_DEFAULT_S * 1000);
+    }
+    return (long)(v * 1000);
+}
+
+void nccl_hold_threads(void) {
+    long wait_ms = hold_wait_ms();
+    int64_t start = now_ns();
+    int64_t deadline = start + (int64_t)wait_ms * 1000000;
+    int closed;
+
+    if (wait_ms == 0)
+        return;
+    /* An open gate cannot hold anyone (no live communicator, or a creation in
+     * flight somewhere). */
+    pthread_mutex_lock(&g_seq_lock);
+    closed = nccl_gate_closed_locked();
+    pthread_mutex_unlock(&g_seq_lock);
+    if (!closed)
+        return;
+
+    for (;;) {
+        int64_t t = now_ns();
+        int held = 0, away = 0, out = 0;
+        int i;
+
+        for (i = 0; i < MAX_NCCL_THREADS; i++) {
+            struct nccl_thread *s = &g_threads[i];
+            int state;
+            if (__atomic_load_n(&s->used, __ATOMIC_ACQUIRE) != 1)
+                continue;
+            state = __atomic_load_n(&s->state, __ATOMIC_ACQUIRE);
+            if (state == THREAD_PARKED)
+                held++;
+            else if (state == THREAD_OUT &&
+                     (s->left_ns == 0 || t - s->left_ns > thread_allowance_ns(s)))
+                away++;
+            else
+                out++;
+        }
+        if (out == 0 || t >= deadline) {
+            printf("[NCCL PLUGIN] Hold: %d thread(s) parked in %.6f seconds, %d not expected "
+                   "back",
+                   held, (t - start) / 1e9, away);
+            if (out > 0) {
+                printf(", %d still out after NCCL_PLUGIN_HOLD_WAIT (tid", out);
+                for (i = 0; i < MAX_NCCL_THREADS; i++) {
+                    struct nccl_thread *s = &g_threads[i];
+                    if (__atomic_load_n(&s->used, __ATOMIC_ACQUIRE) == 1 &&
+                        __atomic_load_n(&s->state, __ATOMIC_ACQUIRE) != THREAD_PARKED)
+                        printf(" %d", (int)s->tid);
+                }
+                printf(")");
+            }
+            printf("\n");
+            fflush(stdout);
+            return;
+        }
+        usleep(HOLD_POLL_US);
+    }
+}
+
+/* After a resume or a restart: a thread that was out across the checkpoint
+ * waited for the rebuild too, so that stretch is not part of its pattern
+ * (thread_arrive() skips it), and until it next leaves NCCL it is not expected
+ * back. */
+void nccl_threads_resumed(void) {
+    int i;
+
+    for (i = 0; i < MAX_NCCL_THREADS; i++) {
+        struct nccl_thread *s = &g_threads[i];
+        if (__atomic_load_n(&s->used, __ATOMIC_ACQUIRE) == 1 &&
+            __atomic_load_n(&s->state, __ATOMIC_ACQUIRE) == THREAD_OUT)
+            s->left_ns = 0;
+    }
+}
+
 /*
  * Communicator creations this rank has entered and not finished -- blocking ones
  * while inside the call, grouped ones until ncclGroupEnd, non-blocking ones until
@@ -310,6 +549,7 @@ static ncclComm_t wait_real(vcomm_t *v) {
  * be mistaken for an idle process.
  */
 static ncclComm_t enter_nccl(vcomm_t *v, int bump_seq) {
+    thread_arrive();
     for (;;) {
         DMTCP_PLUGIN_DISABLE_CKPT();
         pthread_mutex_lock(&g_seq_lock);
@@ -317,9 +557,11 @@ static ncclComm_t enter_nccl(vcomm_t *v, int bump_seq) {
             if (bump_seq)
                 v->seq++;
             __atomic_add_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+            thread_in();
             pthread_mutex_unlock(&g_seq_lock);
             break;
         }
+        thread_parked();
         pthread_mutex_unlock(&g_seq_lock);
         /* Never park holding the DMTCP wrapper lock: the checkpoint thread
          * needs it exclusively to suspend threads. */
@@ -330,6 +572,7 @@ static ncclComm_t enter_nccl(vcomm_t *v, int bump_seq) {
 }
 
 static void leave_nccl(void) {
+    thread_out();
     __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
     DMTCP_PLUGIN_ENABLE_CKPT();
 }
@@ -342,15 +585,18 @@ static void leave_nccl(void) {
  * creation nobody has started yet happens after the checkpoint.
  */
 static void enter_create(void) {
+    thread_arrive();
     for (;;) {
         DMTCP_PLUGIN_DISABLE_CKPT();
         pthread_mutex_lock(&g_seq_lock);
         if (!nccl_gate_closed_locked()) {
             __atomic_add_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+            thread_in();
             g_creating++;
             pthread_mutex_unlock(&g_seq_lock);
             return;
         }
+        thread_parked();
         pthread_mutex_unlock(&g_seq_lock);
         DMTCP_PLUGIN_ENABLE_CKPT();
         usleep(GATE_POLL_US);
@@ -1426,13 +1672,17 @@ ncclResult_t ncclGroupStart(void) {
 
     REQUIRE_SYM(ncclGroupStart, ncclInternalError);
     if (t_group_depth == 0) {
+        thread_arrive();
         for (;;) {
             int passed = 0;
             DMTCP_PLUGIN_DISABLE_CKPT();
             pthread_mutex_lock(&g_seq_lock);
             if (!nccl_gate_closed_locked()) {
                 __atomic_add_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+                thread_in();
                 passed = 1;
+            } else {
+                thread_parked();
             }
             pthread_mutex_unlock(&g_seq_lock);
             if (passed)
@@ -1448,6 +1698,7 @@ ncclResult_t ncclGroupStart(void) {
         /* No region was opened, so hold nothing: a raised activity count with
          * no thread left to drop it stalls every later checkpoint. */
         if (took_gate) {
+            thread_out();
             __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
             DMTCP_PLUGIN_ENABLE_CKPT();
         }
@@ -1460,6 +1711,7 @@ ncclResult_t ncclGroupStart(void) {
 /* Shared by every way a region can close. */
 static void group_region_close(ncclResult_t ret) {
     finish_pending_creates(init_ok(ret));
+    thread_out();
     __atomic_sub_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
     DMTCP_PLUGIN_ENABLE_CKPT();
 }
