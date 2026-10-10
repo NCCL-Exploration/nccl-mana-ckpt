@@ -918,6 +918,11 @@ static void checkpoint(void) {
 
     teardown_all_comms();
 
+    /* DMTCP's CUDA plugin locks and checkpoints the GPU as soon as this
+     * handler returns, and a CUDA call from another thread meanwhile breaks
+     * the context: park the threads that call NCCL first. */
+    nccl_hold_threads();
+
     gettimeofday(&end, NULL);
     elapsed = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
     /* Parsed by tests/nas-benchmarks/IS/run_perlmutter_ckpt.sh -- keep the
@@ -1206,6 +1211,7 @@ static void rebuild_all_comms(void) {
 /* ── DMTCP events ─────────────────────────────────────────────────── */
 
 static void resume(void) {
+    nccl_threads_resumed();
     ckpt_pending = 0;
     vcomm_reset_seq();
     /*
@@ -1222,6 +1228,7 @@ static void resume(void) {
 
 static void restart(void) {
     int i;
+    nccl_threads_resumed();
     ckpt_pending = 0;
     g_num_streams = 0;
     /* Drop the dlsym results and re-resolve them immediately, here on the
