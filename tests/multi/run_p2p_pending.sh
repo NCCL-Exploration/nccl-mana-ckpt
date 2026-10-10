@@ -24,9 +24,11 @@
 # $SCRATCH/nccl-ckpt-report/p2p-pending-<job>/ (summary.txt, runs/).
 #
 # NCCL_PLUGIN_P2P_WAIT=5 (shorter than the 20 s window) tests the fallback
-# instead; expect drained > 0 there, so read the logs rather than the verdict:
-# send-first passes (the drained message is replayed), recv-first completes
-# the checkpoint and its receiver gets zeros, with a WARNING.
+# instead; read the logs rather than the verdict there: send-first passes, its
+# message drained and replayed; recv-first aborts every rank with an ERROR
+# naming the receive that was never matched, or, with
+# NCCL_PLUGIN_P2P_ZERO_FILL=1, completes the checkpoint and its receiver gets
+# zeros, with a WARNING.
 #
 # DMTCP_PLUGINS=<libncclplugin.so>:<libdmtcp_cuda.so> runs the plugin modes
 # with another build of the plugin (absolute paths), e.g. the previous one, to
