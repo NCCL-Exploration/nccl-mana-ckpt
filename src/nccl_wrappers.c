@@ -244,14 +244,31 @@ int nccl_activity(void) {
     return __atomic_load_n(&g_nccl_activity, __ATOMIC_SEQ_CST);
 }
 
+/*
+ * Communicator creations this rank has entered and not finished -- blocking ones
+ * while inside the call, grouped ones until ncclGroupEnd, non-blocking ones until
+ * ncclCommGetAsyncError stops reporting ncclInProgress -- and whether any rank
+ * had one in flight at the last consensus round (set by sequence_consensus()).
+ * Both under g_seq_lock.
+ */
+static int g_creating;
+int g_creation_pending;
+
 int nccl_gate_closed_locked(void) {
     int i;
     int live = 0;
     if (!ckpt_pending)
         return 0;
+    /* A creation by uniqueId is under way somewhere. A uniqueId names no
+     * members, so nobody knows which ranks still have to join: everyone runs
+     * until it completes. Holding a member here would leave the others blocked
+     * in the rendezvous. */
+    if (g_creation_pending)
+        return 0;
     for (i = 0; i < MAX_VCOMMS; i++) {
         vcomm_t *v = &g_vcomms[i];
-        if (v->origin == VCOMM_FREE)
+        /* A tombstone is never behind: destroy is the last step on its comm. */
+        if (v->origin == VCOMM_FREE || v->origin == VCOMM_DESTROYED)
             continue;
         live++;
         /* target < 0 means "no consensus yet", which counts as at-target: the
@@ -318,6 +335,87 @@ static void leave_nccl(void) {
 }
 
 /*
+ * Pass the gate for a creation by uniqueId: enter_nccl() without a comm, and
+ * the creation is counted (g_creating) from here until it completes. During a
+ * checkpoint it is held unless some creation is already in flight -- possibly
+ * this one, which other members have entered -- or this rank is behind; a
+ * creation nobody has started yet happens after the checkpoint.
+ */
+static void enter_create(void) {
+    for (;;) {
+        DMTCP_PLUGIN_DISABLE_CKPT();
+        pthread_mutex_lock(&g_seq_lock);
+        if (!nccl_gate_closed_locked()) {
+            __atomic_add_fetch(&g_nccl_activity, 1, __ATOMIC_SEQ_CST);
+            g_creating++;
+            pthread_mutex_unlock(&g_seq_lock);
+            return;
+        }
+        pthread_mutex_unlock(&g_seq_lock);
+        DMTCP_PLUGIN_ENABLE_CKPT();
+        usleep(GATE_POLL_US);
+    }
+}
+
+/* One counted creation is over: it completed or failed. */
+static void creation_done(void) {
+    pthread_mutex_lock(&g_seq_lock);
+    g_creating--;
+    pthread_mutex_unlock(&g_seq_lock);
+}
+
+/*
+ * A counted creation returned. A non-blocking comm may still be in progress;
+ * then it stays counted, through v->creating, until nccl_creating_poll() or the
+ * application's ncclCommGetAsyncError sees it finish.
+ */
+static void creation_settle(vcomm_t *v) {
+    ncclResult_t state = ncclSuccess;
+    LOAD_SYM(ncclCommGetAsyncError);
+    pthread_mutex_lock(&g_seq_lock);
+    if (v->real != NULL && real_ncclCommGetAsyncError != NULL &&
+        real_ncclCommGetAsyncError(v->real, &state) == ncclSuccess && state == ncclInProgress)
+        v->creating = 1;
+    else
+        g_creating--;
+    pthread_mutex_unlock(&g_seq_lock);
+}
+
+/* Caller holds g_seq_lock. */
+static void creation_check_locked(vcomm_t *v) {
+    ncclResult_t state = ncclSuccess;
+    if (!v->creating)
+        return;
+    LOAD_SYM(ncclCommGetAsyncError);
+    if (v->real == NULL || real_ncclCommGetAsyncError == NULL ||
+        real_ncclCommGetAsyncError(v->real, &state) != ncclSuccess || state != ncclInProgress) {
+        v->creating = 0;
+        g_creating--;
+    }
+}
+
+int nccl_creating_poll(void) {
+    int i, n;
+    pthread_mutex_lock(&g_seq_lock);
+    for (i = 0; i < MAX_VCOMMS; i++)
+        if (g_vcomms[i].origin == VCOMM_REMOTE)
+            creation_check_locked(&g_vcomms[i]);
+    n = g_creating;
+    pthread_mutex_unlock(&g_seq_lock);
+    return n;
+}
+
+/* A comm is going away: it no longer counts as a creation in flight. */
+static void creation_forget(vcomm_t *v) {
+    pthread_mutex_lock(&g_seq_lock);
+    if (v->creating) {
+        v->creating = 0;
+        g_creating--;
+    }
+    pthread_mutex_unlock(&g_seq_lock);
+}
+
+/*
  * Inside an open group region the enclosing ncclGroupStart already holds the
  * gate, the activity count and the wrapper lock, so an individual op must not
  * take them again -- and must never park, since peers are waiting for the batch
@@ -360,6 +458,9 @@ static void pending_create_add(vcomm_t *v, int query_ranks) {
     t_pending[t_npending].index = vcomm_index(v);
     t_pending[t_npending].query_ranks = query_ranks;
     t_npending++;
+    pthread_mutex_lock(&g_seq_lock);
+    g_creating++; /* until the region closes */
+    pthread_mutex_unlock(&g_seq_lock);
 }
 
 static void finish_pending_creates(int ok) {
@@ -374,6 +475,7 @@ static void finish_pending_creates(int ok) {
              * for rebuild, blocking every peer in ncclCommInitRank. */
             v->real = NULL;
             vcomm_free(v);
+            creation_done();
             continue;
         }
 
@@ -390,12 +492,14 @@ static void finish_pending_creates(int ok) {
                 fflush(stderr);
                 v->real = NULL;
                 vcomm_free(v);
+                creation_done();
                 continue;
             }
             record_comm_ranks(v, nranks, rank);
         }
         record_comm_device(v, real);
         init_rank_info(v);
+        creation_settle(v);
     }
     t_npending = 0;
 }
@@ -559,6 +663,25 @@ static void registry_fatal(vcomm_status_t st, const char *fn) {
     abort();
 }
 
+/* vcomm_new() or die, reporting a tombstone it had to reclaim. */
+static vcomm_t *new_slot(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_LEN],
+                         const char *fn) {
+    int reclaimed = vcomm_tombstones_reclaimed;
+    vcomm_t *v = NULL;
+    vcomm_status_t st = vcomm_new(origin, ident, &v);
+    if (st != VCOMM_OK)
+        registry_fatal(st, fn);
+    if (vcomm_tombstones_reclaimed != reclaimed) {
+        fprintf(stderr,
+                "[NCCL PLUGIN] %s: communicator registry full (MAX_VCOMMS=%d); reclaimed the\n"
+                "              oldest destroyed communicator before a checkpoint confirmed that\n"
+                "              every member destroyed it.\n",
+                fn, MAX_VCOMMS);
+        fflush(stderr);
+    }
+    return v;
+}
+
 /*
  * With ncclConfig_t.blocking = 0, creation succeeds by returning ncclInProgress
  * and the caller polls ncclCommGetAsyncError. The old `!= ncclSuccess` test read
@@ -575,12 +698,18 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
     uint8_t ident[VCOMM_IDENT_LEN];
     ncclComm_t real = NULL; /* R1: the real handle stays in a local */
     vcomm_t *v = NULL;
-    vcomm_status_t st;
     ncclResult_t res;
 
     int grouped = in_group_region();
 
-    DMTCP_PLUGIN_DISABLE_CKPT();
+    /* A creation is collective over members nobody else can name, so it is
+     * counted until it completes (see enter_create). Inside a group region the
+     * enclosing ncclGroupStart already holds the gate; it is counted from
+     * pending_create_add to ncclGroupEnd instead. */
+    if (grouped)
+        DMTCP_PLUGIN_DISABLE_CKPT();
+    else
+        enter_create();
 
     /* The uniqueId is already a universal name for this communicator: every
      * member passed byte-identical bytes. Digest it to a fixed width and
@@ -591,9 +720,7 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
     if (grouped) {
         /* The handle is written at ncclGroupEnd, so the slot must exist first
          * and be the destination. */
-        st = vcomm_new(VCOMM_REMOTE, ident, &v);
-        if (st != VCOMM_OK)
-            registry_fatal(st, fn);
+        v = new_slot(VCOMM_REMOTE, ident, fn);
         record_comm_ranks(v, nranks, rank);
         record_comm_device(v, NULL);
         vcomm_store_config(v, config);
@@ -610,18 +737,21 @@ static ncclResult_t init_rank_common(ncclComm_t *comm, int nranks, ncclUniqueId 
     } else {
         res = call_real_ncclCommInitRankConfig(&real, nranks, commId, rank, config);
         if (!init_ok(res) || real == NULL) {
-            DMTCP_PLUGIN_ENABLE_CKPT();
+            creation_done();
+            leave_nccl();
             return res;
         }
-        st = vcomm_new(VCOMM_REMOTE, ident, &v);
-        if (st != VCOMM_OK)
-            registry_fatal(st, fn);
+        v = new_slot(VCOMM_REMOTE, ident, fn);
         record_comm(v, real, nranks, rank, config);
         init_rank_info(v);
+        creation_settle(v);
     }
     *comm = vcomm_handle(v); /* R1 */
 
-    DMTCP_PLUGIN_ENABLE_CKPT();
+    if (grouped)
+        DMTCP_PLUGIN_ENABLE_CKPT();
+    else
+        leave_nccl();
     return res;
 }
 
@@ -675,13 +805,10 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
     clique = g_next_clique++;
     for (i = 0; i < ndev; i++) {
         uint8_t ident[VCOMM_IDENT_LEN];
-        vcomm_status_t st;
         /* Process-local and never published, so this identity only needs local
          * uniqueness plus stability across restart. */
         vcomm_ident_local(clique, i, ident);
-        st = vcomm_new(VCOMM_LOCAL_CLIQUE, ident, &entries[i]);
-        if (st != VCOMM_OK)
-            registry_fatal(st, "ncclCommInitAll");
+        entries[i] = new_slot(VCOMM_LOCAL_CLIQUE, ident, "ncclCommInitAll");
         entries[i]->clique = clique;
         record_comm(entries[i], real[i], ndev, i, NULL);
         comm[i] = vcomm_handle(entries[i]); /* R1 */
@@ -702,6 +829,10 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
  * them the same identity. ncclCommSplit is collective on the parent, so every
  * member counts the same index -- which is why nsplits is advanced even for a
  * NCCL_SPLIT_NOCOLOR caller that gets no child back.
+ *
+ * For the same reason it is a step on the parent's sequence, like any
+ * collective: a member that has not reached the split is behind on the parent,
+ * so the gate lets it through to the split its peers are blocked in.
  */
 ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm,
                            ncclConfig_t *config) {
@@ -710,7 +841,6 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     ncclComm_t real = NULL;
     ncclComm_t parent_real;
     vcomm_t *v = NULL;
-    vcomm_status_t st;
     ncclResult_t res;
     int split_index;
     int grouped;
@@ -726,11 +856,13 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
      * and the wrapper lock. Taking them again could park a thread inside an open
      * batch its peers are waiting to see closed. */
     grouped = in_group_region();
-    parent_real = grouped ? wait_real(parent) : enter_nccl(parent, 0);
+    parent_real = grouped ? wait_real(parent) : enter_nccl(parent, 1);
 
     /* Take the index before the call, so all members agree even if some get
      * NULL back. */
     pthread_mutex_lock(&g_seq_lock);
+    if (grouped)
+        parent->seq++; /* enter_nccl() counted it on the ungrouped path */
     split_index = parent->nsplits++;
     pthread_mutex_unlock(&g_seq_lock);
 
@@ -740,9 +872,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
         /* As in init_rank_common. rank and size cannot be read off the child
          * until the region closes either, so they are deferred rather than
          * recorded as the 0/0 that used to fail the rebuild. */
-        st = vcomm_new(VCOMM_REMOTE, ident, &v);
-        if (st != VCOMM_OK)
-            registry_fatal(st, "ncclCommSplit");
+        v = new_slot(VCOMM_REMOTE, ident, "ncclCommSplit");
         record_comm_device(v, NULL);
         vcomm_store_config(v, config ? config : vcomm_config(parent));
 
@@ -776,9 +906,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
         return res;
     }
 
-    st = vcomm_new(VCOMM_REMOTE, ident, &v);
-    if (st != VCOMM_OK)
-        registry_fatal(st, "ncclCommSplit");
+    v = new_slot(VCOMM_REMOTE, ident, "ncclCommSplit");
 
     LOAD_SYM(ncclCommCount);
     LOAD_SYM(ncclCommUserRank);
@@ -799,6 +927,15 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
      * rather than defaulting -- otherwise a restart silently changes behaviour. */
     record_comm(v, real, nranks, rank, config ? config : vcomm_config(parent));
 
+    /* A non-blocking child may still be in progress: count it until it is done,
+     * so the checkpoint does not tear down a half-created communicator. */
+    if (res == ncclInProgress) {
+        pthread_mutex_lock(&g_seq_lock);
+        g_creating++;
+        pthread_mutex_unlock(&g_seq_lock);
+        creation_settle(v);
+    }
+
     if (newcomm != NULL)
         *newcomm = vcomm_handle(v); /* R1 */
 
@@ -809,41 +946,78 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
 /* ── comm teardown ────────────────────────────────────────────────── */
 
 /*
- * Application-facing destroy. Distinct from the checkpoint teardown, which uses
- * call_real_ncclCommDestroy: this one also releases the registry slot, which at
- * checkpoint time would throw away the metadata needed to rebuild.
+ * Application-facing finalize and destroy. Distinct from the checkpoint
+ * teardown, which uses call_real_ncclCommDestroy: these end the communicator for
+ * good.
+ *
+ * Ending a communicator is collective too: a checkpoint must not find it alive
+ * on some members and gone on others, or the survivors tear it down and then
+ * block forever rebuilding it with peers that will never join. So the first of
+ * finalize/destroy is a step on the comm's sequence, gated like a collective,
+ * and destroy leaves a tombstone that keeps publishing the final sequence: a
+ * member that still holds the comm is then behind and catches up to its own
+ * destroy. Destroy after finalize is gated but not counted again.
  *
  * The previous version ignored its argument entirely and always destroyed the
  * one global comm, so destroying three communicators destroyed the first one
  * once and leaked the other two.
  */
+static ncclComm_t enter_teardown_step(vcomm_t *v, int *grouped) {
+    ncclComm_t real;
+    int count = !v->finalized;
+    *grouped = in_group_region();
+    if (!*grouped)
+        return enter_nccl(v, count);
+    real = wait_real(v);
+    if (count) {
+        pthread_mutex_lock(&g_seq_lock);
+        v->seq++;
+        pthread_mutex_unlock(&g_seq_lock);
+    }
+    return real;
+}
+
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     vcomm_t *v = vcomm_lookup(comm);
     ncclComm_t real;
     ncclResult_t res;
+    int grouped;
 
     REQUIRE_SYM(ncclCommDestroy, ncclInternalError);
     if (v == NULL) /* R2 */
         return real_ncclCommDestroy(comm);
 
-    real = v->real;
+    real = enter_teardown_step(v, &grouped);
     v->real = NULL;
-    res = (real != NULL) ? real_ncclCommDestroy(real) : ncclSuccess;
-    vcomm_free(v);
+    res = real_ncclCommDestroy(real);
+    creation_forget(v);
+    vcomm_mark_destroyed(v);
+    if (!grouped)
+        leave_nccl();
     return res;
 }
 
 ncclResult_t ncclCommFinalize(ncclComm_t comm) {
     vcomm_t *v = vcomm_lookup(comm);
+    ncclComm_t real;
+    ncclResult_t res;
+    int grouped;
+
     LOAD_SYM(ncclCommFinalize);
     if (real_ncclCommFinalize == NULL)
         return ncclSuccess;
     if (v == NULL) /* R2 */
         return real_ncclCommFinalize(comm);
     /* Leave the slot in place: ncclCommDestroy still has to run after this. */
-    return real_ncclCommFinalize(wait_real(v));
+    real = enter_teardown_step(v, &grouped);
+    v->finalized = 1;
+    res = real_ncclCommFinalize(real);
+    if (!grouped)
+        leave_nccl();
+    return res;
 }
 
+/* Error handling: never held at the gate, and not a clock step. */
 ncclResult_t ncclCommAbort(ncclComm_t comm) {
     vcomm_t *v = vcomm_lookup(comm);
     ncclComm_t real;
@@ -858,7 +1032,8 @@ ncclResult_t ncclCommAbort(ncclComm_t comm) {
     real = v->real;
     v->real = NULL;
     res = (real != NULL) ? real_ncclCommAbort(real) : ncclSuccess;
-    vcomm_free(v);
+    creation_forget(v);
+    vcomm_mark_destroyed(v);
     return res;
 }
 
@@ -919,6 +1094,11 @@ ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
         if (asyncError != NULL)
             *asyncError = ncclSuccess;
         return ncclSuccess;
+    }
+    if (v->creating) {
+        pthread_mutex_lock(&g_seq_lock);
+        creation_check_locked(v);
+        pthread_mutex_unlock(&g_seq_lock);
     }
     return real_ncclCommGetAsyncError(v->real, asyncError);
 }

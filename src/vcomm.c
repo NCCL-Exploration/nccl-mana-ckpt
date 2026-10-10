@@ -11,6 +11,7 @@
 #include <string.h>
 
 vcomm_t g_vcomms[MAX_VCOMMS];
+int vcomm_tombstones_reclaimed;
 
 /*
  * Guards slot allocation and release only -- never held across a blocking NCCL
@@ -56,7 +57,21 @@ vcomm_status_t vcomm_new(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_
         goto done;
     }
 
-    for (i = 0; i < MAX_VCOMMS; i++) {
+    for (i = 0; i < MAX_VCOMMS + 1; i++) {
+        if (i == MAX_VCOMMS) {
+            /* Full. Reclaim the oldest tombstone: its members very likely all
+             * destroyed it long ago, but no checkpoint has confirmed it. */
+            int oldest = -1, j;
+            for (j = 0; j < MAX_VCOMMS; j++)
+                if (g_vcomms[j].origin == VCOMM_DESTROYED &&
+                    (oldest < 0 || g_vcomms[j].destroy_order < g_vcomms[oldest].destroy_order))
+                    oldest = j;
+            if (oldest < 0)
+                break;
+            vcomm_tombstones_reclaimed++; /* the caller reports it */
+            g_vcomms[oldest].origin = VCOMM_FREE;
+            i = oldest;
+        }
         if (g_vcomms[i].origin == VCOMM_FREE) {
             vcomm_t *v = &g_vcomms[i];
             memset(v, 0, sizeof(*v));
@@ -89,10 +104,31 @@ void vcomm_free(vcomm_t *v) {
 int vcomm_live_count(void) {
     int i, n = 0;
     for (i = 0; i < MAX_VCOMMS; i++) {
-        if (g_vcomms[i].origin != VCOMM_FREE)
+        if (g_vcomms[i].origin != VCOMM_FREE && g_vcomms[i].origin != VCOMM_DESTROYED)
             n++;
     }
     return n;
+}
+
+void vcomm_mark_destroyed(vcomm_t *v) {
+    static uint64_t destroys;
+    if (v->origin != VCOMM_REMOTE) {
+        vcomm_free(v);
+        return;
+    }
+    pthread_mutex_lock(&g_alloc_lock);
+    v->real = NULL;
+    v->creating = 0;
+    v->destroy_order = ++destroys;
+    v->origin = VCOMM_DESTROYED;
+    pthread_mutex_unlock(&g_alloc_lock);
+}
+
+void vcomm_free_tombstones(void) {
+    int i;
+    for (i = 0; i < MAX_VCOMMS; i++)
+        if (g_vcomms[i].origin == VCOMM_DESTROYED)
+            vcomm_free(&g_vcomms[i]);
 }
 
 int vcomm_order(int order[MAX_VCOMMS]) {
