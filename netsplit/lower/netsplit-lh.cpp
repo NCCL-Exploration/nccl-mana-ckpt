@@ -88,6 +88,7 @@
 // Lower half initialization helper functions
 void set_addr_no_randomize(char *argv[]);
 static void reserve_restart_fds();
+static void release_restart_fds();
 void create_heap_guard_page();
 void initialize_lh_info();
 void write_lh_info_addr(int restore_mode);
@@ -243,6 +244,9 @@ int main(int argc, char *argv[], char *envp[]) {
     create_heap_guard_page();
     /* Everything restored, close file and finish up */
     close(t->fd());
+    // The checkpoint-time fd numbers are free again for DMTCP's restore and
+    // for the CUDA plugin's pipes (reserve_restart_fds()).
+    release_restart_fds();
 
     PostRestartFnPtr_t postRestart = (PostRestartFnPtr_t) ckpt_hdr.postRestartAddr;
     postRestart(0, 0);
@@ -323,11 +327,23 @@ int main(int argc, char *argv[], char *envp[]) {
   }
 }
 
-// At restart, DMTCP dup2()s the upper half's fds onto their checkpointed
-// numbers after the restore, which closes any fd of this lower half at those
-// numbers.  A placeholder keeps each of those numbers (NETSPLIT_RESERVED_FDS,
-// set by nccl_restart) free of this lower half's fds; the upper half closes
-// the placeholders left over.
+// The fd numbers the upper half had open at its checkpoint
+// (NETSPLIT_RESERVED_FDS, from header.netsplit via nccl_restart) must be free
+// when the upper half's restart begins, as they are under dmtcp_restart:
+//  - DMTCP dup2()s the restored fds onto their numbers, which would close an
+//    fd of this lower half sitting there;
+//  - DMTCP does not restore the CUDA driver's pipes; DMTCP's CUDA plugin
+//    re-creates them at DMTCP_EVENT_RESTART, but skips a number that is
+//    already open.  The driver's checkpoint API talks to its service thread
+//    over those pipes, so cuCheckpointProcessRestore() then fails (CUresult
+//    304).  The fd that took the number was a socket that glibc's SSSD client
+//    opens when a user lookup misses its cache: Util::calcTmpDir() calls
+//    getpwuid(), and unlike dmtcp_restart, this program never exec()s, so
+//    the socket stays open.  It lands on the lowest free number, usually a
+//    CUDA pipe's.
+// So a placeholder holds each of those numbers while this lower half starts
+// and opens fds of its own, and release_restart_fds() closes the placeholders
+// just before the upper half's restart (postRestart).
 static void reserve_restart_fds() {
   const char *list = getenv("NETSPLIT_RESERVED_FDS");
   if (list == NULL || *list == '\0') {
@@ -397,6 +413,28 @@ static void reserve_restart_fds() {
       dup2(placeholder, fd);
     }
   }
+}
+
+// Closes the placeholders of reserve_restart_fds(): every fd that refers to
+// the placeholder memfd.  Called just before the upper half's restart, after
+// this lower half has opened every fd it keeps.
+static void release_restart_fds() {
+  if (lh_info->reserved_fd_ino == 0) {
+    return;
+  }
+  struct rlimit rl;
+  int max = 4096;
+  if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
+    max = (int)rl.rlim_cur;
+  }
+  for (int fd = 3; fd < max; fd++) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_dev == lh_info->reserved_fd_dev &&
+        st.st_ino == lh_info->reserved_fd_ino) {
+      close(fd);
+    }
+  }
+  lh_info->reserved_fd_ino = 0;
 }
 
 /**

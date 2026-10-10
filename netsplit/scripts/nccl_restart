@@ -52,11 +52,22 @@ def main():
     if any(f.endswith(".tmp") for f in os.listdir(rank_dir)):
         sys.exit("nccl_restart: %s has .tmp files: the checkpoint may be incomplete" % rank_dir)
 
-    # No NETSPLIT_RESERVED_FDS (header.netsplit's fds): the new lower half
-    # opens no fd before the restore (the back end loads at NCCL's rebuild),
-    # and placeholders kept on those numbers until DMTCP_EVENT_RUNNING made
-    # cuCheckpointProcessRestore() fail (CUresult 5) in the CUDA plugin's
-    # RUNNING_AFTER.  Set it by hand only to debug fd collisions.
+    # The fds the rank had open at its checkpoint (header.netsplit): the new
+    # lower half keeps their numbers free while it starts, and frees them just
+    # before the upper half's restart (netsplit-lh.cpp, reserve_restart_fds()).
+    # Without that, a socket the lower half's user lookup leaves open can take
+    # a CUDA driver pipe's number, and cuCheckpointProcessRestore() fails
+    # (CUresult 304).  Placeholders kept until DMTCP_EVENT_RUNNING made it fail
+    # too (CUresult 5): they must be gone before the CUDA plugin re-creates
+    # its pipes.  An explicit NETSPLIT_RESERVED_FDS (even empty) wins.
+    if "NETSPLIT_RESERVED_FDS" not in os.environ:
+        try:
+            with open(os.path.join(rank_dir, "header.netsplit")) as f:
+                for line in f:
+                    if line.startswith("fds="):
+                        os.environ["NETSPLIT_RESERVED_FDS"] = line[4:].strip()
+        except OSError:
+            pass
     os.environ.setdefault("DMTCP_DISABLE_PRGNAME_PREFIX", "1")
 
     cmd = [os.path.join(NETSPLIT, "bin", "netsplit-lh"), "-j", "--restore"]

@@ -16,12 +16,16 @@
  *  - The proxy's checks and its new epoch at restart.
  *
  * Plugin order: --with-plugin libnccl-net-netsplit.so:libncclplugin.so:
- * libdmtcp_cuda.so.  Forward events (PRESUSPEND, PRECHECKPOINT, RESTART) run
- * in that order: this plugin stops locking in mmap() before the NCCL plugin
- * tears communicators down, and switches to the new lower half before the
- * NCCL plugin's restart.  RUNNING_AFTER runs in reverse: CUDA's restore, then
- * the NCCL rebuild, which reaches the new back end through the proxy.
+ * libdmtcp_cuda.so.  PRESUSPEND, PRECHECKPOINT and RUNNING run in that order:
+ * this plugin stops locking in mmap() before the NCCL plugin tears
+ * communicators down.  RESTART and RUNNING_AFTER run in reverse
+ * (dmtcp/src/pluginmanager.cpp): the CUDA plugin's RESTART (it re-creates the
+ * CUDA driver's pipes) comes before this plugin switches to the new lower
+ * half; in RUNNING_AFTER, CUDA's restore, then the NCCL rebuild, which
+ * reaches the new back end through the proxy.  At a restart, RUNNING_AFTER
+ * comes before RUNNING (dmtcpworker.cpp).
  */
+#include <dirent.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -32,6 +36,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -55,6 +60,8 @@ static char *saved_uh_stack_start, *saved_uh_stack_end;
 /* 1 from PRESUSPEND until the process runs again: mmap() then takes no
  * DMTCP lock (the checkpoint thread calls it, e.g. in NCCL's teardown). */
 static volatile int g_in_ckpt = 0;
+/* Set at DMTCP_EVENT_RESTART, for the fd dump at the next RUNNING. */
+static int g_restarted = 0;
 
 /* ---- lh_info ---------------------------------------------------------------- */
 
@@ -283,7 +290,10 @@ static void update_ckpt_dir_by_rank(void) {
 }
 
 /* The fd numbers open at checkpoint: nccl_restart passes them to the new
- * lower half (NETSPLIT_RESERVED_FDS), which keeps them free for DMTCP. */
+ * lower half (NETSPLIT_RESERVED_FDS), which keeps them free of its own fds
+ * while it starts and frees them before this half's restart, for DMTCP's
+ * restore and the CUDA plugin's pipes (netsplit-lh.cpp,
+ * reserve_restart_fds()). */
 static void save_header(void) {
     const char *dir = dmtcp_get_ckpt_dir();
     struct stat st;
@@ -334,6 +344,74 @@ static void save_maps(const char *tag) {
         close(out);
 }
 
+/* NETSPLIT_SAVE_FDS=1: write the process's fd table (number, what it refers
+ * to, flags), its virtual and real pids, and its threads (name, state) to
+ * <ckpt dir>/fds.<tag>. The CUDA checkpoint API reaches the driver's service
+ * thread through pipes the driver opened; DMTCP's CUDA plugin re-creates
+ * them at DMTCP_EVENT_RESTART, but skips a number that is already open.
+ * RESTART runs in reverse plugin order, so this plugin's RESTART hook sees
+ * the table right after the CUDA plugin's, before the restore in
+ * RUNNING_AFTER: compare it with the checkpoint's when
+ * cuCheckpointProcessRestore() fails. */
+static void save_fds(const char *tag) {
+    const char *e = getenv("NETSPLIT_SAVE_FDS");
+    if (e == NULL || strcmp(e, "1") != 0)
+        return;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/fds.%s", dmtcp_get_ckpt_dir(), tag);
+    FILE *out = fopen(path, "w");
+    if (out == NULL)
+        return;
+    /* syscall(SYS_getpid) is virtualized too; DMTCP's own call is not. */
+    long real = dmtcp_get_real_pid ? (long)dmtcp_get_real_pid() : -1;
+    char lastpid[64] = "?";
+    FILE *la = fopen("/proc/loadavg", "r");
+    if (la != NULL) {
+        char l1[16], l2[16], l3[16], run[32];
+        if (fscanf(la, "%15s %15s %15s %31s %63s", l1, l2, l3, run, lastpid) != 5)
+            strcpy(lastpid, "?");
+        fclose(la);
+    }
+    fprintf(out, "pid virtual=%d real=%ld node_last_pid=%s\n", getpid(), real, lastpid);
+    for (int fd : jalib::Filesystem::ListOpenFds()) {
+        char link[64], target[4096];
+        snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+        ssize_t n = readlink(link, target, sizeof(target) - 1);
+        target[n < 0 ? 0 : n] = '\0';
+        fprintf(out, "fd %d %s fl=0x%x fd_fl=0x%x\n", fd, target, fcntl(fd, F_GETFL),
+                fcntl(fd, F_GETFD));
+    }
+    DIR *d = opendir("/proc/self/task");
+    struct dirent *de;
+    while (d != NULL && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.')
+            continue;
+        char f[512], comm[64] = "", stat[512] = "";
+        snprintf(f, sizeof(f), "/proc/self/task/%s/comm", de->d_name);
+        FILE *c = fopen(f, "r");
+        if (c != NULL) {
+            if (fgets(comm, sizeof(comm), c) == NULL)
+                comm[0] = '\0';
+            fclose(c);
+        }
+        comm[strcspn(comm, "\n")] = '\0';
+        snprintf(f, sizeof(f), "/proc/self/task/%s/stat", de->d_name);
+        c = fopen(f, "r");
+        if (c != NULL) {
+            if (fgets(stat, sizeof(stat), c) == NULL)
+                stat[0] = '\0';
+            fclose(c);
+        }
+        /* The state is the field after the parenthesized name. */
+        const char *st = strrchr(stat, ')');
+        fprintf(out, "task %s %s %c\n", de->d_name, comm, st != NULL && st[1] ? st[2] : '?');
+    }
+    if (d != NULL)
+        closedir(d);
+    fclose(out);
+}
+
+/* Normally a no-op: the lower half has already closed its placeholders. */
 static void close_reserved_fds(void) {
     if (lh_info == NULL || lh_info->reserved_fd_ino == 0)
         return;
@@ -510,6 +588,7 @@ static void netsplit_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data) {
         update_ckpt_dir_by_rank();
         save_header();
         save_maps("ckpt");
+        save_fds("ckpt");
         saved_uh_stack_start = lh_info->uh_stack_start;
         saved_uh_stack_end = lh_info->uh_stack_end;
         break;
@@ -518,6 +597,7 @@ static void netsplit_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data) {
         g_in_ckpt = 0;
         break;
     case DMTCP_EVENT_RESTART:
+        save_fds("restart");
         if (netsplit_lh_info_init(1) != 0) {
             fprintf(stderr, "[netsplit] restart: cannot find the new lower half\n");
             abort();
@@ -529,9 +609,15 @@ static void netsplit_event_hook(DmtcpEvent_t event, DmtcpEventData_t *data) {
         reset_nccl_host_state();
         save_maps("restart");
         g_in_ckpt = 0;
+        g_restarted = 1;
         break;
     case DMTCP_EVENT_RUNNING:
         close_reserved_fds();
+        /* After the GPU restore and the rebuild (RUNNING_AFTER comes first). */
+        if (g_restarted) {
+            save_fds("running");
+            g_restarted = 0;
+        }
         break;
     default:
         break;
