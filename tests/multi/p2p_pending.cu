@@ -53,6 +53,17 @@
  *               CUDA until that send arrives, catch up on the allreduce after.
  *               Needs 4 or more ranks.
  *
+ * Communicator lifecycle, which is collective too. In each, ranks 1..n-1 take
+ * the step right away and rank 0 only after the window; then everyone checks
+ * the new communicator with an allreduce (create, split) and destroys it:
+ *   create      ncclCommInitRank of a second communicator (its uniqueId goes
+ *               through ID_FILE.x before the window). Ranks 1..n-1 block in the
+ *               rendezvous until rank 0 joins.
+ *   split       ncclCommSplit of the world. Ranks 1..n-1 block in the split.
+ *   destroy     ncclCommDestroy of a communicator split off before the window.
+ *               A checkpoint must not find it alive on rank 0 and gone on the
+ *               others: rank 0 would rebuild it alone.
+ *
  * Every received buffer must hold its sender's values (element i of a message
  * from rank s is 1000 * (s + 1) + i). Then an ncclAllReduce checks that the
  * communicator (rebuilt, after a checkpoint) still works. Each rank prints
@@ -227,7 +238,8 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc < 3) {
         fprintf(stderr,
-                "usage: %s recv-first|recv-first-cold|send-first|chain|relay|multi ID_FILE"
+                "usage: %s recv-first|recv-first-cold|send-first|chain|relay|multi|create|split|"
+                "destroy ID_FILE"
                 " [WINDOW_S]\n",
                 argv[0]);
         return 2;
@@ -238,6 +250,8 @@ int main(int argc, char **argv) {
 
     g_rank = env_int("RANK", "SLURM_PROCID", 0);
     g_nranks = env_int("WORLD_SIZE", "SLURM_NTASKS", 1);
+    int lifecycle =
+        !strcmp(scenario, "create") || !strcmp(scenario, "split") || !strcmp(scenario, "destroy");
     {
         int need = !strcmp(scenario, "multi")                                     ? 4
                    : (!strcmp(scenario, "chain") || !strcmp(scenario, "relay")) ? 3
@@ -368,6 +382,35 @@ int main(int argc, char **argv) {
                 CUDA_CHECK(cudaStreamSynchronize(s));
             }
         }
+    } else if (lifecycle) {
+        ncclComm_t x = NULL;
+        ncclUniqueId xid;
+        if (!strcmp(scenario, "create")) {
+            char xpath[4096];
+            snprintf(xpath, sizeof(xpath), "%s.x", id_path);
+            bootstrap(xpath, &xid);
+        }
+        if (!strcmp(scenario, "destroy"))
+            NCCL_CHECK(ncclCommSplit(comm, 0, g_rank, &x, NULL));
+        in_window();
+        if (g_rank == 0)
+            sleep(window);
+        if (!strcmp(scenario, "create"))
+            NCCL_CHECK(ncclCommInitRank(&x, g_nranks, xid, g_rank));
+        else if (!strcmp(scenario, "split"))
+            NCCL_CHECK(ncclCommSplit(comm, 0, g_rank, &x, NULL));
+        if (strcmp(scenario, "destroy") != 0) {
+            int xr = 0, xn = 0;
+            NCCL_CHECK(ncclCommUserRank(x, &xr));
+            NCCL_CHECK(ncclCommCount(x, &xn));
+            if (!allreduce_check(x, xr, xn, s, red, "new communicator's allreduce"))
+                ok = 0;
+            else
+                printf("[p2p] rank %d: %s communicator ok\n", g_rank, scenario);
+        }
+        NCCL_CHECK(ncclCommDestroy(x));
+        if (!strcmp(scenario, "destroy"))
+            printf("[p2p] rank %d: destroyed the split communicator\n", g_rank);
     } else if (!strcmp(scenario, "multi")) {
         /* Sub-communicator ranks: rank 0 and rank 1 are 0 and 1 in theirs. */
         if (g_rank == 0) {

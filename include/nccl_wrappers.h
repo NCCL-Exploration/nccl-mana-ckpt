@@ -39,6 +39,13 @@ void nccl_seq_lock(void);
 void nccl_seq_unlock(void);
 int nccl_activity(void); /* threads inside a NCCL call or an open group region */
 
+/* Communicator creations this rank has entered and not finished; polls the
+ * non-blocking ones first. */
+int nccl_creating_poll(void);
+/* Some rank had a creation in flight at the last consensus round: the gate is
+ * open for everyone. Written by sequence_consensus() under the seq lock. */
+extern int g_creation_pending;
+
 /*
  * Resolve a real NCCL symbol when dlsym(RTLD_NEXT, ...) cannot see libnccl,
  * i.e. when the application reached it through an RTLD_LOCAL dlopen. Returns

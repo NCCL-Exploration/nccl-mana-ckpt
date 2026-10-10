@@ -211,6 +211,7 @@ layout_ok() {
     p2p_relay) [ "$nr" -eq 3 ] ;; # a 4th rank's allreduce would let rank 1 through anyway
     p2p_chain) [ "$nr" -ge 3 ] ;;
     p2p_multi) [ "$nr" -ge 4 ] ;;
+    p2p_create | p2p_split | p2p_destroy) [ "$nr" -ge 2 ] ;;
     is) [ $((nr & (nr - 1))) -eq 0 ] ;; # IS needs a power-of-two rank count
     *) return 0 ;;
     esac
