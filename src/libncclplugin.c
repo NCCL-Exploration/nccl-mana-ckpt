@@ -216,6 +216,15 @@ static void epoch_vote(void) {
  * rank whose catch-up blocks on a receive its peer cannot know about: the peer
  * learns of it only from this rank's next publication.
  *
+ * Communicator lifecycle is part of the cut too. ncclCommSplit and the first of
+ * ncclCommFinalize/ncclCommDestroy are steps on a comm's sequence, and a
+ * destroyed comm stays as a tombstone (VCOMM_DESTROYED) that keeps publishing
+ * its final sequence, so a peer still holding it catches up to its own destroy.
+ * A creation by uniqueId names no members, so each rank publishes how many
+ * creations it has in flight; while any rank has one, every gate is open
+ * (g_creation_pending) until it completes. Tombstones are freed once the
+ * consensus converges: by then every member has destroyed the comm.
+ *
  * Point-to-point catch-up gives up after NCCL_PLUGIN_P2P_WAIT seconds (default
  * P2P_WAIT_DEFAULT_S) of waiting; the drain then completes what is left, which
  * hands a pending receive zeros, and says so. Collective catch-up waits as long
@@ -366,8 +375,8 @@ static void sequence_consensus(void) {
     nccl_seq_unlock();
 
     for (round = 0;; round++) {
-        int settled, behind, p2p_owed;
-        int64_t unsettled, waiting, p2p_waiting;
+        int settled, behind, p2p_owed, creating;
+        int64_t unsettled, waiting, p2p_waiting, creations;
         struct timeval t0;
 
         /* 1. Adopt peers' targets. */
@@ -387,11 +396,12 @@ static void sequence_consensus(void) {
              * legitimate sequence of 0 is distinguishable from a missing key. */
             if (published > 0 && published - 1 > v->target)
                 v->target = published - 1;
-            if (g_p2p_chase)
+            if (g_p2p_chase && v->origin == VCOMM_REMOTE)
                 read_p2p_targets(v);
         }
         behind = behind_locked(order, n, &p2p_owed);
         nccl_seq_unlock();
+        creating = nccl_creating_poll();
         if (p2p_owed && !announced) {
             printf("[NCCL Plugin] rank %d: point-to-point operations of peers are waiting for"
                    " this rank; letting the application post their counterparts\n",
@@ -403,11 +413,12 @@ static void sequence_consensus(void) {
         /* 2. Let our own application threads catch up -- for one slice at most.
          *    The gate lets them through precisely while this rank is behind. */
         gettimeofday(&t0, NULL);
-        while ((behind || nccl_activity() != 0) && ms_since(&t0) < slice_ms) {
+        while ((behind || creating > 0 || nccl_activity() != 0) && ms_since(&t0) < slice_ms) {
             usleep(POLL_US);
             nccl_seq_lock();
             behind = behind_locked(order, n, &p2p_owed);
             nccl_seq_unlock();
+            creating = nccl_creating_poll();
         }
 
         /* 3. Publish, and decide "settled" under the same lock -- otherwise a
@@ -423,17 +434,21 @@ static void sequence_consensus(void) {
             dmtcp_kvdb_max(key, v->seq + 1);
             if (v->target < 0 || v->seq != v->target)
                 settled = 0;
-            if (g_p2p_chase) {
+            if (g_p2p_chase && v->origin == VCOMM_REMOTE) {
                 publish_p2p_blob(v);
                 if (!vcomm_p2p_balanced(v))
                     settled = 0;
             }
         }
-        /* A thread inside a call or an open group region can still post. */
+        /* A thread inside a call or an open group region can still post, and a
+         * creation in flight still has members to wait for. */
         if (nccl_activity() != 0)
             settled = 0;
         behind = behind_locked(order, n, &p2p_owed);
         nccl_seq_unlock();
+        creating = nccl_creating_poll();
+        if (creating > 0)
+            settled = 0;
 
         /* 4. Global vote. Reached unconditionally by every peer, including one
          *    holding no communicators at all, so the barrier always releases. */
@@ -443,6 +458,8 @@ static void sequence_consensus(void) {
         dmtcp_kvdb_incr(key, behind ? 1 : 0);
         key_round(key, round, "p2p");
         dmtcp_kvdb_incr(key, p2p_owed ? 1 : 0);
+        key_round(key, round, "creating");
+        dmtcp_kvdb_incr(key, creating);
         snprintf(barrier, sizeof(barrier), "nccl-mana/%u/round/%d", g_epoch, round);
         dmtcp_global_barrier(barrier);
 
@@ -452,6 +469,11 @@ static void sequence_consensus(void) {
         waiting = dmtcp_kvdb_get(key);
         key_round(key, round, "p2p");
         p2p_waiting = dmtcp_kvdb_get(key);
+        key_round(key, round, "creating");
+        creations = dmtcp_kvdb_get(key);
+        nccl_seq_lock();
+        g_creation_pending = creations > 0;
+        nccl_seq_unlock();
 
         if (unsettled == 0) {
             int64_t sent = 0, recvd = 0;
@@ -460,6 +482,8 @@ static void sequence_consensus(void) {
                 sent += p2p_total(g_vcomms[i].sent_to, VCOMM_MAX_RANKS) - g_p2p_start[i][0];
                 recvd += p2p_total(g_vcomms[i].recvd_from, VCOMM_MAX_RANKS) - g_p2p_start[i][1];
             }
+            /* Every member of each destroyed comm has destroyed it now. */
+            vcomm_free_tombstones();
             nccl_seq_unlock();
             printf("[NCCL Plugin] rank %d: sequence consensus converged in %d round(s)\n",
                    g_my_rank, round + 1);
@@ -471,8 +495,9 @@ static void sequence_consensus(void) {
             return;
         }
 
-        /* Every rank reads the same votes, so every decision below agrees. */
-        if (waiting > 0) {
+        /* Every rank reads the same votes, so every decision below agrees. A
+         * creation in flight is waiting for members, not a chase. */
+        if (waiting > 0 || creations > 0) {
             waited_ms += slice_ms;
             if (p2p_waiting > 0)
                 p2p_waited_ms += slice_ms;
@@ -722,9 +747,15 @@ static void teardown_all_comms(void) {
         /* Cleared first, so any application thread arriving at a wrapper blocks
          * in wait_real() instead of using a handle we are about to destroy. */
         v->real = NULL;
-        r = call_real_ncclCommFinalize(reals[k]);
-        if (r == ncclInProgress) /* non-blocking communicator */
-            r = wait_comm_ready(reals[k]);
+        if (v->finalized) {
+            /* The application finalized it already, and NCCL rejects a second
+             * finalize; only the destroy below is left. */
+            r = ncclSuccess;
+        } else {
+            r = call_real_ncclCommFinalize(reals[k]);
+            if (r == ncclInProgress) /* non-blocking communicator */
+                r = wait_comm_ready(reals[k]);
+        }
         if (r != ncclSuccess) {
             fprintf(stderr, "[NCCL PLUGIN] teardown: ncclCommFinalize failed: %s\n",
                     nccl_err_str(r));

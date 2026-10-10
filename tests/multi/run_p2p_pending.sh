@@ -12,7 +12,8 @@
 # CASES: "bench:mode:NNxGPN" separated by spaces (default: every scenario at
 # one node with the plugin, and recv-first, chain and relay across nodes with
 # netsplit, each with resume and restart). bench is p2p_recv_first,
-# p2p_recv_first_cold, p2p_send_first, p2p_chain, p2p_relay or p2p_multi (the scenarios
+# p2p_recv_first_cold, p2p_send_first, p2p_chain, p2p_relay, p2p_multi,
+# p2p_create, p2p_split or p2p_destroy (the scenarios
 # of tests/multi/p2p_pending.cu); mode is ckpt_resume, ckpt_restart
 # (single-process plugin) or ns_resume, ns_restart (netsplit).
 #
@@ -50,7 +51,9 @@ p2p_recv_first:ns_resume:2x1 p2p_recv_first:ns_restart:2x1
 p2p_recv_first_cold:ns_resume:2x1
 p2p_chain:ns_resume:3x1 p2p_chain:ns_restart:3x1
 p2p_relay:ns_resume:3x1 p2p_relay:ns_restart:3x1
-p2p_multi:ckpt_resume:1x4 p2p_multi:ns_restart:2x4}"
+p2p_multi:ckpt_resume:1x4 p2p_multi:ns_restart:2x4
+p2p_create:ckpt_resume:1x2 p2p_split:ckpt_restart:1x2 p2p_destroy:ckpt_resume:1x2
+p2p_create:ns_restart:2x4 p2p_split:ns_resume:2x4 p2p_destroy:ns_restart:2x4}"
 
 source "$REPORT/common.sh"
 use_job_nodes

@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define MAX_VCOMMS 16
+#define MAX_VCOMMS 64 /* live communicators plus tombstones (VCOMM_DESTROYED) */
 #define VCOMM_MAX_RANKS 64  /* max ranks in ONE communicator */
 #define VCOMM_IDENT_LEN 16  /* 128-bit identity */
 #define VCOMM_IDENT_HEX 33  /* 32 hex chars + NUL */
@@ -59,9 +59,16 @@ typedef enum {
                          * Covers InitRank, InitRankConfig and CommSplit alike:
                          * membership is implicit in the rendezvous, so no
                          * parent/color/key is needed to reconstruct.           */
-    VCOMM_LOCAL_CLIQUE  /* ncclCommInitAll -- N ranks inside THIS process, so it
+    VCOMM_LOCAL_CLIQUE, /* ncclCommInitAll -- N ranks inside THIS process, so it
                          * is rebuilt by one ncclCommInitAll call and needs no
                          * cross-process rendezvous at all.                     */
+    VCOMM_DESTROYED     /* tombstone of a VCOMM_REMOTE comm the application
+                         * finalized or destroyed. Destroy is a step on the
+                         * comm's clock: the tombstone keeps publishing its final
+                         * seq so a peer still holding the comm catches up to its
+                         * own destroy before a checkpoint. Never torn down or
+                         * rebuilt; freed once a checkpoint's consensus agrees,
+                         * which means every member destroyed it.               */
 } vcomm_origin_t;
 
 typedef enum {
@@ -97,9 +104,12 @@ typedef struct {
     char net_name[VCOMM_NAME_MAX];
     char comm_name[VCOMM_NAME_MAX];
 
-    /* --- collective checkpoint boundary --- */
+    /* --- collective checkpoint boundary. Finalize/destroy count as a step. --- */
     int64_t seq;
     int64_t target;
+    int finalized;         /* ncclCommFinalize already counted the teardown step */
+    int creating;          /* non-blocking creation not complete yet */
+    uint64_t destroy_order; /* when it became a tombstone, to reclaim the oldest */
 
     /* --- p2p drain accounting, indexed by peer rank IN THIS COMM'S rank space --- */
     int64_t sent_to[VCOMM_MAX_RANKS];
@@ -120,6 +130,9 @@ typedef struct {
 
 extern vcomm_t g_vcomms[MAX_VCOMMS];
 
+/* Tombstones vcomm_new() reclaimed because the registry was full. */
+extern int vcomm_tombstones_reclaimed;
+
 /*
  * Translate an application handle. Returns NULL when the handle is NOT one of
  * ours -- a real NCCL handle, or NULL -- and callers must then forward the
@@ -133,7 +146,8 @@ static inline vcomm_t *vcomm_lookup(ncclComm_t handle) {
     if ((u >> 32) != VCOMM_TAG)
         return NULL;
     i = (uint16_t)u;
-    if (i >= MAX_VCOMMS || g_vcomms[i].origin == VCOMM_FREE)
+    if (i >= MAX_VCOMMS || g_vcomms[i].origin == VCOMM_FREE ||
+        g_vcomms[i].origin == VCOMM_DESTROYED)
         return NULL;
     return &g_vcomms[i];
 }
@@ -147,7 +161,16 @@ vcomm_status_t vcomm_new(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_
 void vcomm_free(vcomm_t *v);
 
 vcomm_t *vcomm_find(const uint8_t ident[VCOMM_IDENT_LEN]);
+
+/* Communicators that exist (REMOTE and LOCAL_CLIQUE): tombstones excluded. */
 int vcomm_live_count(void);
+
+/* Turn a destroyed REMOTE comm into a tombstone (a LOCAL_CLIQUE entry, which has
+ * no peers to tell, is freed). real must already be NULL. */
+void vcomm_mark_destroyed(vcomm_t *v);
+
+/* Free every tombstone. Called when a checkpoint's consensus has agreed. */
+void vcomm_free_tombstones(void);
 
 /*
  * Fill order[] with the indices of live entries in ascending identity order and
