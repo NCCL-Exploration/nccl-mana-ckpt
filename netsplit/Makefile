@@ -11,6 +11,7 @@
 # bin/nccl_launch, nccl_restart   the launchers
 # bin/probe_v6, bin/gdr_ckpt      phase 0 probes
 # bin/gdr_probe, bin/gdr_pin      GDR after a CUDA checkpoint: NIC registration, GDRCopy pin
+# bin/ckpt_race                   a running thread vs. a CUDA checkpoint of its own process
 # lib/fi-shim/libcudart.so        libfabric's CUDA runtime without the device-wide sync
 
 NCCL_HOME ?= $(NCCL_DIR)
@@ -32,7 +33,7 @@ UH_FLAGS = -g -O2 -fPIC -fno-stack-protector $(WARN) -Iinclude -Iupper \
 FWD_LIBS = $(LIB)/libns_cuda_fwd.so $(LIB)/libns_cudart_fwd.so $(LIB)/libns_nvml_fwd.so
 
 default: $(LIB)/libnccl-net-netsplit.so $(LIB)/libnccl-net.so $(LIB)/libcudart_stub.so $(FWD_LIBS) \
-         lower scripts $(BIN)/probe_v6 $(BIN)/gdr_ckpt $(BIN)/gdr_probe $(BIN)/gdr_pin \
+         lower scripts $(BIN)/probe_v6 $(BIN)/gdr_ckpt $(BIN)/gdr_probe $(BIN)/gdr_pin $(BIN)/ckpt_race \
          $(LIB)/fi-shim/libcudart.so
 
 $(BIN) $(LIB) obj:
@@ -101,6 +102,10 @@ $(BIN)/gdr_probe: tests/gdr_probe.c | $(BIN)
 $(BIN)/gdr_pin: tests/gdr_pin.c | $(BIN)
 	gcc -O2 -g $(WARN) -I$(CUDA_HOME)/include -o $@ $< \
 	  -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs -lcudart -lcuda -lgdrapi
+
+$(BIN)/ckpt_race: tests/ckpt_race.c | $(BIN)
+	gcc -O2 -g $(WARN) -I$(CUDA_HOME)/include -o $@ $< \
+	  -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs -lcudart -lcuda -lpthread
 
 $(LIB)/fi-shim/libcudart.so: tests/fi_cudart_shim.c
 	mkdir -p $(dir $@)
