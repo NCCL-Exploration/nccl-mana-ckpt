@@ -203,24 +203,21 @@ CKPT_TOTAL_MS=$(((CKPT_DONE - CKPT_START) / 1000000))
 
 if [ $RESULT -eq 0 ]; then
   echo "PASS: Initial run completed successfully"
-
 else
   echo "WARN: Initial run exited with code $RESULT (may be expected after checkpoint)"
 fi
 
-# ─────────────────────────────────────────────────────────────────────
-#  Profiling — disable strict mode so stats commands don't kill script
-# ─────────────────────────────────────────────────────────────────────
+echo "==> Phase 1 completed. Inspecting checkpoint files..."
 set +eu
 
-# Checkpoint file stats
+# Checkpoint file stats using fast stat/ls (avoids Lustre OST block-walk hangs)
 CKPT_COUNT=0
 CKPT_SIZE_MB="N/A"
 CKPT_DIR_SIZE_MB="N/A"
 if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
   CKPT_COUNT=$(ls -1 ckpt_*.dmtcp | wc -l)
-  CKPT_SIZE_BYTES=$(du -csb ckpt_*.dmtcp | tail -1 | awk '{print $1}')
-  if [ -n "$CKPT_SIZE_BYTES" ]; then
+  CKPT_SIZE_BYTES=$(ls -l ckpt_*.dmtcp 2>/dev/null | awk '{s += $5} END {print s + 0}')
+  if [ -n "$CKPT_SIZE_BYTES" ] && [ "$CKPT_SIZE_BYTES" -gt 0 ]; then
     CKPT_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_BYTES / 1048576}")
   fi
 fi
@@ -228,8 +225,8 @@ fi
 PHASE1_MS=$(((CKPT_DONE - PHASE1_START) / 1000000))
 
 # Extract plugin checkpoint overheads from log
-NCCL_TIME_S=$(grep "\[NCCL PLUGIN\] Checkpoint overhead:" srun_launch.log | awk '{print $5}' | sort -n | tail -1 || echo "0")
-CUDA_TIME_S=$(grep "\[CUDA PLUGIN\] Checkpoint overhead:" srun_launch.log | awk '{print $5}' | sort -n | tail -1 || echo "0")
+NCCL_TIME_S=$(grep "\[NCCL PLUGIN\] Checkpoint overhead:" srun_launch.log 2>/dev/null | awk '{print $5}' | sort -n | tail -1 || echo "0")
+CUDA_TIME_S=$(grep "\[CUDA PLUGIN\] Checkpoint overhead:" srun_launch.log 2>/dev/null | awk '{print $5}' | sort -n | tail -1 || echo "0")
 
 if [ -z "$NCCL_TIME_S" ]; then NCCL_TIME_S=0; fi
 if [ -z "$CUDA_TIME_S" ]; then CUDA_TIME_S=0; fi
@@ -243,17 +240,17 @@ if [ "$CKPT_SIZE_MB" != "N/A" ] && [ "$DISK_TIME_S" != "0" ] && [ "$DISK_TIME_S"
   DISK_SPEED_MB_S=$(awk "BEGIN {printf \"%.2f\", $CKPT_SIZE_MB / $DISK_TIME_S}")
 fi
 
-
 # Phase 2: Restart from checkpoint
-# Restarts MUST go through "srun dmtcp_restart".
 RESTART_MS="N/A"
 if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
   echo ""
   echo "==> Phase 2: Restarting from checkpoint via dmtcp_restart"
 
-  # The coordinator was started with --exit-on-last, so it dies when
-  # Phase 1 processes disconnect after checkpoint.  Start a fresh one.
-  echo "Re-launching coordinator for restart phase..."
+  # Clean up and ensure coordinator from Phase 1 is fully stopped before restarting
+  $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
+  sleep 1
+
+  echo "Re-launching coordinator for restart phase on port $PORT..."
   $DMTCP_ROOT/bin/dmtcp_coordinator --daemon --coord-port $PORT --exit-on-last
   sleep 1
 
