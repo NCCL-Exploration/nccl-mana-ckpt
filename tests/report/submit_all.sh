@@ -45,11 +45,11 @@ if [ "${SMOKE:-0}" = 1 ] && [ "$PLAN" = netsplit ]; then
     exit 0
 fi
 if [ "${SMOKE:-0}" = 1 ]; then
-    export REPS=1 IS_CLASS=B NB_MAX_SIZE=1048576 CKPT_DELAY=5
-    export IS_TARGET_S=10 PT_TARGET_S=10 NB_SIZE_BUDGET_S=0.2
-    export IS_CKPT_TARGET_S=25 PT_CKPT_TARGET_S=25 NB_CKPT_TARGET_S=25
-    export BENCHES=${BENCHES:-"is pytorch nccl_latency nccl_bw nccl_allreduce nccl_alltoall"}
-    export CKPT_BENCHES=${CKPT_BENCHES:-"is pytorch nccl_bw nccl_allreduce"}
+    export REPS=1 IS_CLASS=B CG_CLASS=B MG_CLASS=B NB_MAX_SIZE=1048576 CKPT_DELAY=5
+    export IS_TARGET_S=10 CG_TARGET_S=10 MG_TARGET_S=10 PT_TARGET_S=10 NB_SIZE_BUDGET_S=0.2
+    export IS_CKPT_TARGET_S=25 CG_CKPT_TARGET_S=25 MG_CKPT_TARGET_S=25 PT_CKPT_TARGET_S=25 NB_CKPT_TARGET_S=25
+    export BENCHES=${BENCHES:-"is cg mg pytorch nccl_latency nccl_bw nccl_allreduce nccl_alltoall"}
+    export CKPT_BENCHES=${CKPT_BENCHES:-"is cg mg pytorch nccl_bw nccl_allreduce"}
     if [ "${INTERACTIVE:-0}" = 1 ]; then
         export GPN_LIST=2
         salloc -A "$ACCOUNT" -q interactive -t 00:30:00 -N 1 -C gpu --gpus-per-node=4 \

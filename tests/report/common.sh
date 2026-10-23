@@ -98,6 +98,12 @@ NCCL_RESTART=$NS_DIR/bin/nccl_restart
 : "${IS_CLASS:=C}"
 : "${IS_TARGET_S:=20}"
 : "${IS_CKPT_TARGET_S:=45}"
+: "${CG_CLASS:=C}"
+: "${CG_TARGET_S:=20}"
+: "${CG_CKPT_TARGET_S:=45}"
+: "${MG_CLASS:=C}"
+: "${MG_TARGET_S:=20}"
+: "${MG_CKPT_TARGET_S:=45}"
 : "${PT_WIDTH:=4096}"        # 2 x 4096^2 fp32 params -> ~134 MB of grads/step
 : "${PT_BATCH:=64}"
 : "${PT_TARGET_S:=20}"
@@ -212,7 +218,7 @@ layout_ok() {
     p2p_chain) [ "$nr" -ge 3 ] ;;
     p2p_multi) [ "$nr" -ge 4 ] ;;
     p2p_create | p2p_split | p2p_destroy) [ "$nr" -ge 2 ] ;;
-    is) [ $((nr & (nr - 1))) -eq 0 ] ;; # IS needs a power-of-two rank count
+    is | cg | mg) [ $((nr & (nr - 1))) -eq 0 ] ;; # NAS IS/CG/MG need a power-of-two rank count
     *) return 0 ;;
     esac
 }
@@ -223,6 +229,10 @@ bench_target_s() {
     case "$1:$2" in
     is:perf) echo "$IS_TARGET_S" ;;
     is:ckpt) echo "$IS_CKPT_TARGET_S" ;;
+    cg:perf) echo "$CG_TARGET_S" ;;
+    cg:ckpt) echo "$CG_CKPT_TARGET_S" ;;
+    mg:perf) echo "$MG_TARGET_S" ;;
+    mg:ckpt) echo "$MG_CKPT_TARGET_S" ;;
     pytorch:perf) echo "$PT_TARGET_S" ;;
     pytorch:ckpt) echo "$PT_CKPT_TARGET_S" ;;
     nccl_*:ckpt) echo "$NB_CKPT_TARGET_S" ;;
@@ -305,7 +315,7 @@ cleanup_leftovers() {
     # command lines that carry the pattern (this srun's and its tasks'). Check
     # new ones against the pattern itself: "[m]tcp_restart" would match the
     # "mtcp_restart" inside "[d]mtcp_restart".
-    local re='[n]etsplit/bin/netsplit-lh|/[n]ccl_bench |/[i]s_nccl_[A-Z]|[p]ytorch_minimal_test'
+    local re='[n]etsplit/bin/netsplit-lh|/[n]ccl_bench |/[i]s_nccl_[A-Z]|/[c]g_nccl_[A-Z]|/[m]g_nccl_[A-Z]|[p]ytorch_minimal_test'
     re+='|[d]mtcp_restart|(^|/)[m]tcp_restart'
     srun --overlap -N "${#JOB_NODES[@]}" --ntasks-per-node=1 --cpu-bind=none \
         pkill -9 -u "$USER" -f "$re" >/dev/null 2>&1

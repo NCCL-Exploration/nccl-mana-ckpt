@@ -23,7 +23,7 @@ import statistics
 import sys
 from collections import defaultdict
 
-HIGHER_IS_BETTER = {"pt_steps_per_s", "MBps_at_max", "is_mops"}
+HIGHER_IS_BETTER = {"pt_steps_per_s", "MBps_at_max", "is_mops", "cg_mops", "mg_mops"}
 BW_BENCHES = {"nccl_bw", "nccl_bibw"}
 SYSTEMS = ("dmtcp", "ns")
 CKPT_MODES = ("ckpt_resume", "ckpt_restart", "ns_resume", "ns_restart")

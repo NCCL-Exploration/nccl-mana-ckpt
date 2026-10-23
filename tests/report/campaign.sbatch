@@ -28,8 +28,8 @@ if [ "$PLAN" = netsplit ]; then
     : "${MODES:=native ns ns_resume ns_restart}"
 fi
 : "${GPN_LIST:=4}"
-: "${BENCHES:=is pytorch nccl_latency nccl_bw nccl_bibw nccl_allreduce nccl_allgather nccl_bcast nccl_reduce nccl_reduce_scatter nccl_alltoall}"
-: "${CKPT_BENCHES:=is pytorch nccl_bw nccl_allreduce nccl_alltoall}"
+: "${BENCHES:=is cg mg pytorch nccl_latency nccl_bw nccl_bibw nccl_allreduce nccl_allgather nccl_bcast nccl_reduce nccl_reduce_scatter nccl_alltoall}"
+: "${CKPT_BENCHES:=is cg mg pytorch nccl_bw nccl_allreduce nccl_alltoall}"
 : "${MODES:=native native_ref dmtcp ckpt_resume ckpt_restart}"
 use_job_nodes
 NN=${#JOB_NODES[@]}

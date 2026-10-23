@@ -69,6 +69,26 @@ is)
     READY_RE='^ +[0-9]+$' # rank 0 prints each iteration number
     OK_RE='Verification += +SUCCESSFUL'
     ;;
+cg)
+    load_modules cg
+    export CG_NCCL_ID_FILE=$RUN/cg_nccl_id.bin # shared FS: multi-node safe
+    rm -f "$CG_NCCL_ID_FILE"
+    export CG_ITER_SLEEP=0
+    if [ $PHASE = perf ]; then export CG_TARGET_SECONDS=$CG_TARGET_S; else export CG_TARGET_SECONDS=$CG_CKPT_TARGET_S; fi
+    CMD=("$BIN_DIR/cg_nccl_$CG_CLASS")
+    READY_RE='^ +[0-9]+ +[0-9.eE+-]+' # rank 0 prints each iteration line
+    OK_RE='Verification += +SUCCESSFUL'
+    ;;
+mg)
+    load_modules mg
+    export MG_NCCL_ID_FILE=$RUN/mg_nccl_id.bin # shared FS: multi-node safe
+    rm -f "$MG_NCCL_ID_FILE"
+    export MG_ITER_SLEEP=0
+    if [ $PHASE = perf ]; then export MG_TARGET_SECONDS=$MG_TARGET_S; else export MG_TARGET_SECONDS=$MG_CKPT_TARGET_S; fi
+    CMD=("$BIN_DIR/mg_nccl_$MG_CLASS")
+    READY_RE='^  iter +[0-9]+$' # rank 0 prints each iteration line
+    OK_RE='Verification += +SUCCESSFUL'
+    ;;
 pytorch)
     load_modules pytorch
     PT_ENV_DIR=$REPO_ROOT/tests/multi . "$REPO_ROOT/tests/multi/pytorch_dmtcp_env.sh"
@@ -146,7 +166,7 @@ RLAUNCHER=restart
     if [ "$LAUNCHER" = netsplit ]; then
         echo "NETSPLIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
     fi
-    env | grep -E '^(NCCL_|IS_|PT_|NB_|P2P_|USE_LIBUV|CKPT_|NETSPLIT_|FI_|DMTCP_PLUGINS)' | sort
+    env | grep -E '^(NCCL_|IS_|CG_|MG_|PT_|NB_|P2P_|USE_LIBUV|CKPT_|NETSPLIT_|FI_|DMTCP_PLUGINS)' | sort
 } >meta.env
 
 count() { grep -aEc "$1" "${@:2}" 2>/dev/null | awk -F: '{s += $NF} END {print s + 0}'; }
@@ -347,7 +367,8 @@ fi
 # Guard against a launch with the wrong number of ranks, which would otherwise
 # "pass" (e.g. a 1-rank collective). Each program reports its world size.
 case "$BENCH" in
-is) WS_RE="Total number of processes: +$NR\$" ;;
+is | mg) WS_RE="Total number of processes: +$NR\$" ;;
+cg) WS_RE="Number of active processes: +$NR\$" ;;
 pytorch) WS_RE="^\[pt\] rank 0/$NR process group ready" ;;
 nccl_*) WS_RE="^# nccl_bench [a-z_]+: $NR ranks" ;;
 p2p_*) WS_RE="^# p2p_pending [a-z-]+: $NR ranks" ;;
@@ -365,6 +386,22 @@ is)
     {
         echo "IS_TIME_S=$(grep -ahE 'Time in seconds' "${LOGS[@]}" | tail -n 1 | awk '{print $NF}')"
         echo "IS_PASSES=$(grep -ahoE -- '-> [0-9]+ passes' "${LOGS[@]}" | tail -n 1 | awk '{print $2}')"
+    } >>meta.env
+    ;;
+cg)
+    METRIC_NAME=cg_mops
+    METRIC=$(grep -ahE 'Mop/s total' "${LOGS[@]}" | tail -n 1 | awk '{print $NF}')
+    {
+        echo "CG_TIME_S=$(grep -ahE 'Time in seconds' "${LOGS[@]}" | tail -n 1 | awk '{print $NF}')"
+        echo "CG_PASSES=$(grep -ahoE -- '-> [0-9]+ passes' "${LOGS[@]}" | tail -n 1 | awk '{print $2}')"
+    } >>meta.env
+    ;;
+mg)
+    METRIC_NAME=mg_mops
+    METRIC=$(grep -ahE 'Mop/s total' "${LOGS[@]}" | tail -n 1 | awk '{print $NF}')
+    {
+        echo "MG_TIME_S=$(grep -ahE 'Time in seconds' "${LOGS[@]}" | tail -n 1 | awk '{print $NF}')"
+        echo "MG_PASSES=$(grep -ahoE -- '-> [0-9]+ passes' "${LOGS[@]}" | tail -n 1 | awk '{print $2}')"
     } >>meta.env
     ;;
 pytorch)

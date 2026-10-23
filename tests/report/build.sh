@@ -8,7 +8,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 : "${IS_CLASSES:=B C}"
-STEPS=${*:-dmtcp plugin is ncclbench p2ppending check}
+: "${CG_CLASSES:=B C}"
+: "${MG_CLASSES:=B C}"
+STEPS=${*:-dmtcp plugin is cg mg ncclbench p2ppending check}
 mkdir -p "$BIN_DIR" "$RESULTS_ROOT/build"
 
 for step in $STEPS; do
@@ -40,6 +42,32 @@ for step in $STEPS; do
             done
         )
         ;;
+    cg)
+        (
+            load_modules cg
+            src=$RESULTS_ROOT/build/cg
+            rm -rf "$src" && cp -r "$REPO_ROOT/tests/nas-benchmarks/CG" "$src"
+            rm -rf "$src"/ckpt_rank_* "$src"/*.log
+            for c in $CG_CLASSES; do
+                make -C "$src" clean >/dev/null
+                make -C "$src" cg_nccl CLASS="$c"
+                cp "$src/cg_nccl_exe" "$BIN_DIR/cg_nccl_$c"
+            done
+        )
+        ;;
+    mg)
+        (
+            load_modules mg
+            src=$RESULTS_ROOT/build/mg
+            rm -rf "$src" && cp -r "$REPO_ROOT/tests/nas-benchmarks/MG" "$src"
+            rm -rf "$src"/ckpt_rank_* "$src"/*.log
+            for c in $MG_CLASSES; do
+                make -C "$src" clean >/dev/null
+                make -C "$src" mg_nccl CLASS="$c"
+                cp "$src/mg_nccl_exe" "$BIN_DIR/mg_nccl_$c"
+            done
+        )
+        ;;
     ncclbench)
         (
             load_modules nccl
@@ -64,6 +92,8 @@ for step in $STEPS; do
             [ -e "$f" ] || { echo "MISSING $f"; ok=0; }
         done
         for c in $IS_CLASSES; do [ -x "$BIN_DIR/is_nccl_$c" ] || { echo "MISSING is_nccl_$c"; ok=0; }; done
+        for c in $CG_CLASSES; do [ -x "$BIN_DIR/cg_nccl_$c" ] || { echo "MISSING cg_nccl_$c"; ok=0; }; done
+        for c in $MG_CLASSES; do [ -x "$BIN_DIR/mg_nccl_$c" ] || { echo "MISSING mg_nccl_$c"; ok=0; }; done
         (load_modules pytorch && python -c 'import torch; print("torch", torch.__version__)') ||
             { echo "pytorch module unusable"; ok=0; }
         [ $ok = 1 ] && echo "build check: all artifacts present"
