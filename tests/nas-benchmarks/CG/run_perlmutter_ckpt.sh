@@ -89,6 +89,9 @@ fi
 echo "Writing checkpoints to $TMP_RUN_DIR..."
 rm -rf "$TMP_RUN_DIR"
 mkdir -p "$TMP_RUN_DIR"
+if command -v lfs >/dev/null 2>&1; then
+  lfs setstripe -c 4 -S 16M "$TMP_RUN_DIR" 2>/dev/null || true
+fi
 cp cg_nccl_exe "$TMP_RUN_DIR/"
 cd "$TMP_RUN_DIR"
 export CG_NCCL_ID_FILE="$TMP_RUN_DIR/cg_nccl_id.bin"
@@ -166,13 +169,30 @@ while true; do
 done
 sleep 2
 
+rm -f dmtcp_restart_script*.sh
 echo "Triggering checkpoint..."
 CKPT_START=$(date +%s%N)
 $DMTCP_CMD --coord-port $PORT --checkpoint
 CKPT_TRIGGER=$(date +%s%N)
-echo "Checkpoint triggered. Waiting for process to complete..."
+
+# DMTCP coordinator writes dmtcp_restart_script*.sh once all rank images are fully on disk.
+# Measuring this captures the actual checkpoint drain and write time instead of post-checkpoint compute.
+echo "Waiting for checkpoint images to finish writing to disk..."
+while true; do
+  if compgen -G 'dmtcp_restart_script*.sh' >/dev/null; then
+    CKPT_DONE=$(date +%s%N)
+    echo "Checkpoint images written to disk."
+    break
+  fi
+  if ! kill -0 $PID 2>/dev/null; then
+    CKPT_DONE=$(date +%s%N)
+    break
+  fi
+  sleep 0.05
+done
+
+echo "Waiting for initial run to complete..."
 wait $PID || true
-CKPT_DONE=$(date +%s%N)
 RESULT=${PIPESTATUS[0]:-$?}
 
 CKPT_TRIGGER_MS=$(((CKPT_TRIGGER - CKPT_START) / 1000000))
