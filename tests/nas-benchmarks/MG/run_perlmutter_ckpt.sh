@@ -35,8 +35,8 @@ echo "=== GPU Environment (nvidia-smi) ==="
 nvidia-smi || true
 echo "====================================="
 
-# Paths — adjust if your layout differs
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# Paths — under sbatch, $0 is in /var/spool/slurmd; use SLURM_SUBMIT_DIR
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
@@ -51,30 +51,36 @@ NCCL_PLUGIN=$ROOT_DIR/bin/libncclplugin.so
 CUDA_PLUGIN=$ROOT_DIR/dmtcp/plugin/cuda/libdmtcp_cuda.so
 PLUGIN="$NCCL_PLUGIN:$CUDA_PLUGIN"
 
-PORT=7783
+PORT=$((7783 + (${SLURM_JOB_ID:-0} % 1000)))
 CKPT_DELAY=8 # seconds before triggering checkpoint
 
 export NCCL_DEBUG=WARN
+export NCCL_RAS_ENABLE=0
 export NCCL_NET_GDR_LEVEL=PHB
 export DMTCP_SLEEP_ON_FAILURE=1
 
-cd $SCRIPT_DIR
+cd "$SCRIPT_DIR"
 
-# Clean up any stale coordinator or processes
+# Clean up any stale coordinator on this port
 $DMTCP_CMD --coord-port $PORT --quit --quiet 2>/dev/null || true
-killall -9 dmtcp_coordinator 2>/dev/null || true
 sleep 0.5
 
-# Ensure the benchmark is compiled with CLASS=A for longer execution in the source dir
-echo "Compiling benchmark (CLASS=A)..."
-make clean && make mg_nccl CLASS=A
+# Ensure the NCCL plugin and benchmark (CLASS=A) are compiled
+if [ ! -f "$NCCL_PLUGIN" ]; then
+  echo "Building libncclplugin.so..."
+  make -C "$ROOT_DIR" plugin
+fi
+echo "Compiling benchmark (CLASS=A) in $SCRIPT_DIR..."
+make clean
+make mg_nccl CLASS=A
 
 # Create and switch to node-local NVMe /tmp directory to eliminate I/O bottleneck
-TMP_RUN_DIR="/tmp/dmtcp_job_${SLURM_JOB_ID:-local}"
+TMP_RUN_DIR="/tmp/dmtcp_mg_job_${SLURM_JOB_ID:-local}"
 rm -rf "$TMP_RUN_DIR"
 mkdir -p "$TMP_RUN_DIR"
 cp mg_nccl_exe "$TMP_RUN_DIR/"
 cd "$TMP_RUN_DIR"
+export MG_NCCL_ID_FILE="$TMP_RUN_DIR/mg_nccl_id.bin"
 
 JOB_START=$(date +%s%N)
 
@@ -234,11 +240,15 @@ if ls ckpt_*.dmtcp 1>/dev/null 2>&1; then
     echo "PASS: Restart completed successfully"
   else
     echo "FAIL: Restart failed (exit code $RESTART_RC)"
-    echo "--- restart_launch.log ---"
-    cat restart_launch.log
   fi
+  echo "--- Phase 1 (srun_launch.log) ---"
+  cat srun_launch.log
+  echo "--- Phase 2 (restart_launch.log) ---"
+  cat restart_launch.log
+  cp -f srun_launch.log restart_launch.log "$SCRIPT_DIR/" 2>/dev/null || true
 else
   echo "No checkpoint directories found — skipping restart phase"
+  cat srun_launch.log || true
 fi
 
 JOB_DONE=$(date +%s%N)

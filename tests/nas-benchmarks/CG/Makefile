@@ -43,13 +43,13 @@ PORT           = 7783
 OPTFLAGS  = -O3 -g
 
 # NCCL build
-NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -Xcompiler -Wall
+NCCL_CFLAGS  = $(OPTFLAGS) -DCLASS=\'$(CLASS)\' -I../../../include -Xcompiler -Wall
 NCCL_LDFLAGS = -lnccl -lcudart -lm
 
 # Add include/lib paths only if set
 ifneq ($(NCCL_HOME),)
   NCCL_CFLAGS  += -I$(NCCL_HOME)/include
-  NCCL_LDFLAGS += -L$(NCCL_HOME)/lib
+  NCCL_LDFLAGS += -L$(NCCL_HOME)/lib -Xlinker -rpath=$(NCCL_HOME)/lib
 endif
 
 # MPI build

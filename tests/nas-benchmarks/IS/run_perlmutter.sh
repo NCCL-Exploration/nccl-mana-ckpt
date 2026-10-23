@@ -23,19 +23,21 @@ echo "=== GPU Environment (nvidia-smi) ==="
 nvidia-smi || true
 echo "====================================="
 
-# Paths
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# Paths (under sbatch, $0 is in /var/spool/slurmd; use SLURM_SUBMIT_DIR)
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
-cd $SCRIPT_DIR
+cd "$SCRIPT_DIR"
 
 # Compile benchmark with CLASS=A to match checkpoint run
-echo "Compiling benchmark (CLASS=A)..."
-make clean && make is_nccl CLASS=A
+echo "Compiling benchmark (CLASS=A) in $SCRIPT_DIR..."
+make clean
+make is_nccl CLASS=A
 
 echo "Starting baseline run (no checkpoint)..."
 RUN_START=$(date +%s%N)
 
 # Launch exactly like the checkpoint version (background processes) to isolate overheads
+export NCCL_RAS_ENABLE=0
 export NCCL_P2P_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_DMABUF_ENABLE=0
@@ -43,6 +45,8 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
+export IS_NCCL_ID_FILE="/tmp/is_nccl_id_${SLURM_JOB_ID:-$$}.bin"
+rm -f "$IS_NCCL_ID_FILE"
 
 ./is_nccl_exe 0 2 &
 ./is_nccl_exe 1 2 &
