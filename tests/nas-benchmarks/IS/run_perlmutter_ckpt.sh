@@ -3,7 +3,7 @@
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH -t 00:15:00
-#SBATCH -G 2
+#SBATCH -G 4
 #SBATCH -J nas-is-nccl-ckpt
 #SBATCH -o nas_is_nccl_ckpt_%j.out
 #SBATCH -e nas_is_nccl_ckpt_%j.err
@@ -119,22 +119,23 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_SHM_DISABLE=1
 export NCCL_NET_GDR_LEVEL=0
 export MPICH_GPU_SUPPORT_ENABLED=0
+NUM_RANKS=${NUM_RANKS:-4}
+echo "Running under DMTCP with $NUM_RANKS ranks..."
 (
-  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-    ./is_nccl_exe 0 2 &
-  $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
-    --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
-    ./is_nccl_exe 1 2 &
+  for ((r=0; r<NUM_RANKS; r++)); do
+    $DMTCP_LAUNCH -j --coord-port $PORT --no-gzip \
+      --with-plugin $NCCL_PLUGIN:$CUDA_PLUGIN \
+      ./is_nccl_exe $r $NUM_RANKS &
+  done
   wait
 ) >srun_launch.log 2>&1 &
 PID=$!
 
-# Wait for both processes to connect to coordinator
+# Wait for all processes to connect to coordinator
 echo "Waiting for processes to connect to coordinator..."
 while true; do
   PEERS=$($DMTCP_CMD --coord-port $PORT --status 2>/dev/null | grep NUM_PEERS | awk -F= '{print $2}' || echo "0")
-  if [ "$PEERS" != "" ] && [ "$PEERS" -ge 2 ]; then
+  if [ "$PEERS" != "" ] && [ "$PEERS" -ge $NUM_RANKS ]; then
     echo "Found $PEERS connected processes."
     break
   fi

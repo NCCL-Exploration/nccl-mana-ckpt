@@ -3,7 +3,7 @@
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH -t 00:10:00
-#SBATCH -G 2
+#SBATCH -G 4
 #SBATCH -J nas-is-nccl
 #SBATCH -o nas_is_nccl_%j.out
 #SBATCH -e nas_is_nccl_%j.err
@@ -54,8 +54,11 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 export IS_NCCL_ID_FILE="/tmp/is_nccl_id_${SLURM_JOB_ID:-$$}.bin"
 rm -f "$IS_NCCL_ID_FILE"
 
-./is_nccl_exe 0 2 &
-./is_nccl_exe 1 2 &
+NUM_RANKS=${NUM_RANKS:-4}
+echo "Running with $NUM_RANKS ranks..."
+for ((r=0; r<NUM_RANKS; r++)); do
+    ./is_nccl_exe $r $NUM_RANKS &
+done
 wait
 
 RUN_DONE=$(date +%s%N)

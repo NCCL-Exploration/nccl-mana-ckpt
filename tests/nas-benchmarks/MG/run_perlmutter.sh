@@ -3,7 +3,7 @@
 #SBATCH -C gpu
 #SBATCH -q shared
 #SBATCH -t 00:10:00
-#SBATCH -G 2
+#SBATCH -G 4
 #SBATCH -J nas-mg-nccl
 #SBATCH -o nas_mg_nccl_%j.out
 #SBATCH -e nas_mg_nccl_%j.err
@@ -55,8 +55,11 @@ export MG_REPEAT=3
 export MG_NCCL_ID_FILE="/tmp/mg_nccl_id_${SLURM_JOB_ID:-$$}.bin"
 rm -f "$MG_NCCL_ID_FILE"
 
-./mg_nccl_exe 0 2 &
-./mg_nccl_exe 1 2 &
+NUM_RANKS=${NUM_RANKS:-4}
+echo "Running with $NUM_RANKS ranks..."
+for ((r=0; r<NUM_RANKS; r++)); do
+    ./mg_nccl_exe $r $NUM_RANKS &
+done
 wait
 
 RUN_DONE=$(date +%s%N)
