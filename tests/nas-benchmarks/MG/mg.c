@@ -83,7 +83,7 @@
 #define T_LAST    9
 
 static int my_rank, comm_size, np_total, me;
-static int nm, nv, nr, nm2;
+static int nm, nv_size, nr, nm2;
 static int lt, lb, nit;
 static int is1, is2, is3, ie1, ie2, ie3;
 
@@ -179,12 +179,12 @@ static void alloc_space(void) {
     int ndim2 = log2_size - (log_p + 1) / 3;
 
     nm = 2 + (1 << lm);
-    nv = (2 + (1 << ndim1)) * (2 + (1 << ndim2)) * (2 + (1 << ndim3));
+    nv_size = (2 + (1 << ndim1)) * (2 + (1 << ndim2)) * (2 + (1 << ndim3));
     nm2 = 2 * nm * nm;
-    nr = (8 * (nv + nm * nm + 5 * nm + 14 * LT_DEFAULT - 7 * lm)) / 7;
+    nr = (8 * (nv_size + nm * nm + 5 * nm + 14 * LT_DEFAULT - 7 * lm)) / 7;
 
     u = (double *)calloc((size_t)(nr + 16), sizeof(double));
-    v = (double *)calloc((size_t)(nv + 16), sizeof(double));
+    v = (double *)calloc((size_t)(nv_size + 16), sizeof(double));
     r = (double *)calloc((size_t)(nr + 16), sizeof(double));
     for (int b = 1; b <= 4; b++) {
         buff[b] = (double *)calloc((size_t)(nm2 + 16), sizeof(double));
