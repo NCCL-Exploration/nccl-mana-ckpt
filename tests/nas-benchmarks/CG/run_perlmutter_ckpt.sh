@@ -80,8 +80,13 @@ echo "Compiling benchmark (CLASS=A) in $SCRIPT_DIR..."
 make clean
 make cg_nccl CLASS=A
 
-# Create and switch to node-local NVMe /tmp directory to eliminate I/O bottleneck
-TMP_RUN_DIR="/tmp/dmtcp_cg_job_${SLURM_JOB_ID:-local}"
+# Use Perlmutter high-speed Lustre $SCRATCH if available for fast multi-GB/s writes
+if [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH" ]; then
+  TMP_RUN_DIR="$SCRATCH/dmtcp_cg_job_${SLURM_JOB_ID:-$$}"
+else
+  TMP_RUN_DIR="/tmp/dmtcp_cg_job_${SLURM_JOB_ID:-$$}"
+fi
+echo "Writing checkpoints to $TMP_RUN_DIR..."
 rm -rf "$TMP_RUN_DIR"
 mkdir -p "$TMP_RUN_DIR"
 cp cg_nccl_exe "$TMP_RUN_DIR/"

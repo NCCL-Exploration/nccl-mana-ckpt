@@ -265,8 +265,11 @@ static void setup_submatrix_info(void) {
 }
 
 static void alloc_space(void) {
-    long nz_calc = (long)NA * (NONZER + 1) * (NONZER + 1) / comm_size +
-                   (long)NA * (NONZER + 2 + comm_size / 256) / npcols + 1024;
+    /* Allocate enough space for intermediate uncompressed matrix elements in sparse() */
+    long nz_calc = (long)NA * (NONZER + 1) * (NONZER + 1);
+    if (nz_calc < 2000000L) {
+        nz_calc = 2000000L;
+    }
     nz = (int)nz_calc;
     naa = NA;
     nzz = nz;
