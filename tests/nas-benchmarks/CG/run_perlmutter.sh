@@ -54,6 +54,7 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 export CG_NCCL_ID_FILE="/tmp/cg_nccl_id_${SLURM_JOB_ID:-$$}.bin"
 rm -f "$CG_NCCL_ID_FILE"
 
+unset SLURM_LOCALID SLURM_PROCID
 NUM_RANKS=${NUM_RANKS:-4}
 echo "Running with $NUM_RANKS ranks..."
 for ((r=0; r<NUM_RANKS; r++)); do

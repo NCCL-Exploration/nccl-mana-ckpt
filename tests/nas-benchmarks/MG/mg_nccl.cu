@@ -1237,10 +1237,15 @@ int main(int argc, char **argv) {
         deviceCount = 1;
     }
 
-    const char *local_env = getenv("SLURM_LOCALID");
-    if (local_env == NULL)
-        local_env = getenv("LOCAL_RANK");
-    int local_rank = local_env != NULL ? atoi(local_env) : my_rank;
+    /* By default, map rank directly to local device when invoked with args */
+    int local_rank = my_rank;
+    if (argc < 3) {
+        const char *local_env = getenv("SLURM_LOCALID");
+        if (local_env == NULL)
+            local_env = getenv("LOCAL_RANK");
+        if (local_env != NULL)
+            local_rank = atoi(local_env);
+    }
     printf("Rank %d using device %d of %d available devices\n", my_rank, local_rank % deviceCount,
            deviceCount);
     cudaSetDevice(local_rank % deviceCount);

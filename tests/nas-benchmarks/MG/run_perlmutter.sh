@@ -55,6 +55,7 @@ export MG_REPEAT=3
 export MG_NCCL_ID_FILE="/tmp/mg_nccl_id_${SLURM_JOB_ID:-$$}.bin"
 rm -f "$MG_NCCL_ID_FILE"
 
+unset SLURM_LOCALID SLURM_PROCID
 NUM_RANKS=${NUM_RANKS:-4}
 echo "Running with $NUM_RANKS ranks..."
 for ((r=0; r<NUM_RANKS; r++)); do
