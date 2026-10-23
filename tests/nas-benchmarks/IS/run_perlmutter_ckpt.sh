@@ -38,8 +38,14 @@ echo "====================================="
 # Ensure NCCL and CUDA libs are on LD_LIBRARY_PATH for srun-launched processes
 # export LD_LIBRARY_PATH=${NCCL_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# Paths — under sbatch, $0 is in /var/spool/slurmd; use SLURM_SUBMIT_DIR
-SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+# Paths
+if [ -f "$(dirname "$0")/Makefile" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    SCRIPT_DIR="$SLURM_SUBMIT_DIR"
+else
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 SCRIPT_DIR=${SCRIPT_DIR//\/global\/u1//global/homes}
 ROOT_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 ROOT_DIR=${ROOT_DIR//\/global\/u1//global/homes}
