@@ -63,12 +63,16 @@ if [ "${DMTCP_PLUGINS+set}" = set ]; then PLUGIN=$DMTCP_PLUGINS; fi
 : "${HANG_GRACE_S:=300}"     # s past the run's target before a running job counts as hung
 : "${TIME_GUARD:=1}"         # 1: campaign.sbatch skips runs that could outlast the job
 # NCCL settings applied identically to native, dmtcp and checkpoint runs:
-#   conservative  -- the set run_perlmutter_ckpt.sh is known to checkpoint with
+#   default       -- NCCL defaults within a node (P2P/NVLink, SHM, cuMem), as
+#                    the paper's methodology states (Section "Methodology")
 #   nogdr         -- NCCL defaults minus GPUDirect RDMA
-#   default       -- NCCL defaults (P2P/SHM/NVLS on)
-: "${NCCL_PROFILE:=conservative}"
+#   conservative  -- P2P/SHM/cuMem/NVLS/DMABUF off: the set
+#                    run_perlmutter_ckpt.sh checkpoints with, for diagnosis
+: "${NCCL_PROFILE:=default}"
 # Inter-node transport: socket (NCCL built-in TCP over hsn*; no /dev/cxi fds
-# for DMTCP to trip over) or ofi (the module default, AWS Libfabric on CXI).
+# for DMTCP to trip over; a restarted process cannot reopen OFI endpoints) or
+# ofi (the module default, AWS Libfabric on CXI). native_ref always uses ofi
+# with NCCL's defaults: the paper's "Cost of the Checkpoint-Safe Network".
 : "${NET_PROFILE:=socket}"
 
 # Run lengths are targets in seconds, not iteration counts: each benchmark

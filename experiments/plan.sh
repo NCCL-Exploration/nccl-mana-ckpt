@@ -20,7 +20,8 @@ MICRO_CKPT_MODES=${MICRO_CKPT_MODES:-"ckpt_resume ckpt_restart"}
 # on every GPU of 1, 2 and 4 nodes (4 GPUs each).
 SCALE_LAYOUTS=${SCALE_LAYOUTS:-"1x4 2x4 4x4"}
 SCALE_BENCHES=${SCALE_BENCHES:-"is cg mg pytorch"}
-SCALE_MODES=${SCALE_MODES:-"native dmtcp ckpt_resume ckpt_restart"}
+# native_ref (OFI, GDR) is the reference for the cost of the socket transport.
+SCALE_MODES=${SCALE_MODES:-"native native_ref dmtcp ckpt_resume ckpt_restart"}
 
 # E3 torchsave: torch.save / torch.load of the PyTorch model at TS_WIDTHS, on
 # the layouts of E2, plus a checkpointed PyTorch job at each width other than

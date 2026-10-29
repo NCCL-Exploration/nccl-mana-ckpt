@@ -54,18 +54,22 @@ part of the cut. (Commits 57477b5, c9274f3, 5d6f2c2, 7d721ca.)
 | 2x4 | 8 | E2, E3, E4 (2x2) |
 | 4x4 | 16 | E2, E3 |
 
-- **NCCL settings** (`NCCL_PROFILE=conservative`, `NET_PROFILE=socket`),
-  identical in every mode except `native_ref`: P2P/SHM/NVLS/cuMem/DMABUF off,
-  GPUDirect RDMA off, NCCL's socket transport between nodes, NCCL RAS off.
-  These are the settings the plugin checkpoints reliably with; `native_ref`
-  (NCCL's defaults: NVLink P2P, AWS-OFI on CXI, GDR) shows what they cost.
+- **NCCL settings** (`NCCL_PROFILE=default`, `NET_PROFILE=socket`),
+  identical in every mode except `native_ref`: within a node NCCL's standard
+  P2P (NVLink), shared-memory and cuMem transports; between nodes NCCL's TCP
+  socket transport, because a restarted process cannot reopen AWS-OFI
+  endpoints and GPUDirect RDMA registration fails after a CUDA checkpoint;
+  NCCL RAS off. This is the configuration of the paper's methodology.
+  `native_ref` (NCCL's defaults over AWS-OFI with GDR) shows what the socket
+  transport costs. `NCCL_PROFILE=conservative` (P2P/SHM/cuMem/NVLS off) is
+  there for diagnosing a failure that might come from an intra-node transport.
 
 ## Modes
 
 | Mode | What runs |
 |---|---|
 | `native` | the program under `srun`, no DMTCP: **the baseline** |
-| `native_ref` | as `native`, with NCCL's production defaults (E1 only) |
+| `native_ref` | as `native`, with NCCL's production defaults over AWS-OFI (E1, E2) |
 | `dmtcp` | under `dmtcp_launch` with the NCCL and CUDA plugins, no checkpoint |
 | `ckpt_resume` | `dmtcp`, one checkpoint `CKPT_DELAY` (10) s after the program's first progress report, then the same processes continue to the end |
 | `ckpt_restart` | `dmtcp`, one checkpoint, every process killed, `dmtcp_restart` on the same nodes and GPUs, run to the end |
@@ -106,7 +110,7 @@ Every GPU of 1, 2 and 4 nodes:
 | PyTorch DDP (`tests/multi/pytorch_minimal_test.py`) | `ProcessGroupNCCL`, bucketed allreduce | `PASS` on every rank + an exact `all_reduce` every step | steps/s, slowest rank |
 
 PyTorch: 2 x 4096^2 fp32 parameters (134 MB), batch 64, SGD with momentum.
-Modes `native`, `dmtcp`, `ckpt_resume`, `ckpt_restart`. A run counts only if
+Modes `native`, `native_ref`, `dmtcp`, `ckpt_resume`, `ckpt_restart`. A run counts only if
 the application verifies **after** the checkpoint (resume) or restart.
 
 Per checkpoint (`ckpt.csv`, raw per checkpoint in `raw/ckpts.csv`):
@@ -209,16 +213,18 @@ NAME=final experiments/collect.sh 20261030 20261102   # merge a rerun into one s
 
 writes `experiments/results/<name>/`:
 
-| File | Content | Paper |
+| File | Content | Paper section |
 |---|---|---|
 | `summary.md` | every table below, readable | start here |
-| `overhead.csv`, `tex/overhead.tex` | native vs. dmtcp, no checkpoint (E1 largest size, E2) | runtime overhead |
-| `micro_sizes.csv` | E1 per message size | latency / bandwidth plots |
-| `ckpt.csv`, `tex/ckpt.tex` | checkpoint, resume, restart (E1, E2, E3) | checkpoint cost, scaling plots |
-| `torchsave.csv` | E3 per width, policy, layout | torch.save breakdown |
-| `vs_torchsave.csv`, `tex/vs_torchsave.tex` | torch.save vs. transparent checkpoint, same model | the comparison |
-| `p2p.csv`, `tex/p2p.tex` | E4 verdicts | correctness |
-| `failures.csv` | every run that did not pass, its status and first error line | |
+| `overhead.csv`, `tex/overhead.tex` | native vs. dmtcp, no checkpoint (E1 largest size, E2) | Runtime Overhead |
+| `micro_sizes.csv` | E1 per message size | Runtime Overhead (per-call cost) |
+| `ckpt.csv`, `tex/ckpt.tex` | checkpoint, resume, restart (E1, E2, E3) | Checkpoint and Restart Cost |
+| `torchsave.csv` | E3 per width, policy, layout | Checkpoint and Restart Cost (the torch.save TODO) |
+| `vs_torchsave.csv`, `tex/vs_torchsave.tex` | torch.save vs. transparent checkpoint, same model | Checkpoint and Restart Cost |
+| `p2p.csv`, `tex/p2p.tex` | E4 verdicts | Correctness and Reliability |
+| `overhead.csv` (`native_ref` columns) | OFI reference vs. socket transport | Cost of the Checkpoint-Safe Network |
+| `tex/figure_data.tex` | pgfplots coordinates for `fig:overhead`, `fig:ckpt` (a, b), `fig:network`, and a new torch.save figure, in the format of the paper's `\addplot` lines | figures |
+| `failures.csv` | every run that did not pass, its status and first error line | correctness |
 | `raw/` | the campaign's raw CSVs, `campaign.txt`, `skipped.txt`, `sysinfo/` | artifact |
 
 It runs on a login node with no modules, copies only small files (logs and
