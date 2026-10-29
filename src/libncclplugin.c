@@ -1202,7 +1202,7 @@ static void rebuild_all_comms(void) {
     pthread_join(worker, NULL);
 
     gettimeofday(&end, NULL);
-    /* Parsed by tests/report/ -- keep the format. */
+    /* Parsed by experiments/lib/run_bench.sh -- keep the format. */
     printf("[NCCL PLUGIN] Rebuild overhead: %.6f seconds\n",
            (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0);
     fflush(stdout);

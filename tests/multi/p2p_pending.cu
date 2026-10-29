@@ -6,7 +6,7 @@
  *
  * Ranks come from Slurm (SLURM_PROCID, SLURM_NTASKS, SLURM_LOCALID), and the
  * ncclUniqueId goes through ID_FILE on a filesystem every rank sees, so no MPI
- * is needed. tests/report/run_bench.sh drives it (benchmarks p2p_recv_first,
+ * is needed. experiments/lib/run_bench.sh drives it (benchmarks p2p_recv_first,
  * p2p_send_first, p2p_chain and p2p_relay; see tests/multi/run_p2p_pending.sh).
  *
  * Every rank prints "[p2p] rank R in window" once its side is set up. The
