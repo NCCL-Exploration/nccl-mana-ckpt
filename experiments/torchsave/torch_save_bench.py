@@ -142,7 +142,7 @@ def main():
     if rank == 0:
         os.makedirs(os.path.dirname(os.path.abspath(args.csv)), exist_ok=True)
         out = open(args.csv, "w", newline="")
-        w = csv.DictWriter(out, fieldnames=fields)
+        w = csv.DictWriter(out, fieldnames=fields, lineterminator="\n")
         w.writeheader()
 
     all_ok = True

@@ -26,7 +26,8 @@ SKIPPED=$CAMPAIGN_DIR/skipped.txt
 for exp in $EXPERIMENTS; do
     plan_runs "$exp" "$NN" >"$CAMPAIGN_DIR/plan_${exp}_n$NN.txt" || continue
     echo "== $exp at $NN node(s): $(wc -l <"$CAMPAIGN_DIR/plan_${exp}_n$NN.txt") runs"
-    while read -r bench mode nn gpn rep envs; do
+    # The plan on fd 3: nothing a run starts (srun forwards stdin) can eat it.
+    while read -r -u 3 bench mode nn gpn rep envs; do
         [ -n "$bench" ] || continue
         # Skip a run that could outlast the job, rather than lose it half-done.
         if [ "$TIME_GUARD" = 1 ]; then
@@ -40,8 +41,8 @@ for exp in $EXPERIMENTS; do
         fi
         env $envs "$LIB_DIR/run_bench.sh" "$bench" "$mode" "$nn" "$gpn" "$rep" </dev/null
         # Nothing from a failed run may leak into the next one.
-        cleanup_leftovers
-    done <"$CAMPAIGN_DIR/plan_${exp}_n$NN.txt"
+        cleanup_leftovers </dev/null
+    done 3<"$CAMPAIGN_DIR/plan_${exp}_n$NN.txt"
 done
 
 echo "campaign $CAMPAIGN job $SLURM_JOB_ID done; collect with:"

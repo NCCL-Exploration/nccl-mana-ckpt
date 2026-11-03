@@ -118,8 +118,10 @@ def bench_order(b):
 def read_csv(path):
     if not os.path.exists(path):
         return []
-    with open(path) as f:
-        return list(csv.DictReader(f))
+    # Older torchsave.csv rows end in "\r,<run_dir>" (csv's \r\n before the
+    # harness appended the run directory): drop the stray \r.
+    with open(path, newline="\n") as f:  # split at \n only, so a stray \r stays in its line
+        return list(csv.DictReader(line.replace("\r", "") for line in f))
 
 
 def write_csv(path, rows):

@@ -317,8 +317,10 @@ cleanup_leftovers() {
     # command lines that carry the pattern (this srun's and its tasks').
     local re='/[n]ccl_bench |/[p]2p_pending |/[i]s_nccl_[A-Z]|/[c]g_nccl_[A-Z]|/[m]g_nccl_[A-Z]'
     re+='|[p]ytorch_minimal_test|[t]orch_save_bench|[d]mtcp_restart|(^|/)[m]tcp_restart'
+    # </dev/null: srun forwards its stdin to the tasks, and the caller's stdin
+    # may be the plan campaign.sbatch is reading.
     srun --overlap -N "${#JOB_NODES[@]}" --ntasks-per-node=1 --cpu-bind=none \
-        pkill -9 -u "$USER" -f "$re" >/dev/null 2>&1
+        pkill -9 -u "$USER" -f "$re" </dev/null >/dev/null 2>&1
     pkill -9 -u "$USER" -f '[d]mtcp_coordinator' 2>/dev/null
     return 0
 }

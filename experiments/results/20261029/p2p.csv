@@ -1,0 +1,3 @@
+scenario,nodes,gpus_per_node,mode,verdict,status,ckpt_s,rounds_max,drained
+recv_first,1,2,ckpt_resume,PASS,ok,21.848,27,0
+recv_first,2,1,ckpt_resume,PASS,ok,21.063,27,0

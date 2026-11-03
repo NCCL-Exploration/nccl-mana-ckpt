@@ -1,0 +1,11 @@
+campaign,bench,mode,nodes,gpus_per_node,nranks,rep,status,wall_s,metric_name,metric,ckpt_s,nccl_drain_s,image_files,image_bytes,write_MBps,resume_rebuild_s,restart_latency_s,restart_total_s,restart_rebuild_s,nccl_profile,net_profile,ckpt_delay_s,n_ckpt,n_restart,rounds_max,drained,run_dir
+20261029,nccl_latency,native,1,2,2,1,ok,15.269,us_at_max,884.13,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/nccl_latency/n1x2/native/rep1
+20261029,nccl_latency,native,2,1,2,1,ok,15.998,us_at_max,24431.85,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/nccl_latency/n2x1/native/rep1
+20261029,is,native,1,4,4,1,ok,29.451,is_mops,918.08,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/is/n1x4/native/rep1
+20261029,is,native,2,4,8,1,ok,27.577,is_mops,1245.46,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/is/n2x4/native/rep1
+20261029,torchsave,native,1,4,4,1,ok,195.186,job_save_s,0.410225,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/torchsave/n1x4/native/rep1
+20261029,torchsave,native,2,4,8,1,ok,197.448,job_save_s,0.414474,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/torchsave/n2x4/native/rep1
+20261029,p2p_recv_first,ckpt_resume,1,2,2,1,ok,26.996,,,21.848,19.1902,2,2.62734e+09,114.7,0.143213,,,,default,socket,1,1,0,27,0,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/p2p_recv_first/n1x2/ckpt_resume/rep1
+20261029,p2p_recv_first,ckpt_resume,2,1,2,1,ok,29.910,,,21.063,19.0545,2,2.16546e+09,98.0,0.178734,,,,default,socket,1,1,0,27,0,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/p2p_recv_first/n2x1/ckpt_resume/rep1
+20261029,is,native,4,4,16,1,ok,26.748,is_mops,2569.85,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/is/n4x4/native/rep1
+20261029,torchsave,native,4,4,16,1,ok,228.036,job_save_s,0.440183,,,,,,,,,,default,socket,,0,0,,,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261029/runs/torchsave/n4x4/native/rep1
