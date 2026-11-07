@@ -192,40 +192,18 @@ To ensure you have configured the environment correctly, you can run the followi
 
 ### Running on AICR
 
-For the AICR cluster, the user is expected to load the NCCL library themselves.
-Note: the AICR cluster has RTX PRO 6000 and B200 GPUs, both of which use the Blackwell architecture,
-which is supported from NCCL version 2.25 and on. Thus, we recommend downloading the library like so:
-```bash
-git clone https://github.com/NVIDIA/nccl.git
-cd nccl
-git checkout v2.29.2-1
-make src.build CUDA_HOME=$CUDA_HOME \
-	NVCC_GENCODE="-gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_120,code=sm_120"
-```
-The above make command builds for specifically the architecture of the B200 and the RTX PRO 6000 GPUs.
-After the above, the user would have to reconfigure nccl-mana-ckpt. See the "Quick Start" section.
-
-
 We recommend configuring the following modules (note, other CUDA and NCCL versions may work):
 
 ```bash
+module load neu/StdEnv
+module load gcc/12.5.0
+module load zlib-ng/2.2.4-gcc-12.5.0
 module load cuda/13.1.1
-module load yale/StdEnv
-module load OpenMPI/5.0.3-GCC-13.3.0
-```
-The above will load many additional modules. As a result, export the following environment variable, which by default conflicts with DMTCP:
-```bash
-export UCX_MEM_EVENTS=n
+module load openmpi/4.1.8-gcc-12.5.0-cuda-13.1.1
+module load NCCL/2.30.7
 ```
 
-Furthermore, the user is expected to load the NCCL library themselves. The below assumes it is loaded in the same home directory where nccl-mana-ckpt is:
-```bash
-export NCCL_HOME=$HOME/nccl-2.29.2/build
-export LD_LIBRARY_PATH=$NCCL_HOME/lib:$LD_LIBRARY_PATH
-export CPATH=$NCCL_HOME/include:$CPATH
-```
-
-Lastly, if the user has ``nccl-2.29.2`` built in their home directory, they can run the following checkpoint test script,
+Lastly, the user can run the following checkpoint test script,
 which automatically configures the above and loads a checkpointing test:
 ```bash
 sbatch $HOME/nccl-mana-ckpt/tests/nas-benchmarks/IS/run_aicr_ckpt.sh
