@@ -310,12 +310,16 @@ static void setup_submatrix_info(void) {
 /* Memory allocation and cleanup                                 */
 /*****************************************************************/
 static void alloc_space(void) {
-    /* Allocate enough space for intermediate uncompressed matrix elements in sparse() */
-    long nz_calc = (long)NA * (NONZER + 1) * (NONZER + 1);
-    if (nz_calc < 2000000L) {
-        nz_calc = 2000000L;
+    /* The bound on this rank's matrix elements (triples before sparse() sums
+     * duplicates), as NPB 3.4 MPI cg_data.f90 computes it. */
+    long long naz = NA;
+    naz = naz * (NONZER + 1) / comm_size * (NONZER + 1) + NONZER +
+          naz * (NONZER + 2 + comm_size / 256) / num_proc_cols;
+    if (naz > 0x7ffffff0LL) {
+        fprintf(stderr, "Rank %d: nz = %lld overflows int\n", my_rank, naz);
+        exit(1);
     }
-    nz = (int)nz_calc;
+    nz = (int)naz;
     naa = NA;
     nzz = nz;
 
@@ -324,15 +328,15 @@ static void alloc_space(void) {
     colidx = (int *)malloc((size_t)(nz + 2) * sizeof(int));
     rowstr = (int *)malloc((size_t)(NA + 4) * sizeof(int));
     iv = (int *)malloc((size_t)(2 * NA + 4) * sizeof(int));
-    arow = (int *)malloc((size_t)(NA + 2) * sizeof(int));
-    acol = (int *)malloc((size_t)NA * (NONZER + 1) * sizeof(int) + 16);
+    arow = (int *)malloc((size_t)(nz + 2) * sizeof(int));
+    acol = (int *)malloc((size_t)(nz + 2) * sizeof(int));
 
     a = (double *)malloc((size_t)(nz + 2) * sizeof(double));
     x = (double *)malloc(vec_len * sizeof(double));
     z = (double *)malloc(vec_len * sizeof(double));
     p = (double *)malloc(vec_len * sizeof(double));
     v = (double *)malloc((size_t)(NA + 4) * sizeof(double));
-    aelt = (double *)malloc((size_t)NA * (NONZER + 1) * sizeof(double) + 16);
+    aelt = (double *)malloc((size_t)(nz + 2) * sizeof(double));
 
     cudaMallocHost((void **)&q, vec_len * sizeof(double));
     cudaMallocHost((void **)&r, vec_len * sizeof(double));
@@ -622,10 +626,23 @@ static void vecset(int n, double v_arr[], int iv_arr[], int *nzv, int i, double 
     }
 }
 
-static void sprnvc(int n, int nz_req, int nn1, double v_arr[], int iv_arr[]) {
-    int nzv = 0;
+/*
+ * sprnvc, makea and sparse follow the MPI version of NPB 3.4 (cg.f90), not
+ * the serial one: every rank generates the whole random matrix but keeps only
+ * the elements of its block, rows firstrow..lastrow AND columns
+ * firstcol..lastcol. conj_grad indexes p and z by local column
+ * (colidx - firstcol + 1), so an element outside the column block would read
+ * outside them.
+ */
+static void sprnvc(int n, int nz_req, double v_arr[], int iv_arr[], int nzloc[], int mark[]) {
+    /* mark[1..n] is all zero on entry and is reset to zero before return. */
+    int nzv = 0, nzrow = 0, nn1 = 1;
     int ii, i;
     double vecelt, vecloc;
+
+    do {
+        nn1 = 2 * nn1;
+    } while (nn1 < n); /* the smallest power of two not less than n */
 
     while (nzv < nz_req) {
         vecelt = randlc(&tran, amult);
@@ -633,138 +650,89 @@ static void sprnvc(int n, int nz_req, int nn1, double v_arr[], int iv_arr[]) {
         i = icnvrt(vecloc, nn1) + 1;
         if (i > n)
             continue;
-
-        int dup = 0;
-        for (ii = 1; ii <= nzv; ii++) {
-            if (iv_arr[ii] == i) {
-                dup = 1;
-                break;
-            }
+        if (mark[i] == 0) {
+            mark[i] = 1;
+            nzrow = nzrow + 1;
+            nzloc[nzrow] = i;
+            nzv = nzv + 1;
+            v_arr[nzv] = vecelt;
+            iv_arr[nzv] = i;
         }
-        if (dup)
-            continue;
-
-        nzv++;
-        v_arr[nzv] = vecelt;
-        iv_arr[nzv] = i;
+    }
+    for (ii = 1; ii <= nzrow; ii++) {
+        mark[nzloc[ii]] = 0;
     }
 }
 
-static void sparse(double a_arr[], int colidx_arr[], int rowstr_arr[], int n, int nz_max,
-                   int nonzer_val, int arow_arr[], int acol_arr[], double aelt_arr[],
-                   int firstrow_val, int lastrow_val, double x_loc[], int mark[], int nzloc[],
-                   double rcond_val, double shift_val) {
+/* Builds the CSR block from the nnza [row, col, value] triples, summing
+ * duplicates and dropping zeros. */
+static void sparse(double a_arr[], int colidx_arr[], int rowstr_arr[], int n, int arow_arr[],
+                   int acol_arr[], double aelt_arr[], int firstrow_val, int lastrow_val,
+                   double x_arr[], int mark[], int nzloc[], int nnza) {
     int nrows = lastrow_val - firstrow_val + 1;
-    int i, j, j1, j2, nza, k, kk, nzrow, jcol;
-    double size, scale, ratio, va;
-    int ilow = firstrow_val;
-    int ihigh = lastrow_val;
-    int stride = nonzer_val + 1;
+    int i, j, jajp1, nza, k, nzrow;
+    double xi;
 
-    for (j = 1; j <= nrows + 1; j++) {
+    /* Count the triples in each row. */
+    for (j = 1; j <= n; j++) {
         rowstr_arr[j] = 0;
+        mark[j] = 0;
     }
-
-    for (i = 1; i <= n; i++) {
-        for (nza = 1; nza <= arow_arr[i]; nza++) {
-            j = acol_arr[(i - 1) * stride + nza];
-            if (j >= ilow && j <= ihigh) {
-                j = j - ilow + 2;
-                rowstr_arr[j] = rowstr_arr[j] + arow_arr[i];
-            }
-        }
+    rowstr_arr[n + 1] = 0;
+    for (nza = 1; nza <= nnza; nza++) {
+        j = (arow_arr[nza] - firstrow_val + 1) + 1;
+        rowstr_arr[j] = rowstr_arr[j] + 1;
     }
-
     rowstr_arr[1] = 1;
     for (j = 2; j <= nrows + 1; j++) {
         rowstr_arr[j] = rowstr_arr[j] + rowstr_arr[j - 1];
     }
-    nza = rowstr_arr[nrows + 1] - 1;
 
-    if (nza > nz_max) {
-        printf("Space for matrix elements exceeded in sparse\n");
-        printf("nza, nzmax = %d, %d\n", nza, nz_max);
-        exit(1);
+    /* Bucket sort of the triples on the row index. */
+    for (nza = 1; nza <= nnza; nza++) {
+        j = arow_arr[nza] - firstrow_val + 1;
+        k = rowstr_arr[j];
+        a_arr[k] = aelt_arr[nza];
+        colidx_arr[k] = acol_arr[nza];
+        rowstr_arr[j] = rowstr_arr[j] + 1;
     }
-
-    for (j = 1; j <= nrows; j++) {
-        x_loc[j] = 0.0;
-        mark[j] = 0;
-        nzloc[j] = 0;
+    /* rowstr[j] now points to the first element of row j+1. */
+    for (j = nrows; j >= 1; j--) {
+        rowstr_arr[j + 1] = rowstr_arr[j];
     }
+    rowstr_arr[1] = 1;
 
-    for (j = 1; j <= nrows; j++) {
-        for (k = rowstr_arr[j]; k <= rowstr_arr[j + 1] - 1; k++) {
-            a_arr[k] = 0.0;
-            colidx_arr[k] = 0;
-        }
-    }
-
-    size = 1.0;
-    ratio = pow(rcond_val, (1.0 / (double)n));
-
+    /* Generate the output rows by adding up the elements of each. */
+    nza = 0;
     for (i = 1; i <= n; i++) {
-        for (nza = 1; nza <= arow_arr[i]; nza++) {
-            j = acol_arr[(i - 1) * stride + nza];
-            if (j < ilow || j > ihigh)
-                continue;
-
-            scale = size * aelt_arr[(i - 1) * stride + nza];
-            for (nzrow = 1; nzrow <= arow_arr[i]; nzrow++) {
-                jcol = acol_arr[(i - 1) * stride + nzrow];
-                va = aelt_arr[(i - 1) * stride + nzrow] * scale;
-                if (jcol == j && j == i) {
-                    va = va + rcond_val - shift_val;
-                }
-
-                for (k = rowstr_arr[j - ilow + 1]; k <= rowstr_arr[j - ilow + 2] - 1; k++) {
-                    if (colidx_arr[k] > jcol) {
-                        for (kk = rowstr_arr[j - ilow + 2] - 2; kk >= k; kk--) {
-                            if (colidx_arr[kk] > 0) {
-                                a_arr[kk + 1] = a_arr[kk];
-                                colidx_arr[kk + 1] = colidx_arr[kk];
-                            }
-                        }
-                        colidx_arr[k] = jcol;
-                        a_arr[k] = 0.0;
-                        goto L40;
-                    } else if (colidx_arr[k] == 0) {
-                        colidx_arr[k] = jcol;
-                        goto L40;
-                    } else if (colidx_arr[k] == jcol) {
-                        nzloc[j - ilow + 1] = nzloc[j - ilow + 1] + 1;
-                        goto L40;
-                    }
-                }
-                printf("internal error in sparse: i=%d\n", i);
-                exit(1);
-            L40:
-                a_arr[k] = a_arr[k] + va;
+        x_arr[i] = 0.0;
+        mark[i] = 0;
+    }
+    jajp1 = rowstr_arr[1];
+    for (j = 1; j <= nrows; j++) {
+        nzrow = 0;
+        for (k = jajp1; k <= rowstr_arr[j + 1] - 1; k++) {
+            i = colidx_arr[k];
+            x_arr[i] = x_arr[i] + a_arr[k];
+            if (mark[i] == 0 && x_arr[i] != 0.0) {
+                mark[i] = 1;
+                nzrow = nzrow + 1;
+                nzloc[nzrow] = i;
             }
         }
-        size = size * ratio;
-    }
-
-    for (j = 2; j <= nrows; j++) {
-        nzloc[j] = nzloc[j] + nzloc[j - 1];
-    }
-
-    for (j = 1; j <= nrows; j++) {
-        if (j > 1) {
-            j1 = rowstr_arr[j] - nzloc[j - 1];
-        } else {
-            j1 = 1;
+        for (k = 1; k <= nzrow; k++) {
+            i = nzloc[k];
+            mark[i] = 0;
+            xi = x_arr[i];
+            x_arr[i] = 0.0;
+            if (xi != 0.0) {
+                nza = nza + 1;
+                a_arr[nza] = xi;
+                colidx_arr[nza] = i;
+            }
         }
-        j2 = rowstr_arr[j + 1] - nzloc[j] - 1;
-        nza = rowstr_arr[j];
-        for (k = j1; k <= j2; k++) {
-            a_arr[k] = a_arr[nza];
-            colidx_arr[k] = colidx_arr[nza];
-            nza = nza + 1;
-        }
-    }
-    for (j = 2; j <= nrows + 1; j++) {
-        rowstr_arr[j] = rowstr_arr[j] - nzloc[j - 1];
+        jajp1 = rowstr_arr[j + 1];
+        rowstr_arr[j + 1] = nza + rowstr_arr[1];
     }
 }
 
@@ -772,30 +740,63 @@ static void makea(int n, int nz_max, double a_arr[], int colidx_arr[], int rowst
                   int nonzer_val, int firstrow_val, int lastrow_val, int firstcol_val,
                   int lastcol_val, double rcond_val, int arow_arr[], int acol_arr[],
                   double aelt_arr[], double v_arr[], int iv_arr[], double shift_val) {
-    int iouter, ivelt, nzv, nn1;
+    int i, nnza, iouter, ivelt, ivelt1, irow, nzv, jcol;
     int ivc[NONZER + 2];
     double vc[NONZER + 2];
-    int stride = nonzer_val + 1;
+    double size, ratio, scale;
 
-    nn1 = 1;
-    do {
-        nn1 = 2 * nn1;
-    } while (nn1 < n);
+    size = 1.0;
+    ratio = pow(rcond_val, (1.0 / (double)n));
+    nnza = 0;
 
+    /* iv[n+1..2n] marks the positions sprnvc has generated. */
+    for (i = 1; i <= n; i++) {
+        iv_arr[n + i] = 0;
+    }
     for (iouter = 1; iouter <= n; iouter++) {
         nzv = nonzer_val;
-        sprnvc(n, nzv, nn1, vc, ivc);
+        sprnvc(n, nzv, vc, ivc, &iv_arr[0], &iv_arr[n]);
         vecset(n, vc, ivc, &nzv, iouter, 0.50);
-        arow_arr[iouter] = nzv;
         for (ivelt = 1; ivelt <= nzv; ivelt++) {
-            acol_arr[(iouter - 1) * stride + ivelt] = ivc[ivelt];
-            aelt_arr[(iouter - 1) * stride + ivelt] = vc[ivelt];
+            jcol = ivc[ivelt];
+            if (jcol < firstcol_val || jcol > lastcol_val)
+                continue;
+            scale = size * vc[ivelt];
+            for (ivelt1 = 1; ivelt1 <= nzv; ivelt1++) {
+                irow = ivc[ivelt1];
+                if (irow < firstrow_val || irow > lastrow_val)
+                    continue;
+                nnza = nnza + 1;
+                if (nnza > nz_max)
+                    goto overflow;
+                acol_arr[nnza] = jcol;
+                arow_arr[nnza] = irow;
+                aelt_arr[nnza] = vc[ivelt1] * scale;
+            }
+        }
+        size = size * ratio;
+    }
+
+    /* Add the identity * rcond to bound the smallest eigenvalue from below. */
+    for (i = firstrow_val; i <= lastrow_val; i++) {
+        if (i >= firstcol_val && i <= lastcol_val) {
+            nnza = nnza + 1;
+            if (nnza > nz_max)
+                goto overflow;
+            acol_arr[nnza] = i;
+            arow_arr[nnza] = i;
+            aelt_arr[nnza] = rcond_val - shift_val;
         }
     }
 
-    int nrows = lastrow_val - firstrow_val + 1;
-    sparse(a_arr, colidx_arr, rowstr_arr, n, nz_max, nonzer_val, arow_arr, acol_arr, aelt_arr,
-           firstrow_val, lastrow_val, v_arr, &iv_arr[0], &iv_arr[nrows], rcond_val, shift_val);
+    sparse(a_arr, colidx_arr, rowstr_arr, n, arow_arr, acol_arr, aelt_arr, firstrow_val,
+           lastrow_val, v_arr, &iv_arr[0], &iv_arr[n], nnza);
+    return;
+
+overflow:
+    printf("Space for matrix elements exceeded in makea\n");
+    printf("nnza, nzmax = %d, %d\n iouter = %d\n", nnza, nz_max, iouter);
+    exit(1);
 }
 
 /*****************************************************************/
