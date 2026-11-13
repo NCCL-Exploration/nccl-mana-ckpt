@@ -39,6 +39,19 @@ void nccl_seq_lock(void);
 void nccl_seq_unlock(void);
 int nccl_activity(void); /* threads inside a NCCL call or an open group region */
 
+/* Before the GPU checkpoint, with the gate closed: wait until every thread that
+ * calls NCCL and is expected back is parked at the gate (see nccl_wrappers.c).
+ * nccl_threads_resumed() leaves the checkpoint out of each thread's timing. */
+void nccl_hold_threads(void);
+void nccl_threads_resumed(void);
+
+/* Communicator creations this rank has entered and not finished; polls the
+ * non-blocking ones first. */
+int nccl_creating_poll(void);
+/* Some rank had a creation in flight at the last consensus round: the gate is
+ * open for everyone. Written by sequence_consensus() under the seq lock. */
+extern int g_creation_pending;
+
 /*
  * Resolve a real NCCL symbol when dlsym(RTLD_NEXT, ...) cannot see libnccl,
  * i.e. when the application reached it through an RTLD_LOCAL dlopen. Returns
@@ -57,6 +70,7 @@ ncclResult_t call_real_ncclSend(const void *sendbuff, size_t count, ncclDataType
 ncclResult_t call_real_ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int peer,
                                ncclComm_t real_comm, cudaStream_t stream);
 ncclResult_t call_real_ncclCommDestroy(ncclComm_t real_comm);
+ncclResult_t call_real_ncclCommFinalize(ncclComm_t real_comm);
 ncclResult_t call_real_ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId,
                                               int rank, ncclConfig_t *config);
 ncclResult_t call_real_ncclCommInitAll(ncclComm_t *comms, int ndev, const int *devlist);

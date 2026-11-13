@@ -1,0 +1,23 @@
+== date: 2026-10-29T19:15:46-07:00
+== slurm: job=60507309 nodes=nid[003949,003964]
+== repo: 6be972a189b396b818e1ba79cd462f92d8402e9d branch report 
+== dmtcp: 4.2.0 v4.2.0-29-gaeaa5461
+== plugin: 2026-10-29 12:01:45.859521755 -0700 41a1e86aab66fa3aca3f641071703faa
+== modules (NAS/nccl_bench)
+craype-x86-milan libfabric/2.3.1 craype-network-ofi xpmem/2.11.5-1.3_g73ade43320bc gcc-native/14 cray-dsmml/0.3.1 PrgEnv-gnu/8.7.0 cray-libsci/26.03.0 cray-mpich/9.1.0 craype/2.7.36 perftools-base/26.03.0 cpe/26.03 craype-accel-nvidia80 gpu/1.0 sqs/2.0 cudatoolkit/13.2 nccl/2.29.2-cu13 
+== nvcc: Cuda compilation tools, release 13.2, V13.2.78 Build cuda_13.2.r13.2/compiler.37668154_0 
+== nccl: 2 29 2 ""  (/global/common/software/nersc9/nccl/2.29.2-cu13)
+== nccl net plugin: libnccl-net.la libnccl-net.so libnccl-net.so.0 libnccl-net.so.0.0.0 
+== gcc: gcc (SUSE Linux) 14.3.0
+== libfabric: fi_info: 2.3.1 libfabric: 2.3.1 libfabric api: 2.3 
+== nccl_bench: 7d7c79e07971a2bc824bd938c305772c; links: linux-vdso.so.1 libnccl.so.2 libstdc++.so.6 libm.so.6 libgcc_s.so.1 libc.so.6 /lib64/ld-linux-x86-64.so.2 
+== python/torch: 3.12.13 torch 2.13.0+cu130 cuda 13.0 nccl 2.29.7
+== filesystem: /pscratch/sd/m/masonstu/nccl-ckpt-paper
+2158@kfi,2091@kfi:2283@kfi,2219@kfi:/scratch lustre   44P   30P   14P  69% /pscratch
+stripe_count:  1 stripe_size:   1048576 pattern:       raid0 stripe_offset: -1 pool:          original
+
+== config
+CAMPAIGN=20261029
+NCCL_PROFILE=default
+NET_PROFILE=socket
+REPS=3
