@@ -194,9 +194,9 @@ def write_figure_data(path, groups, vs):
                 if t:
                     rows_ck.append((f"{{{app_label(b)}, {lay(s)}}}", n_["mean"] if n_ else 0.0, t["mean"],
                                     img["mean"] / 2**30 if img else None))
-            rs = groups.get((b, s, "ckpt_restart"), [])
-            lat, rb = m(rs, "restart_latency_s"), m(rs, "restart_rebuild_s")
-            rows_rs.append((f"{{{app_label(b)}, {lay(s)}}}", rb and rb["mean"], lat and lat["mean"]))
+                    rs = groups.get((b, s, "ckpt_restart"), [])
+                    lat, rb = m(rs, "restart_latency_s"), m(rs, "restart_rebuild_s")
+                    rows_rs.append((f"{{{app_label(b)}, {lay(s)}}}", rb and rb["mean"], lat and lat["mean"]))
     if rows_ck:
         out.append("% fig:ckpt (a) Checkpoint")
         out.append("% yticklabels={" + ",".join(r[0] for r in rows_ck) + "}")
