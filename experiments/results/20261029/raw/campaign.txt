@@ -1,0 +1,6 @@
+campaign=20261029 experiments=micro scaling torchsave p2p submitted=2026-10-29T12:26:45-07:00 smoke=0
+repo=6be972a189b396b818e1ba79cd462f92d8402e9d 3 modified files
+dmtcp=aeaa5461a0a1a4ff7b29004d2e906ae8b0590795
+NCCL_PROFILE=default
+NET_PROFILE=socket
+REPS=3

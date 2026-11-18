@@ -222,6 +222,125 @@ static int test_reset_reopens(void) {
     return 0;
 }
 
+/*
+ * Point-to-point catch-up: a peer has posted a receive (or a send) this rank has
+ * not matched. The rank owes it the counterpart, so the gate must let its
+ * threads through until the counters reach what the peer posted -- and hold
+ * them once every pair is balanced.
+ */
+static int test_p2p_debt(void) {
+    vcomm_t *v;
+
+    registry_clear();
+    ckpt_pending = 1;
+    v = add_comm(1, 4, 4);
+    CHECK(v != NULL);
+    v->nranks = 3;
+
+    /* Collectives at target, no p2p target known yet: held. */
+    CHECK(gate_closed());
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(!vcomm_p2p_balanced(v)); /* unknown targets are not "balanced" */
+
+    /* Peer 1 posted a 4 KiB receive from us; we have sent nothing: let through. */
+    v->send_target[1] = 4096;
+    v->recv_target[1] = 0;
+    v->send_target[2] = 0;
+    v->recv_target[2] = 0;
+    CHECK(vcomm_p2p_owes(v));
+    CHECK(!gate_closed());
+
+    /* The application posts the send: balanced, held. */
+    v->sent_to[1] = 4096;
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(vcomm_p2p_balanced(v));
+    CHECK(gate_closed());
+
+    /* Peer 2 sent 1 KiB we have not received: let through until we post it. */
+    v->recv_target[2] = 1024;
+    CHECK(!gate_closed());
+    v->recvd_from[2] = 1024;
+    CHECK(gate_closed());
+
+    /* We are ahead of a peer (it owes us): not our debt, so held, but not
+     * balanced either -- the consensus waits for the peer. */
+    v->sent_to[2] = 512;
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(!vcomm_p2p_balanced(v));
+    CHECK(gate_closed());
+
+    /* What a give-up and resume()/restart() do: targets forgotten, gate held. */
+    vcomm_reset_p2p_targets(v);
+    CHECK(!vcomm_p2p_owes(v));
+    CHECK(gate_closed());
+    v->send_target[1] = 1 << 20;
+    vcomm_reset_seq();
+    CHECK(v->send_target[1] == -1 && v->recv_target[1] == -1);
+    CHECK(v->sent_to[1] == 4096); /* cumulative counters are kept */
+
+    printf("p2p debt opens the gate until the counterpart is posted: PASS\n");
+    return 0;
+}
+
+/*
+ * Lifecycle. A destroyed comm becomes a tombstone that keeps its final seq for
+ * the consensus but is invisible to the application and never held at the gate;
+ * a creation in flight anywhere opens the gate for everyone; a full registry
+ * reclaims the oldest tombstone.
+ */
+static int test_lifecycle(void) {
+    vcomm_t *world, *x;
+    int i, reclaimed;
+
+    registry_clear();
+    ckpt_pending = 1;
+    world = add_comm(1, 7, 7);
+    x = add_comm(2, 3, 3);
+    CHECK(world != NULL && x != NULL);
+    CHECK(gate_closed());
+    CHECK(vcomm_live_count() == 2);
+
+    /* Destroy counted as a step, then the tombstone. */
+    x->seq++;
+    vcomm_mark_destroyed(x);
+    CHECK(x->origin == VCOMM_DESTROYED);
+    CHECK(x->seq == 4);                       /* still published */
+    CHECK(vcomm_lookup(vcomm_handle(x)) == NULL); /* gone for the application */
+    CHECK(vcomm_live_count() == 1);
+    x->target = 9; /* even "behind", a tombstone never opens the gate */
+    CHECK(gate_closed());
+
+    /* A creation in flight somewhere: everyone runs. */
+    g_creation_pending = 1;
+    CHECK(!gate_closed());
+    g_creation_pending = 0;
+    CHECK(gate_closed());
+
+    /* Freed once a checkpoint's consensus has agreed. */
+    vcomm_free_tombstones();
+    CHECK(x->origin == VCOMM_FREE);
+    CHECK(vcomm_live_count() == 1);
+
+    /* A full registry reclaims the oldest tombstone instead of failing. */
+    registry_clear();
+    for (i = 0; i < MAX_VCOMMS; i++) {
+        vcomm_t *v = add_comm(100 + i, 0, 0);
+        CHECK(v != NULL);
+        if (i < 2)
+            vcomm_mark_destroyed(v);
+    }
+    reclaimed = vcomm_tombstones_reclaimed;
+    CHECK(add_comm(500, 0, 0) != NULL);
+    CHECK(vcomm_tombstones_reclaimed == reclaimed + 1);
+    CHECK(add_comm(501, 0, 0) != NULL);
+    CHECK(add_comm(502, 0, 0) == NULL); /* no tombstone left: full */
+
+    registry_clear();
+    ckpt_pending = 0;
+    printf("communicator lifecycle (tombstones, creations in flight): PASS\n");
+    return 0;
+}
+
 static int test_activity_starts_idle(void) {
     /* The quiesce waits on this before the drain posts anything. */
     CHECK(nccl_activity() == 0);
@@ -241,6 +360,10 @@ int main(void) {
     if (test_empty_registry())
         return 1;
     if (test_reset_reopens())
+        return 1;
+    if (test_p2p_debt())
+        return 1;
+    if (test_lifecycle())
         return 1;
     if (test_activity_starts_idle())
         return 1;

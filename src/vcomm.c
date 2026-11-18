@@ -11,6 +11,7 @@
 #include <string.h>
 
 vcomm_t g_vcomms[MAX_VCOMMS];
+int vcomm_tombstones_reclaimed;
 
 /*
  * Guards slot allocation and release only -- never held across a blocking NCCL
@@ -56,7 +57,21 @@ vcomm_status_t vcomm_new(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_
         goto done;
     }
 
-    for (i = 0; i < MAX_VCOMMS; i++) {
+    for (i = 0; i < MAX_VCOMMS + 1; i++) {
+        if (i == MAX_VCOMMS) {
+            /* Full. Reclaim the oldest tombstone: its members very likely all
+             * destroyed it long ago, but no checkpoint has confirmed it. */
+            int oldest = -1, j;
+            for (j = 0; j < MAX_VCOMMS; j++)
+                if (g_vcomms[j].origin == VCOMM_DESTROYED &&
+                    (oldest < 0 || g_vcomms[j].destroy_order < g_vcomms[oldest].destroy_order))
+                    oldest = j;
+            if (oldest < 0)
+                break;
+            vcomm_tombstones_reclaimed++; /* the caller reports it */
+            g_vcomms[oldest].origin = VCOMM_FREE;
+            i = oldest;
+        }
         if (g_vcomms[i].origin == VCOMM_FREE) {
             vcomm_t *v = &g_vcomms[i];
             memset(v, 0, sizeof(*v));
@@ -64,6 +79,7 @@ vcomm_status_t vcomm_new(vcomm_origin_t origin, const uint8_t ident[VCOMM_IDENT_
             memcpy(v->ident, ident, VCOMM_IDENT_LEN);
             v->clique = -1;
             v->target = -1;
+            vcomm_reset_p2p_targets(v);
             v->real = NULL;
             *out = v;
             st = VCOMM_OK;
@@ -88,10 +104,31 @@ void vcomm_free(vcomm_t *v) {
 int vcomm_live_count(void) {
     int i, n = 0;
     for (i = 0; i < MAX_VCOMMS; i++) {
-        if (g_vcomms[i].origin != VCOMM_FREE)
+        if (g_vcomms[i].origin != VCOMM_FREE && g_vcomms[i].origin != VCOMM_DESTROYED)
             n++;
     }
     return n;
+}
+
+void vcomm_mark_destroyed(vcomm_t *v) {
+    static uint64_t destroys;
+    if (v->origin != VCOMM_REMOTE) {
+        vcomm_free(v);
+        return;
+    }
+    pthread_mutex_lock(&g_alloc_lock);
+    v->real = NULL;
+    v->creating = 0;
+    v->destroy_order = ++destroys;
+    v->origin = VCOMM_DESTROYED;
+    pthread_mutex_unlock(&g_alloc_lock);
+}
+
+void vcomm_free_tombstones(void) {
+    int i;
+    for (i = 0; i < MAX_VCOMMS; i++)
+        if (g_vcomms[i].origin == VCOMM_DESTROYED)
+            vcomm_free(&g_vcomms[i]);
 }
 
 int vcomm_order(int order[MAX_VCOMMS]) {
@@ -122,8 +159,45 @@ void vcomm_reset_seq(void) {
         if (g_vcomms[i].origin != VCOMM_FREE) {
             g_vcomms[i].seq = 0;
             g_vcomms[i].target = -1;
+            vcomm_reset_p2p_targets(&g_vcomms[i]);
         }
     }
+}
+
+void vcomm_reset_p2p_targets(vcomm_t *v) {
+    int peer;
+    for (peer = 0; peer < VCOMM_MAX_RANKS; peer++) {
+        v->send_target[peer] = -1;
+        v->recv_target[peer] = -1;
+    }
+}
+
+/* Peers at or beyond VCOMM_MAX_RANKS are not counted (see peer_ok in the
+ * wrappers), so they are not part of the boundary either. */
+static int p2p_peers(const vcomm_t *v) {
+    return v->nranks < VCOMM_MAX_RANKS ? v->nranks : VCOMM_MAX_RANKS;
+}
+
+int vcomm_p2p_owes(const vcomm_t *v) {
+    int peer, n = p2p_peers(v);
+    for (peer = 0; peer < n; peer++) {
+        if (peer == v->rank)
+            continue;
+        if (v->send_target[peer] > v->sent_to[peer] || v->recv_target[peer] > v->recvd_from[peer])
+            return 1;
+    }
+    return 0;
+}
+
+int vcomm_p2p_balanced(const vcomm_t *v) {
+    int peer, n = p2p_peers(v);
+    for (peer = 0; peer < n; peer++) {
+        if (peer == v->rank)
+            continue;
+        if (v->send_target[peer] != v->sent_to[peer] || v->recv_target[peer] != v->recvd_from[peer])
+            return 0;
+    }
+    return 1;
 }
 
 /* ── identity ─────────────────────────────────────────────────────── */

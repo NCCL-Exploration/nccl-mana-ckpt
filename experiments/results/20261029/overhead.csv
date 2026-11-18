@@ -1,0 +1,6 @@
+bench,nodes,gpus_per_node,nranks,metric,higher_is_better,native_mean,native_sd,native_n,dmtcp_mean,dmtcp_sd,dmtcp_n,native_ref_mean,overhead_pct,wall_native_mean,wall_dmtcp_mean
+is,1,4,4,is_mops,1,918.08,0.0,1,,,,,,29.451,
+is,2,4,8,is_mops,1,1245.46,0.0,1,,,,,,27.577,
+is,4,4,16,is_mops,1,2569.85,0.0,1,,,,,,26.748,
+nccl_latency,1,2,2,us_at_max,0,884.13,0.0,1,,,,,,15.269,
+nccl_latency,2,1,2,us_at_max,0,24431.85,0.0,1,,,,,,15.998,

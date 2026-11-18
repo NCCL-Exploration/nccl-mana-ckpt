@@ -1,0 +1,2 @@
+bench,nodes,gpus_per_node,mode,rep,status,run_dir,first_error
+is,2,4,ckpt_restart,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/is/n2x4/ckpt_restart/rep1,

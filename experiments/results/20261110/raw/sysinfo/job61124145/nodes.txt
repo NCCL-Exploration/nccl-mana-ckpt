@@ -1,0 +1,48 @@
+mkdir: unrecognized option '--node'
+Try 'mkdir --help' for more information.
+== host: nid002381
+== os: SUSE Linux Enterprise Server 15 SP6; kernel 6.4.0-150600.23.135_15.0.45-cray_shasta_c
+== cpu
+CPU(s):                                  128
+Model name:                              AMD EPYC 7763 64-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      64
+Socket(s):                               1
+CPU(s) scaling MHz:                      69%
+CPU max MHz:                             3530.4929
+NUMA node(s):                            4
+== memory
+MemTotal:       263409956 kB
+== gpu
+index, name, memory.total [MiB], driver_version, pci.bus_id, clocks.max.sm [MHz]
+0, NVIDIA A100-SXM4-40GB, 40960 MiB, 580.178.04, 00000000:03:00.0, 1410 MHz
+1, NVIDIA A100-SXM4-40GB, 40960 MiB, 580.178.04, 00000000:41:00.0, 1410 MHz
+2, NVIDIA A100-SXM4-40GB, 40960 MiB, 580.178.04, 00000000:82:00.0, 1410 MHz
+3, NVIDIA A100-SXM4-40GB, 40960 MiB, 580.178.04, 00000000:C1:00.0, 1410 MHz
+CUDA Version                                           : 13.2
+== gpu topology
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	NV4	NV4	NV4	48-63,112-127	3		N/A
+GPU1	NV4	 X 	NV4	NV4	32-47,96-111	2		N/A
+GPU2	NV4	NV4	 X 	NV4	16-31,80-95	1		N/A
+GPU3	NV4	NV4	NV4	 X 	0-15,64-79	0		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+== network
+hsn0 speed=200000Mb/s
+hsn1 speed=200000Mb/s
+hsn2 speed=200000Mb/s
+hsn3 speed=200000Mb/s
+    domain: cxi0
+    domain: cxi1
+    domain: cxi2
+    domain: cxi3
+    fabric: cxi

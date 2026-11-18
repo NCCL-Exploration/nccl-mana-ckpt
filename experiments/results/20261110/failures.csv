@@ -1,0 +1,47 @@
+bench,nodes,gpus_per_node,mode,rep,status,run_dir,first_error
+cg,4,4,native,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native/rep1,VERIFICATION FAILED
+cg,4,4,native_ref,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native_ref/rep1,VERIFICATION FAILED
+cg,4,4,dmtcp,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/dmtcp/rep1,srun: error: nid002028: task 15: Segmentation fault
+cg,4,4,ckpt_resume,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_resume/rep1,srun: error: nid001025: task 3: Segmentation fault
+cg,4,4,ckpt_restart,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_restart/rep1,srun: error: nid001401: task 11: Segmentation fault
+cg,4,4,native,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native/rep2,VERIFICATION FAILED
+cg,4,4,native_ref,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native_ref/rep2,VERIFICATION FAILED
+cg,4,4,dmtcp,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/dmtcp/rep2,srun: error: nid001093: task 7: Segmentation fault
+cg,4,4,ckpt_resume,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_resume/rep2,srun: error: nid001401: task 10: Segmentation fault
+cg,4,4,ckpt_restart,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_restart/rep2,srun: error: nid002028: task 12: Segmentation fault
+cg,4,4,native,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native/rep3,VERIFICATION FAILED
+cg,4,4,native_ref,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/native_ref/rep3,VERIFICATION FAILED
+cg,4,4,dmtcp,3,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/dmtcp/rep3,srun: error: nid001093: task 7: Segmentation fault
+cg,4,4,ckpt_resume,3,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_resume/rep3,srun: error: nid002028: task 14: Segmentation fault
+cg,4,4,ckpt_restart,3,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n4x4/ckpt_restart/rep3,srun: error: nid001401: task 10: Segmentation fault
+cg,1,4,native,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native/rep1,VERIFICATION FAILED
+cg,1,4,native_ref,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native_ref/rep1,VERIFICATION FAILED
+cg,1,4,dmtcp,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/dmtcp/rep1,VERIFICATION FAILED
+cg,1,4,ckpt_resume,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_resume/rep1,VERIFICATION FAILED
+cg,1,4,ckpt_restart,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_restart/rep1,srun: error: nid002381: task 1: Segmentation fault
+cg,1,4,native,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native/rep2,VERIFICATION FAILED
+cg,1,4,native_ref,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native_ref/rep2,VERIFICATION FAILED
+cg,1,4,dmtcp,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/dmtcp/rep2,VERIFICATION FAILED
+cg,1,4,ckpt_resume,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_resume/rep2,srun: error: nid002381: task 1: Segmentation fault
+is,2,4,ckpt_restart,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/is/n2x4/ckpt_restart/rep1,srun: error: nid001464: task 7: Segmentation fault
+cg,1,4,ckpt_restart,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_restart/rep2,VERIFICATION FAILED
+cg,1,4,native,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native/rep3,VERIFICATION FAILED
+cg,1,4,native_ref,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/native_ref/rep3,VERIFICATION FAILED
+cg,1,4,dmtcp,3,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/dmtcp/rep3,srun: error: nid002381: task 1: Segmentation fault
+cg,1,4,ckpt_resume,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_resume/rep3,VERIFICATION FAILED
+cg,1,4,ckpt_restart,3,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n1x4/ckpt_restart/rep3,srun: error: nid002381: task 1: Segmentation fault
+cg,2,4,native,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native/rep1,VERIFICATION FAILED
+cg,2,4,native_ref,1,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native_ref/rep1,VERIFICATION FAILED
+cg,2,4,dmtcp,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/dmtcp/rep1,srun: error: nid001464: task 6: Segmentation fault
+cg,2,4,ckpt_resume,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_resume/rep1,srun: error: nid001464: task 7: Segmentation fault
+cg,2,4,ckpt_restart,1,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_restart/rep1,srun: error: nid001464: task 6: Segmentation fault
+cg,2,4,native,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native/rep2,VERIFICATION FAILED
+cg,2,4,native_ref,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native_ref/rep2,VERIFICATION FAILED
+cg,2,4,dmtcp,2,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/dmtcp/rep2,VERIFICATION FAILED
+cg,2,4,ckpt_resume,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_resume/rep2,[2026-11-10 20:32:30] nid001464:45000:45014 [1] misc/socket.cc:34 NCCL WARN socketProgress: Connection closed by remote peer nid001324<56272>
+cg,2,4,ckpt_restart,2,fail_startup,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_restart/rep2,srun: error: nid001324: task 1: Segmentation fault
+cg,2,4,native,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native/rep3,VERIFICATION FAILED
+cg,2,4,native_ref,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/native_ref/rep3,VERIFICATION FAILED
+cg,2,4,dmtcp,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/dmtcp/rep3,VERIFICATION FAILED
+cg,2,4,ckpt_resume,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_resume/rep3,VERIFICATION FAILED
+cg,2,4,ckpt_restart,3,fail_verify,/pscratch/sd/m/masonstu/nccl-ckpt-paper/20261110/runs/cg/n2x4/ckpt_restart/rep3,VERIFICATION FAILED
